@@ -7,6 +7,8 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 import re
+import shutil
+from pathlib import Path
 
 from tesseract_jax import __version__
 
@@ -28,7 +30,7 @@ release = __version__
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "myst_parser",
+    "myst_nb",  # This is myst-parser + jupyter notebook support
     "sphinx.ext.intersphinx",
     "sphinx.ext.autodoc",
     "sphinx.ext.napoleon",
@@ -65,3 +67,15 @@ html_theme_options = {
     "sidebar_hide_name": False,
 }
 html_css_files = ["custom.css"]
+
+
+# -- Handle Jupyter notebooks ------------------------------------------------
+
+# Do not execute notebooks during build (just take existing output)
+nb_execution_mode = "off"
+
+# Copy example notebooks to demo_notebooks folder on every build
+for example_notebook in Path("../demo").glob("*/demo.ipynb"):
+    # Copy the example notebook to the docs folder
+    dest = (Path("demo_notebooks") / example_notebook.parent.name).with_suffix(".ipynb")
+    shutil.copyfile(example_notebook, dest)

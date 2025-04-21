@@ -22,6 +22,7 @@ docs = [
     "sphinx_autodoc_typehints",
     "furo",
     "myst-parser",
+    "myst-nb",
 ]
 # TODO: add dev dependencies here *and* in requirements-dev.txt
 dev = [
