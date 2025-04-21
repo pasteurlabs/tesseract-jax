@@ -4,7 +4,7 @@
 
 `tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, `jvp`, and more.
 
-[Read the docs](https://tesseract-jax.readthedocs.io/en/latest/) |
+[Read the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/) |
 [Explore the demos](https://github.com/pasteurlabs/tesseract-jax/tree/main/demo) |
 [Report an issue](https://github.com/pasteurlabs/tesseract-jax/issues) |
 [Talk to the community](https://si-tesseract.discourse.group/) |
@@ -12,7 +12,7 @@
 
 ---
 
-The API of Tesseract-JAX consists of a single function, `apply_tesseract(tesseract_client, inputs)`, which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines.
+The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesseract_client, inputs)`](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/api.html#tesseract_jax.apply_tesseract), which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines.
 
 ## Quick start
 
