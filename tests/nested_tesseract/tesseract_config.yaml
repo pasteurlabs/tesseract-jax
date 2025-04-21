@@ -1,0 +1,4 @@
+name: "nested"
+version: "0.1.0"
+description: |
+  Unit tesseract that evaluates some functions of (nested) inputs and returns them as (nested) outputs

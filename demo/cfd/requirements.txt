@@ -1,0 +1,4 @@
+jax_cfd
+matplotlib
+pillow
+optax
