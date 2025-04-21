@@ -2,7 +2,7 @@
 
 ### Tesseract-JAX
 
-`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, `jvp`, and more.
+`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, and more.
 
 [Read the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/) |
 [Explore the demos](https://github.com/pasteurlabs/tesseract-jax/tree/main/demo) |
