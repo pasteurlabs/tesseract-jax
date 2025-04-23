@@ -62,7 +62,7 @@ The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesser
 
    vector_sum_grad = jax.grad(vector_sum)
    vector_sum_grad(x, y)
-    ```
+   ```
 
 > [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX.
