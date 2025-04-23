@@ -69,7 +69,7 @@ def apply_jit(inputs: dict) -> dict:
     def safe_norm(x, ord):
         # Compute the norm of a vector, adding a small epsilon to ensure
         # differentiability and avoid division by zero
-        return jnp.power(jnp.power(x, ord).sum() + 1e-8, 1 / ord)
+        return jnp.power(jnp.power(jnp.abs(x), ord).sum() + 1e-8, 1 / ord)
 
     return {
         "vector_add": {
