@@ -31,7 +31,8 @@ The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesser
 2. Build an example Tesseract:
 
    ```bash
-   $ tesseract build examples/simple/vectoradd_jax
+   $ git clone https://github.com/pasteurlabs/tesseract-jax
+   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
    ```
 
 3. Use it as part of a JAX program via the JAX-native `apply_tesseract` function:
