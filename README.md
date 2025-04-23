@@ -5,7 +5,7 @@
 `tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, and more.
 
 [Read the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/) |
-[Explore the demos](https://github.com/pasteurlabs/tesseract-jax/tree/main/demo) |
+[Explore the examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) |
 [Report an issue](https://github.com/pasteurlabs/tesseract-jax/issues) |
 [Talk to the community](https://si-tesseract.discourse.group/) |
 [Contribute](CONTRIBUTING.md)
@@ -31,7 +31,7 @@ The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesser
 2. Build an example Tesseract:
 
    ```bash
-   $ tesseract build demo/simple/vectoradd_jax
+   $ tesseract build examples/simple/vectoradd_jax
    ```
 
 3. Use it as part of a JAX program via the JAX-native `apply_tesseract` function:
@@ -44,26 +44,28 @@ The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesser
 
    # Load the Tesseract
    t = Tesseract.from_image("vectoradd_jax")
+   t.serve()
 
    # Run it with JAX
-   x = jnp.ones((1000, 1000))
-   y = jnp.ones((1000, 1000))
+   x = jnp.ones((1000,))
+   y = jnp.ones((1000,))
 
-   def vector_add(x, y):
-       return apply_tesseract(t, x, y)
+   def vector_sum(x, y):
+       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}})
+       return res["vector_add"]["result"].sum()
 
-    vector_add(x, y) # success!
+   vector_sum(x, y) # success!
 
-    # You can also use it with JAX transformations like JIT and grad
-    vector_add_jit = jax.jit(vector_add)
-    vector_add_jit(x, y)
+   # You can also use it with JAX transformations like JIT and grad
+   vector_sum_jit = jax.jit(vector_sum)
+   vector_sum_jit(x, y)
 
-    vector_add_grad = jax.grad(vector_add)
-    vector_add_grad(x, y)
+   vector_sum_grad = jax.grad(vector_sum)
+   vector_sum_grad(x, y)
     ```
 
 > [!TIP]
-> Now you're ready to jump into our [demos](https://github.com/pasteurlabs/tesseract-jax/tree/main/demo) for more examples on how to use Tesseract-JAX.
+> Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX.
 
 ## Sharp edges
 

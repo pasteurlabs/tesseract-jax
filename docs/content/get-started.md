@@ -1,4 +1,4 @@
-# Tesseract-JAX
+# Get started
 
 `tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, `jvp`, and more.
 
@@ -23,7 +23,7 @@ For more detailed installation instructions, please refer to the [Tesseract Core
 2. Build an example Tesseract:
 
    ```bash
-   $ tesseract build demo/simple/vectoradd_jax
+   $ tesseract build examples/simple/vectoradd_jax
    ```
 
 3. Use it as part of a JAX program:
@@ -36,26 +36,28 @@ For more detailed installation instructions, please refer to the [Tesseract Core
 
    # Load the Tesseract
    t = Tesseract.from_image("vectoradd_jax")
+   t.serve()
 
    # Run it with JAX
-   x = jnp.ones((1000, 1000))
-   y = jnp.ones((1000, 1000))
+   x = jnp.ones((1000,))
+   y = jnp.ones((1000,))
 
-   def vector_add(x, y):
-       return apply_tesseract(t, x, y)
+   def vector_sum(x, y):
+       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}})
+       return res["vector_add"]["result"].sum()
 
-    vector_add(x, y) # success!
+   vector_sum(x, y) # success!
 
-    # You can also use it with JAX transformations like JIT and grad
-    vector_add_jit = jax.jit(vector_add)
-    vector_add_jit(x, y)
+   # You can also use it with JAX transformations like JIT and grad
+   vector_sum_jit = jax.jit(vector_sum)
+   vector_sum_jit(x, y)
 
-    vector_add_grad = jax.grad(vector_add)
-    vector_add_grad(x, y)
-    ```
+   vector_sum_grad = jax.grad(vector_sum)
+   vector_sum_grad(x, y)
+   ```
 
 ```{tip}
-Now you're ready to jump into our [demos](https://github.com/pasteurlabs/tesseract-jax/tree/main/demo) for more examples on how to use Tesseract-JAX.
+Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for ways to use Tesseract-JAX.
 ```
 
 ## Sharp edges
@@ -75,9 +77,3 @@ Now you're ready to jump into our [demos](https://github.com/pasteurlabs/tessera
 ```{tip}
 When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
 ```
-
-## License
-
-Tesseract JAX is licensed under the [Apache License 2.0](https://github.com/pasteurlabs/tesseract-jax/LICENSE) and is free to use, modify, and distribute (under the terms of the license).
-
-Tesseract is a registered trademark of Pasteur Labs, Inc. and may not be used without permission.

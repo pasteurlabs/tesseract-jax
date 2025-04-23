@@ -21,8 +21,9 @@ docs = [
     "sphinx",
     "sphinx_autodoc_typehints",
     "furo",
-    "myst-parser",
     "myst-nb",
+    "sphinx_copybutton",
+    "sphinxext_opengraph",
 ]
 # TODO: add dev dependencies here *and* in requirements-dev.txt
 dev = [

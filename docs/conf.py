@@ -12,9 +12,9 @@ from pathlib import Path
 
 from tesseract_jax import __version__
 
-project = "tesseract-jax"
-copyright = "2025, The tesseract-jax Team @ Pasteur Labs"
-author = "The tesseract-jax Team @ Pasteur Labs"
+project = "Tesseract-JAX"
+copyright = "2025, Pasteur Labs"
+author = "The Tesseract-JAX Team @ Pasteur Labs + OSS contributors"
 
 # The short X.Y version
 parsed_version = re.match(r"(\d+\.\d+\.\d+)", __version__)
@@ -36,6 +36,10 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx_autodoc_typehints",
+    # Copy button for code blocks
+    "sphinx_copybutton",
+    # OpenGraph metadata for social media sharing
+    "sphinxext.opengraph",
 ]
 
 myst_enable_extensions = [
@@ -64,7 +68,7 @@ html_static_path = ["static"]
 html_theme_options = {
     "light_logo": "logo-light.png",
     "dark_logo": "logo-dark.png",
-    "sidebar_hide_name": False,
+    "sidebar_hide_name": True,
 }
 html_css_files = ["custom.css"]
 
@@ -75,7 +79,7 @@ html_css_files = ["custom.css"]
 nb_execution_mode = "off"
 
 # Copy example notebooks to demo_notebooks folder on every build
-for example_notebook in Path("../demo").glob("*/demo.ipynb"):
+for example_notebook in Path("../examples").glob("*/demo.ipynb"):
     # Copy the example notebook to the docs folder
     dest = (Path("demo_notebooks") / example_notebook.parent.name).with_suffix(".ipynb")
     shutil.copyfile(example_notebook, dest)
