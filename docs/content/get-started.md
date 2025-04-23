@@ -62,15 +62,16 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 
 ## Sharp edges
 
-- **Arrays vs. array-like objects**: Tesseract-JAX ist stricter than Tesseract Core in that all array inputs to Tesseracts must be JAX or NumPy arrays, not just any array-like (such as Python floats or lists). As a result, you may need to convert your inputs to JAX arrays before passing them to Tesseract-JAX, including scalar values.
+- **Arrays vs. array-like objects**: Tesseract-JAX is stricter than Tesseract Core in that all array inputs to Tesseracts must be JAX or NumPy arrays, not just any array-like (such as Python floats or lists). As a result, you may need to convert your inputs to JAX arrays before passing them to Tesseract-JAX, including scalar values.
 
   ```python
   from tesseract_core import Tesseract
   from tesseract_jax import apply_tesseract
 
-  tess = Tesseract.from_image("vectoradd")
-  apply_tesseract(tess, {"a": 1.0, "b": 2.0})  # ❌ raises an error
-  apply_tesseract(tess, {"a": jnp.array(1.0), "b": jnp.array(2.0)})  # ✅ works
+  tess = Tesseract.from_image("vectoradd_jax")
+  with Tesseract.from_image("vectoradd_jax") as tess:
+      apply_tesseract(tess, {"a": {"v": [1.0]}, "b": {"v": [2.0]}})  # ❌ raises an error
+      apply_tesseract(tess, {"a": {"v": jnp.array([1.0])}, "b": {"v": jnp.array([2.0])}})  # ✅ works
   ```
 - **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined for all operations. This is because JAX mandates abstract evaluation of all operations before they are executed. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
 
