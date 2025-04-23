@@ -2,7 +2,7 @@
 
 ### Tesseract-JAX
 
-`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of [JAX](https://github.com/jax-ml/jax) programs, with full support for function transformations like JIT, `grad`, and more.
+Tesseract-JAX is a lightweight extension to [Tesseract Core](https://github.com/pasteurlabs/tesseract-core) that makes Tesseracts look and feel like regular [JAX](https://github.com/jax-ml/jax) primitives, and makes them jittable, differentiable, and composable.
 
 [Read the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/) |
 [Explore the examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) |
@@ -12,7 +12,16 @@
 
 ---
 
-The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesseract_client, inputs)`](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/api.html#tesseract_jax.apply_tesseract), which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines.
+The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesseract_client, inputs)`](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/api.html#tesseract_jax.apply_tesseract), which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines:
+
+```python
+@jax.jit
+def vector_sum(x, y):
+    res = apply_tesseract(vectoradd_tesseract, {"a": {"v": x}, "b": {"v": y}})
+    return res["vector_add"]["result"].sum()
+
+jax.grad(vector_sum)(x, y) # 🎉
+```
 
 ## Quick start
 
