@@ -204,7 +204,7 @@ def jvp_jit(
         filtered_apply,
         [flatten_with_paths(inputs, include_paths=jvp_inputs)],
         [tangent_vector],
-    )
+    )[1]
 
 
 @eqx.filter_jit
