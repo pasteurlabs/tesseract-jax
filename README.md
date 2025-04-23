@@ -2,7 +2,7 @@
 
 ### Tesseract-JAX
 
-`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, and more.
+`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of [JAX](https://github.com/jax-ml/jax) programs, with full support for function transformations like JIT, `grad`, and more.
 
 [Read the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/) |
 [Explore the examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) |
@@ -86,6 +86,6 @@ The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesser
 
 ## License
 
-Tesseract JAX is licensed under the [Apache License 2.0](LICENSE) and is free to use, modify, and distribute (under the terms of the license).
+Tesseract-JAX is licensed under the [Apache License 2.0](LICENSE) and is free to use, modify, and distribute (under the terms of the license).
 
 Tesseract is a registered trademark of Pasteur Labs, Inc. and may not be used without permission.
