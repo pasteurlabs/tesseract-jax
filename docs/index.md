@@ -1,8 +1,10 @@
 # Tesseract-JAX
 
-```{include} content/get-started.md
-:start-line: 2
-```
+`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, `jvp`, and more.
+
+The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesseract_client, inputs)`](tesseract_jax.apply_tesseract), which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines.
+
+Now, learn how to [get started](content/get-started.md) with Tesseract-JAX, or explore the [API reference](content/api.md).
 
 ## License
 
