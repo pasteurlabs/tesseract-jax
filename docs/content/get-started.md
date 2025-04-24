@@ -1,9 +1,5 @@
 # Get started
 
-`tesseract-jax` executes [Tesseracts](https://github.com/pasteurlabs/tesseract-core) as part of JAX programs, with full support for function transformations like JIT, `grad`, `jvp`, and more.
-
-The API of Tesseract-JAX consists of a single function, [`apply_tesseract(tesseract_client, inputs)`](tesseract_jax.apply_tesseract), which is fully traceable by JAX. This enables end-to-end autodifferentiation and JIT compilation of Tesseract-based pipelines.
-
 ## Quick start
 
 ```{note}
@@ -23,7 +19,8 @@ For more detailed installation instructions, please refer to the [Tesseract Core
 2. Build an example Tesseract:
 
    ```bash
-   $ tesseract build examples/simple/vectoradd_jax
+   $ git clone https://github.com/pasteurlabs/tesseract-jax
+   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
    ```
 
 3. Use it as part of a JAX program:
