@@ -1,4 +1,5 @@
 jax_cfd
 matplotlib
+scipy
+tqdm
 pillow
-optax
