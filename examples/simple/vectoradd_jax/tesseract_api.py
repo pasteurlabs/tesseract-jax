@@ -65,16 +65,20 @@ def apply_jit(inputs: dict) -> dict:
     b_scaled = inputs["b"]["s"] * inputs["b"]["v"]
     add_result = a_scaled + b_scaled
     min_result = a_scaled - b_scaled
+
+    def safe_norm(x, ord):
+        # Compute the norm of a vector, adding a small epsilon to ensure
+        # differentiability and avoid division by zero
+        return jnp.power(jnp.power(jnp.abs(x), ord).sum() + 1e-8, 1 / ord)
+
     return {
         "vector_add": {
             "result": add_result,
-            "normed_result": add_result
-            / jnp.linalg.norm(add_result, ord=inputs["norm_ord"]),
+            "normed_result": add_result / safe_norm(add_result, ord=inputs["norm_ord"]),
         },
         "vector_min": {
             "result": min_result,
-            "normed_result": min_result
-            / jnp.linalg.norm(min_result, ord=inputs["norm_ord"]),
+            "normed_result": min_result / safe_norm(min_result, ord=inputs["norm_ord"]),
         },
     }
 
@@ -86,16 +90,16 @@ def apply(inputs: InputSchema) -> OutputSchema:
 
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
-    is_shapedtye_dict = lambda x: type(x) is dict and (x.keys() == {"shape", "dtype"})
-    is_shapedtye_struct = lambda x: isinstance(x, jax.ShapeDtypeStruct)
+    is_shapedtype_dict = lambda x: type(x) is dict and (x.keys() == {"shape", "dtype"})
+    is_shapedtype_struct = lambda x: isinstance(x, jax.ShapeDtypeStruct)
 
     jaxified_inputs = jax.tree.map(
-        lambda x: jax.ShapeDtypeStruct(**x) if is_shapedtye_dict(x) else x,
+        lambda x: jax.ShapeDtypeStruct(**x) if is_shapedtype_dict(x) else x,
         abstract_inputs.model_dump(),
-        is_leaf=is_shapedtye_dict,
+        is_leaf=is_shapedtype_dict,
     )
     dynamic_inputs, static_inputs = eqx.partition(
-        jaxified_inputs, filter_spec=is_shapedtye_struct
+        jaxified_inputs, filter_spec=is_shapedtype_struct
     )
 
     def wrapped_apply(dynamic_inputs):
@@ -105,10 +109,10 @@ def abstract_eval(abstract_inputs):
     jax_shapes = jax.eval_shape(wrapped_apply, dynamic_inputs)
     return jax.tree.map(
         lambda x: {"shape": x.shape, "dtype": str(x.dtype)}
-        if is_shapedtye_struct(x)
+        if is_shapedtype_struct(x)
         else x,
         jax_shapes,
-        is_leaf=is_shapedtye_struct,
+        is_leaf=is_shapedtype_struct,
     )
 
 

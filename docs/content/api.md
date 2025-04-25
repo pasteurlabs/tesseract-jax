@@ -1,4 +1,4 @@
-# API documentation
+# API reference
 
 ```{eval-rst}
 .. automodule:: tesseract_jax
