@@ -229,7 +229,7 @@ def tesseract_dispatch_lowering(
         array_args,
         ctx.avals_in,
         ctx.avals_out,
-        has_side_effect=False,
+        has_side_effect=True,
     )
     ctx.module_context.add_keepalive(keepalive)
     return result
