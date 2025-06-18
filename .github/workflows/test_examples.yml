@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+  pull_request:
+    paths:
+      - examples/**
+
 jobs:
   tests:
     strategy:
@@ -19,6 +23,7 @@ jobs:
         example:
           - simple
           - cfd
+          - fem-shapeopt
 
       fail-fast: false
 
