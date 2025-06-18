@@ -46,6 +46,11 @@ jobs:
       - name: Restore UV environment
         run: cp production.uv.lock uv.lock
 
+      - name: Install system requirements
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgl1-mesa-glx libglib2.0-0
+
       - name: Install dev requirements
         run: |
           uv sync --extra dev --frozen
