@@ -12,6 +12,8 @@ from pathlib import Path
 
 from tesseract_jax import __version__
 
+here = Path(__file__).parent.resolve()
+
 project = "Tesseract-JAX"
 copyright = "2025, Pasteur Labs"
 author = "The Tesseract-JAX Team @ Pasteur Labs + OSS contributors"
@@ -78,8 +80,9 @@ html_css_files = ["custom.css"]
 # Do not execute notebooks during build (just take existing output)
 nb_execution_mode = "off"
 
-# Copy example notebooks to demo_notebooks folder on every build
-for example_notebook in Path("../examples").glob("*/demo.ipynb"):
-    # Copy the example notebook to the docs folder
-    dest = (Path("demo_notebooks") / example_notebook.parent.name).with_suffix(".ipynb")
-    shutil.copyfile(example_notebook, dest)
+# Copy example notebooks to docs/examples folder on every build
+for example_dir in Path("../examples").glob("*/"):
+    # Copy the example directory to the docs folder
+    shutil.copytree(
+        example_dir, here / "examples" / example_dir.name, dirs_exist_ok=True
+    )

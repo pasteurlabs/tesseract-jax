@@ -13,7 +13,7 @@ def vector_sum(x, y):
 jax.grad(vector_sum)(x, y) # 🎉
 ```
 
-Want to learn more? See how to [get started](content/get-started.md) with Tesseract-JAX, explore the [API reference](content/api.md), or learn by [example](demo_notebooks/simple.ipynb).
+Want to learn more? See how to [get started](content/get-started.md) with Tesseract-JAX, explore the [API reference](content/api.md), or learn by [example](examples/simple/demo.ipynb).
 
 ## License
 
@@ -36,8 +36,9 @@ content/api
 :maxdepth: 2
 :hidden:
 
-demo_notebooks/simple.ipynb
-demo_notebooks/cfd.ipynb
+examples/simple/demo.ipynb
+examples/cfd/demo.ipynb
+examples/fem-shapeopt/demo.ipynb
 ```
 
 ```{toctree}
