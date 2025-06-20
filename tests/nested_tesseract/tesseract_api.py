@@ -81,6 +81,17 @@ def vector_jacobian_product(
     return out
 
 
+def jacobian(inputs: InputSchema, jac_inputs: set[str], jac_outputs: set[str]):
+    jac = {dy: {dx: [0.0, 0.0, 0.0] for dx in jac_inputs} for dy in jac_outputs}
+
+    if "scalars.a" in jac_inputs and "scalars.a" in jac_outputs:
+        jac["scalars.a"]["scalars.a"] = 10.0
+    if "vectors.v" in jac_inputs and "vectors.v" in jac_outputs:
+        jac["vectors.v"]["vectors.v"] = [[10.0, 0, 0], [0, 10.0, 0], [0, 0, 10.0]]
+
+    return jac
+
+
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
     return {
