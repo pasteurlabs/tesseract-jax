@@ -359,7 +359,6 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
