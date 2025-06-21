@@ -250,12 +250,6 @@ def tesseract_dispatch_batching(
         for arg, ax in zip(array_args, axes, strict=True)
     ]
 
-    # if output_pytreedef is not None:
-    #     output_pytreedef_expanded = tuple(
-    #         None if layout is None else tuple(n + 1 for n in layout) + (0,)
-    #         for layout in output_pytreedef
-    #     )
-
     is_batched_mask = [d is not batching.not_mapped for d in axes]
     unbatched_args, batched_args = split_args(new_args, is_batched_mask)
 
@@ -272,8 +266,7 @@ def tesseract_dispatch_batching(
             eval_func=eval_func,
         )
 
-    g = lambda _, x: ((), _batch_fun(x))
-    _, outvals = jax.lax.scan(g, (), batched_args)
+    outvals = jax.lax.map(_batch_fun, batched_args)
 
     return tuple(outvals), (0,) * len(outvals)
 
