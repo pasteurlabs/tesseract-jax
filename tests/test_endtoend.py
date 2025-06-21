@@ -1,6 +1,8 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from functools import partial
+
 import jax
 import numpy as np
 import pytest
@@ -36,7 +38,7 @@ def _assert_pytree_isequal(a, b, rtol=None, atol=None):
             else:
                 assert a_elem == b_elem, f"Values are different: {a_elem} != {b_elem}"
         except AssertionError as e:
-            failures.append(a_path, str(e))
+            failures.append((a_path, str(e)))
 
     if failures:
         msg = "\n".join(f"Path: {path}, Error: {error}" for path, error in failures)
@@ -146,6 +148,90 @@ def test_univariate_tesseract_vjp(served_univariate_tesseract_raw, use_jit):
     vjp_raw = f_vjp_raw(primal_raw)
     vjp_raw = {"x": vjp_raw[0], "y": vjp_raw[1]}
     _assert_pytree_isequal(vjp, vjp_raw)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+@pytest.mark.parametrize(
+    "jacfun", [partial(jax.jacfwd, argnums=(0, 1)), partial(jax.jacrev, argnums=(0, 1))]
+)
+def test_univariate_tesseract_jacobian(
+    served_univariate_tesseract_raw, use_jit, jacfun
+):
+    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+
+    # make things callable without keyword args
+    @jacfun
+    def f(x, y):
+        return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))["result"]
+
+    rosenbrock_raw = jacfun(rosenbrock_impl)
+    if use_jit:
+        f = jax.jit(f)
+        rosenbrock_raw = jax.jit(rosenbrock_raw)
+
+    x, y = np.array(0.0), np.array(0.0)
+    jac = f(x, y)
+
+    # Test against Tesseract client
+    jac_ref = rosenbrock_tess.jacobian(
+        inputs=dict(x=x, y=y), jac_inputs=["x", "y"], jac_outputs=["result"]
+    )
+
+    # Convert from nested dict to nested tuplw
+    jac_ref = tuple((jac_ref["result"]["x"], jac_ref["result"]["y"]))
+    _assert_pytree_isequal(jac, jac_ref)
+
+    # Test against direct implementation
+    jac_raw = rosenbrock_raw(x, y)
+    _assert_pytree_isequal(jac, jac_raw)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
+    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+
+    # make things callable without keyword args
+    def f(x, y):
+        return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))["result"]
+
+    # add one batch dimension
+    for axes in [(0, 0), (0, None), (None, 0)]:
+        x = np.arange(3) if axes[0] is not None else np.array(0.0)
+        y = np.arange(3) if axes[1] is not None else np.array(0.0)
+        f_vmapped = jax.vmap(f, in_axes=axes)
+        raw_vmapped = jax.vmap(rosenbrock_impl, in_axes=axes)
+
+        if use_jit:
+            f_vmapped = jax.jit(f_vmapped)
+            raw_vmapped = jax.jit(raw_vmapped)
+
+        result = f_vmapped(x, y)
+        result_raw = raw_vmapped(x, y)
+
+        _assert_pytree_isequal(result, result_raw)
+
+        # add an additional batch dimension
+        for extra_dim in [0, 1, -1]:
+            if axes[0] is not None:
+                x = np.arange(6).reshape(2, 3)
+            if axes[1] is not None:
+                y = np.arange(6).reshape(2, 3)
+
+            additional_axes = tuple(
+                extra_dim if ax is not None else None for ax in axes
+            )
+
+            f_vmappedtwice = jax.vmap(f_vmapped, in_axes=additional_axes)
+            raw_vmappedtwice = jax.vmap(raw_vmapped, in_axes=additional_axes)
+
+            if use_jit:
+                f_vmappedtwice = jax.jit(f_vmappedtwice)
+                raw_vmappedtwice = jax.jit(raw_vmappedtwice)
+
+            result = f_vmappedtwice(x, y)
+            result_raw = raw_vmappedtwice(x, y)
+
+            _assert_pytree_isequal(result, result_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -284,6 +370,58 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
     # JAX vjp returns a flat tuple, so unflatten it to match the Tesseract output (dict with keys vjp_inputs)
     vjp = {"scalars.a": vjp[0], "vectors.v": vjp[1]}
     _assert_pytree_isequal(vjp, vjp_ref)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+@pytest.mark.parametrize(
+    "jacfun", [partial(jax.jacfwd, argnums=(0, 1)), partial(jax.jacrev, argnums=(0, 1))]
+)
+def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jacfun):
+    nested_tess = Tesseract(served_nested_tesseract_raw)
+    a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
+    v, w = (
+        np.array([1.0, 2.0, 3.0], dtype="float32"),
+        np.array([5.0, 7.0, 9.0], dtype="float32"),
+    )
+
+    @jacfun
+    def f(a, v):
+        return apply_tesseract(
+            nested_tess,
+            inputs=dict(
+                scalars={"a": a, "b": b},
+                vectors={"v": v, "w": w},
+                other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
+            ),
+        )
+
+    if use_jit:
+        f = jax.jit(f)
+
+    jac = f(a, v)
+
+    jac_ref = nested_tess.jacobian(
+        inputs=dict(
+            scalars={"a": a, "b": b},
+            vectors={"v": v, "w": w},
+            other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
+        ),
+        jac_inputs=["scalars.a", "vectors.v"],
+        jac_outputs=["scalars.a", "vectors.v"],
+    )
+    # JAX returns a 2-layered nested dict containing tuples of arrays
+    # we need to flatten it to match the Tesseract output (2 layered nested dict of arrays)
+    jac = {
+        "scalars.a": {
+            "scalars.a": jac["scalars"]["a"][0],
+            "vectors.v": jac["scalars"]["a"][1],
+        },
+        "vectors.v": {
+            "scalars.a": jac["vectors"]["v"][0],
+            "vectors.v": jac["vectors"]["v"][1],
+        },
+    }
+    _assert_pytree_isequal(jac, jac_ref)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
