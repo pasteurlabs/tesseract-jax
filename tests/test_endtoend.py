@@ -241,7 +241,9 @@ def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_apply(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_tesseract_api(
+        "tests/nested_tesseract/tesseract_api.py"
+    )
     a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
     v, w = (
         np.array([1.0, 2.0, 3.0], dtype="float32"),
@@ -427,6 +429,69 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jacfun)
         },
     }
     _assert_pytree_isequal(jac, jac_ref)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_nested_tesseract_vmap(served_nested_tesseract_raw, use_jit):
+    nested_tess = Tesseract(served_nested_tesseract_raw)
+    b = np.array(2.0, dtype="float32")
+    w = np.array([5.0, 7.0, 9.0], dtype="float32")
+
+    def f(a, v, s, i):
+        return apply_tesseract(
+            nested_tess,
+            inputs={
+                "scalars": {"a": a, "b": b},
+                "vectors": {"v": v, "w": w},
+                "other_stuff": {"s": s, "i": i, "f": 2.718},
+            },
+        )
+
+    def f_raw(a, v, s, i):
+        return {
+            "scalars": {"a": a * 10 + b, "b": b},
+            "vectors": {"v": v * 10 + w, "w": w},
+        }
+
+    # add one batch dimension
+    for a_axis in [None, 0]:
+        for v_axis in [None, -1, 0, 1]:
+            if a_axis is None and v_axis is None:
+                continue
+            if a_axis == 0:
+                a = np.arange(4, dtype="float32")
+            else:
+                a = np.array(0.0, dtype="float32")
+            if v_axis == 0:
+                v = np.arange(12, dtype="float32").reshape((4, 3))
+            elif v_axis in [-1, 1]:
+                v = np.arange(12, dtype="float32").reshape((3, 4))
+            else:
+                v = np.arange(3, dtype="float32")
+
+            mapped_in_axes = (a_axis, v_axis, None, None)
+
+            for mapped_out_axes in [-1, 0, 1] if v_axis else [0]:
+                if v_axis:
+                    mapped_out_axes = {
+                        "scalars": {"a": 0, "b": 0},
+                        "vectors": {"v": mapped_out_axes, "w": 0},
+                    }
+                f_vmapped = jax.vmap(
+                    f, in_axes=mapped_in_axes, out_axes=mapped_out_axes
+                )
+                raw_vmapped = jax.vmap(
+                    f_raw, in_axes=mapped_in_axes, out_axes=mapped_out_axes
+                )
+
+                if use_jit:
+                    f_vmapped = jax.jit(f_vmapped, static_argnames=["s", "i"])
+                    raw_vmapped = jax.jit(raw_vmapped, static_argnames=["s", "i"])
+
+                result = f_vmapped(a, v, "hello", 3)
+                result_raw = raw_vmapped(a, v, "hello", 3)
+
+                _assert_pytree_isequal(result, result_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
