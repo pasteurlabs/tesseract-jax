@@ -1,7 +1,6 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from functools import partial
 
 import jax
 import numpy as np
@@ -151,20 +150,23 @@ def test_univariate_tesseract_vjp(served_univariate_tesseract_raw, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize(
-    "jacfun", [partial(jax.jacfwd, argnums=(0, 1)), partial(jax.jacrev, argnums=(0, 1))]
-)
+@pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
 def test_univariate_tesseract_jacobian(
-    served_univariate_tesseract_raw, use_jit, jacfun
+    served_univariate_tesseract_raw, use_jit, jac_direction
 ):
     rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
 
     # make things callable without keyword args
-    @jacfun
     def f(x, y):
         return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))["result"]
 
-    rosenbrock_raw = jacfun(rosenbrock_impl)
+    if jac_direction == "fwd":
+        f = jax.jacfwd(f, argnums=(0, 1))
+        rosenbrock_raw = jax.jacfwd(rosenbrock_impl, argnums=(0, 1))
+    else:
+        f = jax.jacrev(f, argnums=(0, 1))
+        rosenbrock_raw = jax.jacrev(rosenbrock_impl, argnums=(0, 1))
+
     if use_jit:
         f = jax.jit(f)
         rosenbrock_raw = jax.jit(rosenbrock_raw)
@@ -380,10 +382,8 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize(
-    "jacfun", [partial(jax.jacfwd, argnums=(0, 1)), partial(jax.jacrev, argnums=(0, 1))]
-)
-def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jacfun):
+@pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
+def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_direction):
     nested_tess = Tesseract(served_nested_tesseract_raw)
     a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
     v, w = (
@@ -391,7 +391,6 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jacfun)
         np.array([5.0, 7.0, 9.0], dtype="float32"),
     )
 
-    @jacfun
     def f(a, v):
         return apply_tesseract(
             nested_tess,
@@ -401,6 +400,11 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jacfun)
                 other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
             ),
         )
+
+    if jac_direction == "fwd":
+        f = jax.jacfwd(f, argnums=(0, 1))
+    else:
+        f = jax.jacrev(f, argnums=(0, 1))
 
     if use_jit:
         f = jax.jit(f)
