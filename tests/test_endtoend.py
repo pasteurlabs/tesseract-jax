@@ -179,7 +179,7 @@ def test_univariate_tesseract_jacobian(
         inputs=dict(x=x, y=y), jac_inputs=["x", "y"], jac_outputs=["result"]
     )
 
-    # Convert from nested dict to nested tuplw
+    # Convert from nested dict to nested tuple
     jac_ref = tuple((jac_ref["result"]["x"], jac_ref["result"]["y"]))
     _assert_pytree_isequal(jac, jac_ref)
 
