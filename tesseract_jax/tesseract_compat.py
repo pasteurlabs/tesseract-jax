@@ -14,7 +14,15 @@ PyTree: TypeAlias = Any
 
 
 def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tuple:
-    """Merge the elements of two lists based on a mask."""
+    """Merge the elements of two lists based on a mask.
+
+    The length of the two lists is required to be equal to the length of the mask.
+    `combine_args` will populate the new list according to the mask: if the mask evaluates
+    to `False` it will take the next item of the first list, if it evaluate to `True` it will
+    take from the second list.
+    For example, merging the lists ["foo", "bar"] and [0, 1, 2] wih the mask [1, 0, 0, 1, 1]
+    will return [0, "foo", "bar", 1, 2]
+    """
     assert sum(mask) == len(args1) and len(mask) - sum(mask) == len(args0)
     args0_iter, args1_iter = iter(args0), iter(args1)
     combined_args = [next(args1_iter) if m else next(args0_iter) for m in mask]
