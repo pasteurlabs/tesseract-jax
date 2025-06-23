@@ -20,8 +20,10 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
     `combine_args` will populate the new list according to the mask: if the mask evaluates
     to `False` it will take the next item of the first list, if it evaluate to `True` it will
     take from the second list.
-    For example, merging the lists ["foo", "bar"] and [0, 1, 2] wih the mask [1, 0, 0, 1, 1]
-    will return [0, "foo", "bar", 1, 2]
+
+    Example:
+        >>> combine_args(["foo", "bar"], [0, 1, 2], [1, 0, 0, 1, 1])
+        [0, "foo", "bar", 1, 2]
     """
     assert sum(mask) == len(args1) and len(mask) - sum(mask) == len(args0)
     args0_iter, args1_iter = iter(args0), iter(args1)
