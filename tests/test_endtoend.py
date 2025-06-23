@@ -221,17 +221,22 @@ def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
                 extra_dim if ax is not None else None for ax in axes
             )
 
-            f_vmappedtwice = jax.vmap(f_vmapped, in_axes=additional_axes)
-            raw_vmappedtwice = jax.vmap(raw_vmapped, in_axes=additional_axes)
+            for out_axis in [0, 1, -1]:
+                f_vmappedtwice = jax.vmap(
+                    f_vmapped, in_axes=additional_axes, out_axes=out_axis
+                )
+                raw_vmappedtwice = jax.vmap(
+                    raw_vmapped, in_axes=additional_axes, out_axes=out_axis
+                )
 
-            if use_jit:
-                f_vmappedtwice = jax.jit(f_vmappedtwice)
-                raw_vmappedtwice = jax.jit(raw_vmappedtwice)
+                if use_jit:
+                    f_vmappedtwice = jax.jit(f_vmappedtwice)
+                    raw_vmappedtwice = jax.jit(raw_vmappedtwice)
 
-            result = f_vmappedtwice(x, y)
-            result_raw = raw_vmappedtwice(x, y)
+                result = f_vmappedtwice(x, y)
+                result_raw = raw_vmappedtwice(x, y)
 
-            _assert_pytree_isequal(result, result_raw)
+                _assert_pytree_isequal(result, result_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
