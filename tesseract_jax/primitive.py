@@ -3,18 +3,20 @@
 
 import functools
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeVar
 
 import jax.tree
 import numpy as np
 from jax import ShapeDtypeStruct, dtypes, extend
 from jax.core import ShapedArray
-from jax.interpreters import ad, mlir, xla
+from jax.interpreters import ad, batching, mlir, xla
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
-from tesseract_jax.tesseract_compat import Jaxeract
+from tesseract_jax.tesseract_compat import Jaxeract, combine_args
+
+T = TypeVar("T")
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
@@ -35,21 +37,13 @@ class _Hashable:
 
 
 def split_args(
-    flat_args: Sequence[Any], is_static_mask: Sequence[bool]
-) -> tuple[tuple[ArrayLike, ...], tuple[_Hashable, ...]]:
-    """Split a flat argument list into a tuple (array_args, static_args)."""
-    static_args = tuple(
-        _make_hashable(arg)
-        for arg, is_static in zip(flat_args, is_static_mask, strict=True)
-        if is_static
-    )
-    array_args = tuple(
-        arg
-        for arg, is_static in zip(flat_args, is_static_mask, strict=True)
-        if not is_static
-    )
-
-    return array_args, static_args
+    flat_args: Sequence[T], mask: Sequence[bool]
+) -> tuple[tuple[T, ...], tuple[T, ...]]:
+    """Split a flat argument tuple according to mask (mask_False, mask_True)."""
+    lists = ([], [])
+    for a, m in zip(flat_args, mask, strict=True):
+        lists[m].append(a)
+    return tuple(tuple(args) for args in lists)
 
 
 @tesseract_dispatch_p.def_abstract_eval
@@ -238,6 +232,48 @@ def tesseract_dispatch_lowering(
 mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
 
 
+def tesseract_dispatch_batching(
+    array_args: ArrayLike | ShapedArray | Any,
+    axes: Sequence[Any],
+    *,
+    static_args: tuple[_Hashable, ...],
+    input_pytreedef: PyTreeDef,
+    output_pytreedef: PyTreeDef,
+    output_avals: tuple[ShapeDtypeStruct, ...],
+    is_static_mask: tuple[bool, ...],
+    client: Jaxeract,
+    eval_func: str,
+) -> Any:
+    """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
+    new_args = [
+        arg if ax is batching.not_mapped else batching.moveaxis(arg, ax, 0)
+        for arg, ax in zip(array_args, axes, strict=True)
+    ]
+
+    is_batched_mask = [d is not batching.not_mapped for d in axes]
+    unbatched_args, batched_args = split_args(new_args, is_batched_mask)
+
+    def _batch_fun(batched_args: tuple):
+        combined_args = combine_args(unbatched_args, batched_args, is_batched_mask)
+        return tesseract_dispatch_p.bind(
+            *combined_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=output_avals,
+            is_static_mask=is_static_mask,
+            client=client,
+            eval_func=eval_func,
+        )
+
+    outvals = jax.lax.map(_batch_fun, batched_args)
+
+    return tuple(outvals), (0,) * len(outvals)
+
+
+batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
+
+
 def _check_dtype(dtype: Any) -> None:
     dt = np.dtype(dtype)
     if dtypes.canonicalize_dtype(dt) != dt:
@@ -318,6 +354,7 @@ def apply_tesseract(
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
+    static_args = tuple(_make_hashable(arg) for arg in static_args)
 
     # Get abstract values for outputs, so we can unflatten them later
     output_pytreedef, avals = None, None

@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from collections.abc import Sequence
 from typing import Any, TypeAlias
 
 import jax.tree
@@ -12,6 +13,24 @@ from tesseract_core import Tesseract
 PyTree: TypeAlias = Any
 
 
+def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tuple:
+    """Merge the elements of two lists based on a mask.
+
+    The length of the two lists is required to be equal to the length of the mask.
+    `combine_args` will populate the new list according to the mask: if the mask evaluates
+    to `False` it will take the next item of the first list, if it evaluate to `True` it will
+    take from the second list.
+
+    Example:
+        >>> combine_args(["foo", "bar"], [0, 1, 2], [1, 0, 0, 1, 1])
+        [0, "foo", "bar", 1, 2]
+    """
+    assert sum(mask) == len(args1) and len(mask) - sum(mask) == len(args0)
+    args0_iter, args1_iter = iter(args0), iter(args1)
+    combined_args = [next(args1_iter) if m else next(args0_iter) for m in mask]
+    return tuple(combined_args)
+
+
 def unflatten_args(
     array_args: tuple[ArrayLike, ...],
     static_args: tuple[Any, ...],
@@ -20,23 +39,14 @@ def unflatten_args(
     remove_static_args: bool = False,
 ) -> PyTree:
     """Unflatten lists of arguments (static and not) into a pytree."""
-    combined_args = []
-    static_iter = iter(static_args)
-    array_iter = iter(array_args)
+    if remove_static_args:
+        static_args_converted = [None] * len(static_args)
+    else:
+        static_args_converted = [
+            elem.wrapped if hasattr(elem, "wrapped") else elem for elem in static_args
+        ]
 
-    for is_static in is_static_mask:
-        if is_static:
-            elem = next(static_iter)
-            elem = elem.wrapped if hasattr(elem, "wrapped") else elem
-
-            if remove_static_args:
-                combined_args.append(None)
-            else:
-                combined_args.append(elem)
-
-        else:
-            combined_args.append(next(array_iter))
-
+    combined_args = combine_args(array_args, static_args_converted, is_static_mask)
     result = jax.tree.unflatten(input_pytreedef, combined_args)
 
     if remove_static_args:
