@@ -45,7 +45,7 @@ def split_args(
     )
     array_args = tuple(
         arg
-        for arg, is_static in zip(flat_args, is_static_mask, strict=True)  # fmt: skip
+        for arg, is_static in zip(flat_args, is_static_mask, strict=True)
         if not is_static
     )
 
