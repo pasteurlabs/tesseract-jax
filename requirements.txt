@@ -10,6 +10,8 @@ click==8.1.8
     # via typer
 colorama==0.4.6 ; sys_platform == 'win32'
     # via click
+docker==7.1.0
+    # via tesseract-core
 idna==3.10
     # via requests
 jax==0.6.2
@@ -45,10 +47,14 @@ pydantic-core==2.33.0
     # via pydantic
 pygments==2.19.2
     # via rich
+pywin32==310 ; sys_platform == 'win32'
+    # via docker
 pyyaml==6.0.2
     # via tesseract-core
 requests==2.32.4
-    # via tesseract-core
+    # via
+    #   docker
+    #   tesseract-core
 rich==14.0.0
     # via
     #   tesseract-core
@@ -63,7 +69,7 @@ scipy==1.16.0 ; python_full_version >= '3.11'
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==0.9.1
+tesseract-core==0.8.0
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
@@ -77,4 +83,6 @@ typing-extensions==4.14.0
 typing-inspection==0.4.1
     # via pydantic
 urllib3==2.5.0
-    # via requests
+    # via
+    #   docker
+    #   requests
