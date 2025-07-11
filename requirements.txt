@@ -2,7 +2,7 @@
 #    uv export --frozen --color never --no-emit-project --no-hashes
 annotated-types==0.7.0
     # via pydantic
-certifi==2025.6.15
+certifi==2025.7.9
     # via requests
 charset-normalizer==3.4.2
     # via requests
@@ -47,7 +47,7 @@ pygments==2.19.2
     # via rich
 pyyaml==6.0.2
     # via tesseract-core
-requests==2.32.3
+requests==2.32.4
     # via tesseract-core
 rich==14.0.0
     # via
@@ -63,7 +63,7 @@ scipy==1.16.0 ; python_full_version >= '3.11'
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==0.9.1
+tesseract-core==0.10.0
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
