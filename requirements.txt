@@ -12,9 +12,13 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via click
 idna==3.10
     # via requests
-jax==0.6.2
+jax==0.6.2 ; python_full_version < '3.11'
     # via tesseract-jax
-jaxlib==0.6.2
+jax==0.7.0 ; python_full_version >= '3.11'
+    # via tesseract-jax
+jaxlib==0.6.2 ; python_full_version < '3.11'
+    # via jax
+jaxlib==0.7.0 ; python_full_version >= '3.11'
     # via jax
 jinja2==3.1.6
     # via tesseract-core
@@ -49,7 +53,7 @@ pyyaml==6.0.2
     # via tesseract-core
 requests==2.32.4
     # via tesseract-core
-rich==14.0.0
+rich==14.1.0
     # via
     #   tesseract-core
     #   typer
@@ -57,13 +61,13 @@ scipy==1.15.3 ; python_full_version < '3.11'
     # via
     #   jax
     #   jaxlib
-scipy==1.16.0 ; python_full_version >= '3.11'
+scipy==1.16.1 ; python_full_version >= '3.11'
     # via
     #   jax
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==0.10.0
+tesseract-core==0.10.2
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
@@ -71,7 +75,6 @@ typing-extensions==4.14.1
     # via
     #   pydantic
     #   pydantic-core
-    #   rich
     #   typer
     #   typing-inspection
 typing-inspection==0.4.1
