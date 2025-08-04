@@ -2,7 +2,7 @@
 #    uv export --frozen --color never --no-emit-project --no-hashes
 annotated-types==0.7.0
     # via pydantic
-certifi==2025.7.14
+certifi==2025.8.3
     # via requests
 charset-normalizer==3.4.2
     # via requests
@@ -28,7 +28,7 @@ markupsafe==3.0.2
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
-ml-dtypes==0.5.1
+ml-dtypes==0.5.3
     # via
     #   jax
     #   jaxlib
@@ -41,7 +41,7 @@ numpy==2.2.4
     #   tesseract-core
 opt-einsum==3.4.0
     # via jax
-pip==25.1.1
+pip==25.2
     # via tesseract-core
 pydantic==2.11.0
     # via tesseract-core
