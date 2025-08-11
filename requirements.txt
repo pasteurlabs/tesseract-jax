@@ -4,7 +4,7 @@ annotated-types==0.7.0
     # via pydantic
 certifi==2025.8.3
     # via requests
-charset-normalizer==3.4.2
+charset-normalizer==3.4.3
     # via requests
 click==8.1.8
     # via typer
@@ -67,7 +67,7 @@ scipy==1.16.1 ; python_full_version >= '3.11'
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==0.10.2
+tesseract-core==1.0.0
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
