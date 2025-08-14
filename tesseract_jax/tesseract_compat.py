@@ -108,13 +108,13 @@ class Jaxeract:
             ]["properties"]
         )
 
-        self.differentiable_input_paths = self.client.input_schema[
-            "differentiable_arrays"
-        ]
+        self.differentiable_input_paths = self.client.openapi_schema["components"][
+            "schemas"
+        ]["ApplyInputSchema"]["differentiable_arrays"]
 
-        self.differentiable_output_paths = self.client.output_schema[
-            "differentiable_arrays"
-        ]
+        self.differentiable_output_paths = self.client.openapi_schema["components"][
+            "schemas"
+        ]["ApplyOutputSchema"]["differentiable_arrays"]
 
         self.available_methods = self.client.available_endpoints
 
