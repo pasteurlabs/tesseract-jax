@@ -71,7 +71,7 @@ tesseract-core==1.0.0
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
-typing-extensions==4.14.1
+typing-extensions==4.15.0
     # via
     #   pydantic
     #   pydantic-core
