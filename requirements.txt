@@ -61,13 +61,13 @@ scipy==1.15.3 ; python_full_version < '3.11'
     # via
     #   jax
     #   jaxlib
-scipy==1.16.1 ; python_full_version >= '3.11'
+scipy==1.16.2 ; python_full_version >= '3.11'
     # via
     #   jax
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==1.0.0
+tesseract-core==1.1.0
     # via tesseract-jax
 typer==0.15.2
     # via tesseract-core
