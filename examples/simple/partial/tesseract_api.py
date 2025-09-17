@@ -31,23 +31,23 @@ def apply(inputs: InputSchema) -> OutputSchema:
     }
 
 
-def vector_jacobian_product(
-    inputs: InputSchema,
-    vjp_inputs: set[str],
-    vjp_outputs: set[str],
-    cotangent_vector: dict[str, Any],
-):
+# def vector_jacobian_product(
+#     inputs: InputSchema,
+#     vjp_inputs: set[str],
+#     vjp_outputs: set[str],
+#     cotangent_vector: dict[str, Any],
+# ):
     
-    return {
-        "a": 2.0 * cotangent_vector["b"],
-    }
-
-
-
-# def abstract_eval(abstract_inputs):
-#     """Calculate output shape of apply from the shape of its inputs."""
 #     return {
-#         "b": ShapeDType(shape=(abstract_inputs.a.shape[0],), dtype="float32"),
-#         # "c": ShapeDType(shape=(3,), dtype="float32"),
+#         "a": 2.0 * cotangent_vector["b"],
 #     }
+
+
+
+def abstract_eval(abstract_inputs):
+    """Calculate output shape of apply from the shape of its inputs."""
+    return {
+        "b": ShapeDType(shape=(None,), dtype="float32"),
+        "c": ShapeDType(shape=(None,), dtype="float32"),
+    }
 

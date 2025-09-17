@@ -21,9 +21,9 @@ T = TypeVar("T")
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
-tesseract_dispatch_p.def_impl(
-    functools.partial(xla.apply_primitive, tesseract_dispatch_p)
-)
+# tesseract_dispatch_p.def_impl(
+#     functools.partial(xla.apply_primitive, tesseract_dispatch_p)
+# )
 
 
 class _Hashable:
@@ -58,6 +58,7 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
+
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
         "apply",
@@ -76,6 +77,7 @@ def tesseract_dispatch_abstract_eval(
     # Those have the same shape as the outputs
     assert eval_func in ("apply", "jacobian_vector_product")
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
+
 
 
 def tesseract_dispatch_jvp_rule(
@@ -189,6 +191,38 @@ def tesseract_dispatch_transpose_rule(
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
+
+def tesseract_dispatch(
+    *array_args: ArrayLike | ShapedArray | Any,
+    static_args: tuple[_Hashable, ...],
+    input_pytreedef: PyTreeDef,
+    output_pytreedef: PyTreeDef | None,
+    output_avals: tuple[ShapeDtypeStruct, ...] | None,
+    is_static_mask: tuple[bool, ...],
+    client: Jaxeract,
+    eval_func: str,
+) -> Any:
+    """Defines how to dispatch lowering the computation."""
+
+    def _dispatch(*args: ArrayLike) -> Any:
+        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        out = getattr(client, eval_func)(
+            args,
+            static_args_,
+            input_pytreedef,
+            output_pytreedef,
+            output_avals,
+            is_static_mask,
+        )
+        if not isinstance(out, tuple):
+            out = (out,)
+        return out
+    
+    result = _dispatch(*array_args)
+
+    return result
+
+tesseract_dispatch_p.def_impl(tesseract_dispatch)
 
 def tesseract_dispatch_lowering(
     ctx: Any,
@@ -406,4 +440,4 @@ def apply_tesseract(
     #     )
 
     # Unflatten the output
-    return jax.tree.unflatten(output_pytreedef, out)
+    return out#jax.tree.unflatten(output_pytreedef, out)
