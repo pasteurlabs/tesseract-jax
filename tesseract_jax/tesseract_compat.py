@@ -159,8 +159,8 @@ class Jaxeract:
 
         out_data = self.client.apply(inputs)
 
-        out_data = tuple(jax.tree.flatten(out_data)[0])
-        return out_data
+        out_data, output_pytreedef = jax.tree.flatten(out_data)
+        return tuple(out_data), output_pytreedef
 
     def jacobian_vector_product(
         self,
