@@ -85,3 +85,4 @@ def make_tesseract_fixture(folder_name):
 
 served_univariate_tesseract_raw = make_tesseract_fixture("univariate_tesseract")
 served_nested_tesseract_raw = make_tesseract_fixture("nested_tesseract")
+served_non_abstract_tesseract = make_tesseract_fixture("non_abstract_tesseract")

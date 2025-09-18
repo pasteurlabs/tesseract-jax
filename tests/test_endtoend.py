@@ -538,3 +538,42 @@ def test_tesseract_as_jax_pytree(served_univariate_tesseract_raw):
     result = f(x, y, tess)
     result_ref = rosenbrock_impl(x, y)
     _assert_pytree_isequal(result, result_ref)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
+    non_abstract_tess = Tesseract(served_non_abstract_tesseract)
+    a = np.array([0.0, 1.0, 2.0], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(non_abstract_tess, inputs=dict(a=a))
+
+    if use_jit:
+        f = jax.jit(f)
+
+        # make sure value error is raised if input shape is incorrect
+        with pytest.raises(ValueError):
+            f(a)
+
+    else:
+        # Test against Tesseract client
+        result = f(a)
+        result_ref = non_abstract_tess.apply(dict(a=a))
+        _assert_pytree_isequal(result, result_ref)
+
+
+def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
+    non_abstract_tess = Tesseract(served_non_abstract_tesseract)
+
+    a = np.array([1.0, 2.0, 3.0], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(
+            non_abstract_tess,
+            inputs=dict(
+                a=a,
+            ),
+        )
+
+    with pytest.raises(ValueError):
+        jax.vjp(f, a)
