@@ -1,17 +1,16 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
+import jax.core as jc
 import jax.numpy as jnp
 import jax.tree
-import jax.core as jc
 import numpy as np
 from jax import ShapeDtypeStruct, dtypes, extend
 from jax.core import ShapedArray
-from jax.interpreters import ad, batching, mlir, xla
+from jax.interpreters import ad, batching, mlir
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
@@ -195,15 +194,16 @@ def tesseract_dispatch(
     *array_args: ArrayLike | ShapedArray | Any,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
+    output_pytreedef: PyTreeDef | None,
+    output_avals: tuple[ShapeDtypeStruct, ...] | None,
     is_static_mask: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
-    """Defines how to dispatch lowering the computation. 
-    
-    The dispatch that is not lowered is only called in cases where abstract eval is not needed."""
+    """Defines how to dispatch lowering the computation.
+
+    The dispatch that is not lowered is only called in cases where abstract eval is not needed.
+    """
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -215,14 +215,16 @@ def tesseract_dispatch(
             output_avals,
             is_static_mask,
         )
-        if not isinstance(out, tuple):
+        if not isinstance(out, tuple) and output_avals is not None:
             out = (out,)
         return out
-    
+
     result = _dispatch(*array_args)
     return result
 
+
 tesseract_dispatch_p.def_impl(tesseract_dispatch)
+
 
 def tesseract_dispatch_lowering(
     ctx: Any,
@@ -380,10 +382,9 @@ def apply_tesseract(
             "The first argument must be a Tesseract object. "
             f"Got {type(tesseract_client)} instead."
         )
-    
 
     transformation = False
-    
+
     # determine if any array in the input pytree is a tracer
     inputs_flat, _ = jax.tree.flatten(inputs)
     for inp in inputs_flat:
@@ -402,15 +403,14 @@ def apply_tesseract(
 
     client = Jaxeract(tesseract_client)
 
-
     # Get abstract values for outputs, so we can unflatten them later
+
+    flat_args, input_pytreedef = jax.tree.flatten(inputs)
+    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+    array_args, static_args = split_args(flat_args, is_static_mask)
+    static_args = tuple(_make_hashable(arg) for arg in static_args)
+
     if "abstract_eval" in tesseract_client.available_endpoints:
-
-        flat_args, input_pytreedef = jax.tree.flatten(inputs)
-        is_static_mask = tuple(_is_static(arg) for arg in flat_args)
-        array_args, static_args = split_args(flat_args, is_static_mask)
-        static_args = tuple(_make_hashable(arg) for arg in static_args)
-
         # Get abstract values for outputs, so we can unflatten them later
         output_pytreedef, avals = None, None
         avals = client.abstract_eval(

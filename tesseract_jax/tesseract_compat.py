@@ -164,17 +164,13 @@ class Jaxeract:
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
         return out_data
-    
 
     def apply_pytree(
         self,
         inputs: PyTree,
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
-
-
         return self.client.apply(inputs)
-
 
     def jacobian_vector_product(
         self,
