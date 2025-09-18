@@ -57,7 +57,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
     return {
-        "b": ShapeDType(shape=(abstract_inputs.a.shape[0],), dtype="float32"),
+        "b": ShapeDType(shape=(3,), dtype="float32"),
         "c": ShapeDType(shape=(3,), dtype="float32"),
     }
 

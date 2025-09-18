@@ -148,8 +148,8 @@ class Jaxeract:
         array_args: tuple[ArrayLike, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef | None,
-        output_avals: tuple[ShapeDtypeStruct, ...] | None,
+        output_pytreedef: PyTreeDef,
+        output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
@@ -161,6 +161,17 @@ class Jaxeract:
 
         out_data, output_pytreedef = jax.tree.flatten(out_data)
         return tuple(out_data), output_pytreedef
+    
+
+    def apply_pytree(
+        self,
+        inputs: PyTree,
+    ) -> PyTree:
+        """Call the Tesseract's apply endpoint with the given arguments."""
+
+
+        return self.client.apply(inputs)
+
 
     def jacobian_vector_product(
         self,

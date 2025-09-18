@@ -7,6 +7,7 @@ from typing import Any, TypeVar
 
 import jax.numpy as jnp
 import jax.tree
+import jax.core as jc
 import numpy as np
 from jax import ShapeDtypeStruct, dtypes, extend
 from jax.core import ShapedArray
@@ -58,7 +59,6 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
-
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
         "apply",
@@ -77,7 +77,6 @@ def tesseract_dispatch_abstract_eval(
     # Those have the same shape as the outputs
     assert eval_func in ("apply", "jacobian_vector_product")
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
-
 
 
 def tesseract_dispatch_jvp_rule(
@@ -193,32 +192,17 @@ ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rul
 
 
 def tesseract_dispatch(
-    *array_args: ArrayLike | ShapedArray | Any,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef | None,
-    output_avals: tuple[ShapeDtypeStruct, ...] | None,
-    is_static_mask: tuple[bool, ...],
+    inputs: Any,
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
-    """Defines how to dispatch lowering the computation."""
-
-    def _dispatch(*args: ArrayLike) -> Any:
-        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
-        out = getattr(client, eval_func)(
-            args,
-            static_args_,
-            input_pytreedef,
-            output_pytreedef,
-            output_avals,
-            is_static_mask,
-        )
-        if not isinstance(out, tuple):
-            out = (out,)
-        return out
+    """Defines how to dispatch lowering the computation. 
     
-    result = _dispatch(*array_args)
+    The dispatch that is not lowered is only called in cases where abstract eval is not needed."""
+
+    result = getattr(client, eval_func)(
+        inputs
+    )
 
     return result
 
@@ -229,8 +213,8 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef | None,
-    output_avals: tuple[ShapeDtypeStruct, ...] | None,
+    output_pytreedef: PyTreeDef,
+    output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
@@ -262,6 +246,9 @@ def tesseract_dispatch_lowering(
     )
     ctx.module_context.add_keepalive(keepalive)
     return result
+
+
+mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
 
 
 mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
@@ -377,24 +364,39 @@ def apply_tesseract(
             "The first argument must be a Tesseract object. "
             f"Got {type(tesseract_client)} instead."
         )
+    
 
-    # if "abstract_eval" not in tesseract_client.available_endpoints:
-    #     raise ValueError(
-    #         "Given Tesseract object does not support abstract_eval, "
-    #         "which is required for compatibility with JAX."
-    #     )
+    transformation = False
+    
+    # determine if any array in the input pytree is a tracer
+    inputs_flat, _ = jax.tree.flatten(inputs)
+    for inp in inputs_flat:
+        if isinstance(inp, jc.Tracer):
+            transformation = True
+            break
+
+    if transformation and "abstract_eval" not in tesseract_client.available_endpoints:
+        raise ValueError(
+            "Given Tesseract object does not support abstract_eval, "
+            "it is however called in combination with a JAX transformation "
+            "like jit, grad, vmap, or pmap. "
+            "Either remove the transformation or add an abstract_eval endpoint "
+            "to the Tesseract object."
+        )
 
     client = Jaxeract(tesseract_client)
 
-    flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
-    array_args, static_args = split_args(flat_args, is_static_mask)
-    static_args = tuple(_make_hashable(arg) for arg in static_args)
 
-   
     # Get abstract values for outputs, so we can unflatten them later
-    output_pytreedef, avals, flat_avals = None, None, None
-    if "abstract_eval" in tesseract_client.available_endpoints:
+    if transformation:
+
+        flat_args, input_pytreedef = jax.tree.flatten(inputs)
+        is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+        array_args, static_args = split_args(flat_args, is_static_mask)
+        static_args = tuple(_make_hashable(arg) for arg in static_args)
+
+        # Get abstract values for outputs, so we can unflatten them later
+        output_pytreedef, avals = None, None
         avals = client.abstract_eval(
             array_args,
             static_args,
@@ -416,28 +418,24 @@ def apply_tesseract(
             for aval in flat_avals
         )
 
-    # Apply the primitive
-    out = tesseract_dispatch_p.bind(
-        *array_args,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=flat_avals,
-        is_static_mask=is_static_mask,
-        client=client,
-        eval_func="apply",
-    )
+        # Apply the primitive
+        out = tesseract_dispatch_p.bind(
+            *array_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=flat_avals,
+            is_static_mask=is_static_mask,
+            client=client,
+            eval_func="apply",
+        )
 
-    # else:
-    #     # Apply the primitive
-    #     out = tesseract_dispatch_p.bind(
-    #         *array_args,
-    #         static_args=static_args,
-    #         input_pytreedef=input_pytreedef,
-    #         is_static_mask=is_static_mask,
-    #         client=client,
-    #         eval_func="apply",
-    #     )
+        # Unflatten the output
+        return jax.tree.unflatten(output_pytreedef, out)
 
-    # Unflatten the output
-    return out#jax.tree.unflatten(output_pytreedef, out)
+    else:
+        return tesseract_dispatch_p.bind(
+            inputs,
+            client=client,
+            eval_func="apply_pytree",
+        )
