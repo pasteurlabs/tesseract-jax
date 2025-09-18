@@ -21,9 +21,6 @@ T = TypeVar("T")
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
-# tesseract_dispatch_p.def_impl(
-#     functools.partial(xla.apply_primitive, tesseract_dispatch_p)
-# )
 
 
 class _Hashable:
