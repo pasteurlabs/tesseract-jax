@@ -185,14 +185,19 @@ def tesseract_dispatch_transpose_rule(
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
 
-    return tuple([None] * len(args) + vjp)
+    return tuple([None] * len(args) + list(vjp))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
 
 def tesseract_dispatch(
-    inputs: Any,
+    *array_args: ArrayLike | ShapedArray | Any,
+    static_args: tuple[_Hashable, ...],
+    input_pytreedef: PyTreeDef,
+    output_pytreedef: PyTreeDef,
+    output_avals: tuple[ShapeDtypeStruct, ...],
+    is_static_mask: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -200,10 +205,21 @@ def tesseract_dispatch(
     
     The dispatch that is not lowered is only called in cases where abstract eval is not needed."""
 
-    result = getattr(client, eval_func)(
-        inputs
-    )
-
+    def _dispatch(*args: ArrayLike) -> Any:
+        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        out = getattr(client, eval_func)(
+            args,
+            static_args_,
+            input_pytreedef,
+            output_pytreedef,
+            output_avals,
+            is_static_mask,
+        )
+        if not isinstance(out, tuple):
+            out = (out,)
+        return out
+    
+    result = _dispatch(*array_args)
     return result
 
 tesseract_dispatch_p.def_impl(tesseract_dispatch)
@@ -388,7 +404,7 @@ def apply_tesseract(
 
 
     # Get abstract values for outputs, so we can unflatten them later
-    if transformation:
+    if "abstract_eval" in tesseract_client.available_endpoints:
 
         flat_args, input_pytreedef = jax.tree.flatten(inputs)
         is_static_mask = tuple(_is_static(arg) for arg in flat_args)
@@ -434,8 +450,17 @@ def apply_tesseract(
         return jax.tree.unflatten(output_pytreedef, out)
 
     else:
-        return tesseract_dispatch_p.bind(
-            inputs,
+        # Apply the primitive
+        out = tesseract_dispatch_p.bind(
+            *array_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=None,
+            output_avals=None,
+            is_static_mask=is_static_mask,
             client=client,
-            eval_func="apply_pytree",
+            eval_func="apply",
         )
+
+        # Unflatten the output
+        return out

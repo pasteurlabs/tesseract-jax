@@ -148,8 +148,8 @@ class Jaxeract:
         array_args: tuple[ArrayLike, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
+        output_pytreedef: PyTreeDef | None,
+        output_avals: tuple[ShapeDtypeStruct, ...] | None,
         is_static_mask: tuple[bool, ...],
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
@@ -158,6 +158,9 @@ class Jaxeract:
         )
 
         out_data = self.client.apply(inputs)
+
+        if output_avals is None:
+            return out_data
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
         return out_data
