@@ -266,9 +266,6 @@ def tesseract_dispatch_lowering(
 mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
 
 
-mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
-
-
 def tesseract_dispatch_batching(
     array_args: ArrayLike | ShapedArray | Any,
     axes: Sequence[Any],
@@ -380,16 +377,19 @@ def apply_tesseract(
             f"Got {type(tesseract_client)} instead."
         )
 
-    transformation = False
+    has_func_transformation = False
 
     # determine if any array in the input pytree is a tracer
     inputs_flat, _ = jax.tree.flatten(inputs)
     for inp in inputs_flat:
         if isinstance(inp, jc.Tracer):
-            transformation = True
+            has_func_transformation = True
             break
 
-    if transformation and "abstract_eval" not in tesseract_client.available_endpoints:
+    if (
+        has_func_transformation
+        and "abstract_eval" not in tesseract_client.available_endpoints
+    ):
         raise ValueError(
             "Given Tesseract object does not support abstract_eval, "
             "it is however called in combination with a JAX transformation "
@@ -399,8 +399,6 @@ def apply_tesseract(
         )
 
     client = Jaxeract(tesseract_client)
-
-    # Get abstract values for outputs, so we can unflatten them later
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
@@ -447,7 +445,9 @@ def apply_tesseract(
         return jax.tree.unflatten(output_pytreedef, out)
 
     else:
-        # Apply the primitive
+        # If there is no abstract_eval endpoint, we cannot determine the output structure
+        # In this case we send None for output_pytreedef and output_avals
+        # and the primitive will return an unflattened output
         out = tesseract_dispatch_p.bind(
             *array_args,
             static_args=static_args,
