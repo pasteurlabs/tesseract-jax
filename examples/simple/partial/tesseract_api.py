@@ -31,16 +31,16 @@ def apply(inputs: InputSchema) -> OutputSchema:
     }
 
 
-# def vector_jacobian_product(
-#     inputs: InputSchema,
-#     vjp_inputs: set[str],
-#     vjp_outputs: set[str],
-#     cotangent_vector: dict[str, Any],
-# ):
+def vector_jacobian_product(
+    inputs: InputSchema,
+    vjp_inputs: set[str],
+    vjp_outputs: set[str],
+    cotangent_vector: dict[str, Any],
+):
     
-#     return {
-#         "a": 2.0 * cotangent_vector["b"],
-#     }
+    return {
+        "a": 2.0 * cotangent_vector["b"],
+    }
 
 
 
