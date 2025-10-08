@@ -183,9 +183,8 @@ def frequency_to_time_domain_circular(
     f_min,
     f_max,
     c,
-    Z,    
     source_center=[1.0, 1.0],
-    ppw = 2.0,
+    ppw = 5.0,
 ):
     df = 10 # Hz (frequency resolution) TODO: calculate from time requirement?
     k_max = 2 * jnp.pi * f_max / c # wave number

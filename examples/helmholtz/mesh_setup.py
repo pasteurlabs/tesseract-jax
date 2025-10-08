@@ -3,24 +3,7 @@ import jax.numpy as jnp
 from jax_fem.generate_mesh import Mesh, rectangle_mesh, get_meshio_cell_type
 import pygmsh
 import meshio
-
-# mesh = create_circle_mesh(radius=1.0, mesh_size=0.1)
-
-# # Save the mesh
-# meshio.write("circle.vtk", mesh)
-
-# # Print mesh info
-# print(f"Number of points: {len(mesh.points)}")
-# print(f"Number of cells: {len(mesh.cells[0].data)}")
-
-# for cell in mesh.cells:
-#     print(f"Cell type: {cell.type}")
-# print(mesh.cells[0].data.shape)
-# print(mesh.points.shape)
-# plt.figure()
-# plt.triplot(mesh.points[:, 0], mesh.points[:, 1], mesh.cells[1].data)
-# plt.axis('equal')
-# plt.show()
+import numpy as np
 
 def create_circle_meshio(radius=1.0, mesh_size=0.1) -> meshio.Mesh:
     """Create a 2D circle mesh using pygmsh
@@ -35,8 +18,38 @@ def create_circle_meshio(radius=1.0, mesh_size=0.1) -> meshio.Mesh:
         geom.add_plane_surface(circle.curve_loop)
         # Generate mesh
         mesh = geom.generate_mesh()
+
+    def get_boundary_node_indices(mesh):
+        boundary_nodes = set()
+        for cell_block in mesh.cells:
+            if cell_block.type == "line":
+                for edge in cell_block.data:
+                    boundary_nodes.add(edge[0])
+                    boundary_nodes.add(edge[1])
+        return np.array(sorted(boundary_nodes))
+
+    bc_indxs = get_boundary_node_indices(mesh)
     
-    return mesh
+    # Save the mesh
+    meshio.write("circle.vtk", mesh)
+
+    # Print mesh info
+    print(f"Number of points: {len(mesh.points)}")
+    print(f"Number of cells: {len(mesh.cells[0].data)}")
+
+    import matplotlib.pyplot as plt
+    
+    for cell in mesh.cells:
+        print(f"Cell type: {cell.type}")
+    print(mesh.cells[0].data.shape)
+    print(mesh.points.shape)
+    plt.figure()    
+    plt.triplot(mesh.points[:, 0], mesh.points[:, 1], mesh.cells[1].data)
+    plt.scatter(mesh.points[bc_indxs, 0], mesh.points[bc_indxs, 1], color='green')
+    plt.axis('equal')
+    plt.show()
+
+    return mesh, bc_indxs
 
 def create_rectangular_mesh(Lx, Ly, c, f_max, ppw) -> tuple:
     dx = c / (f_max * ppw)
@@ -145,49 +158,15 @@ def create_circular_mesh(radius, c, f_max, ppw) -> tuple:
     ele_type = 'TRI3'
     cell_type = get_meshio_cell_type(ele_type)
 
-    meshio_mesh = create_circle_meshio(radius=radius, mesh_size=dx)
+    meshio_mesh, bc_indxs = create_circle_meshio(radius=radius, mesh_size=dx)
     points = meshio_mesh.points[:, 0:2]
     cells = meshio_mesh.cells_dict[cell_type]
     cells = transform_cells(cells, points, ele_type)
     mesh = Mesh(points, cells)
 
-    # Split by angle
-    def top_right_quadrant(point):
-        """Top-right quadrant: 0° to 90°"""
-        r = jnp.sqrt(point[0]**2 + point[1]**2)
-        angle = jnp.arctan2(point[1], point[0])  # -π to π
-        return jnp.logical_and(
-            jnp.isclose(r, radius, atol=1e-5),
-            jnp.logical_and(angle >= 0, angle <= jnp.pi/2)
-        )
-    
-    def top_left_quadrant(point):
-        """Top-left quadrant: 90° to 180°"""
-        r = jnp.sqrt(point[0]**2 + point[1]**2)
-        angle = jnp.arctan2(point[1], point[0])
-        return jnp.logical_and(
-            jnp.isclose(r, radius, atol=1e-5),
-            jnp.logical_and(angle > jnp.pi/2, angle <= jnp.pi)
-        )
-    
-    def bottom_left_quadrant(point):
-        """Bottom-left quadrant: 180° to 270°"""
-        r = jnp.sqrt(point[0]**2 + point[1]**2)
-        angle = jnp.arctan2(point[1], point[0])
-        return jnp.logical_and(
-            jnp.isclose(r, radius, atol=1e-5),
-            jnp.logical_and(angle > -jnp.pi, angle <= -jnp.pi/2)
-        )
-    
-    def bottom_right_quadrant(point):
-        """Bottom-right quadrant: 270° to 360°"""
-        r = jnp.sqrt(point[0]**2 + point[1]**2)
-        angle = jnp.arctan2(point[1], point[0])
-        return jnp.logical_and(
-            jnp.isclose(r, radius, atol=1e-5),
-            jnp.logical_and(angle > -jnp.pi/2, angle < 0)
-        )
+    def on_a_boundary(point, indx):
+        return jnp.isin(indx, bc_indxs)
 
-    location_fns2 = [top_right_quadrant, top_left_quadrant, bottom_left_quadrant, bottom_right_quadrant]
+    location_fns2 = [on_a_boundary]
 
     return (mesh, location_fns2, ele_type)

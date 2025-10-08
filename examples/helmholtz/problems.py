@@ -27,10 +27,10 @@ class AcousticHelmholtzImpedance(Problem):
         k: wave number (2π * frequency / speed_of_sound)
         Z: parameters defining boundary impedance
         source_params: parameters defining Gaussian source
-        """        
-        super().__init__(mesh, **kargs)
+        """
         self.k = k
         self.source_params = source_params
+        super().__init__(mesh, **kargs)
 
     # stiffness matrix
     def get_tensor_map(self):
@@ -92,10 +92,10 @@ class AcousticHelmholtzNeumann(Problem):
         k: wave number (2π * frequency / speed_of_sound)
         Z: parameters defining boundary impedance
         source_params: parameters defining Gaussian source
-        """        
-        super().__init__(mesh, **kargs)
+        """
         self.k = k
         self.source_params = source_params
+        super().__init__(mesh, **kargs)
 
     # stiffness matrix
     def get_tensor_map(self):
@@ -123,4 +123,4 @@ class AcousticHelmholtzNeumann(Problem):
         def surface_map(u, x):
             return 0 * u
 
-        return [surface_map] * len(self.internal_vars_surfaces)
+        return [surface_map]

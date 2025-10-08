@@ -19,7 +19,7 @@ source_center = [1.0, 1.0]
 
 # estimate_boundary_impedance(Lx, Ly, f_max, c, Z, source_center)
 
-mesh, t, p_time, frequencies, P_freq = frequency_to_time_domain(Lx, Ly, f_min, f_max, c, Z)
-anim = animate_pressure_field(mesh, t, p_time, save_file='wave_propagation_circular.gif')
-# mesh, t, p_time, frequencies, P_freq = frequency_to_time_domain_circular(radius, f_min, f_max, c, Z)
+# mesh, t, p_time, frequencies, P_freq = frequency_to_time_domain(Lx, Ly, f_min, f_max, c, Z)
+# anim = animate_pressure_field(mesh, t, p_time, save_file='wave_propagation.gif')
+mesh, t, p_time, frequencies, P_freq = frequency_to_time_domain_circular(radius, f_min, f_max, c)
 # anim = animate_pressure_field(mesh, t, p_time, save_file='wave_propagation.gif')
