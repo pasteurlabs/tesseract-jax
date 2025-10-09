@@ -170,3 +170,67 @@ def create_circular_mesh(radius, c, f_max, ppw) -> tuple:
     location_fns2 = [on_a_boundary]
 
     return (mesh, location_fns2, ele_type)
+
+def create_square_mesh_triangular(side_length, c, f_max, ppw) -> tuple:
+    """Create a square mesh with triangular elements using pygmsh
+
+    Args:
+        side_length: length of square side
+        c: speed of sound (m/s)
+        f_max: maximum frequency (Hz)
+        ppw: points per wavelength
+    """
+    dx = c / (f_max * ppw)
+    print(f"Target element size: {dx}")
+
+    # Create mesh
+    ele_type = 'TRI3'
+    cell_type = get_meshio_cell_type(ele_type)
+
+    # Create square mesh with pygmsh
+    with pygmsh.geo.Geometry() as geom:
+        # Create a rectangle (square)
+        half_side = side_length / 2
+        points = [
+            geom.add_point([-half_side, -half_side, 0.0], mesh_size=dx),
+            geom.add_point([half_side, -half_side, 0.0], mesh_size=dx),
+            geom.add_point([half_side, half_side, 0.0], mesh_size=dx),
+            geom.add_point([-half_side, half_side, 0.0], mesh_size=dx),
+        ]
+
+        # Create lines
+        lines = [
+            geom.add_line(points[0], points[1]),  # bottom
+            geom.add_line(points[1], points[2]),  # right
+            geom.add_line(points[2], points[3]),  # top
+            geom.add_line(points[3], points[0]),  # left
+        ]
+
+        # Create curve loop and surface
+        curve_loop = geom.add_curve_loop(lines)
+        geom.add_plane_surface(curve_loop)
+
+        # Generate mesh
+        meshio_mesh = geom.generate_mesh()
+
+    points = meshio_mesh.points[:, 0:2]
+    cells = meshio_mesh.cells_dict[cell_type]
+    cells = transform_cells(cells, points, ele_type)
+    mesh = Mesh(points, cells)
+
+    # Define boundary locations based on coordinates
+    def left(point):
+        return jnp.isclose(point[0], -half_side, atol=1e-5)
+
+    def right(point):
+        return jnp.isclose(point[0], half_side, atol=1e-5)
+
+    def bottom(point):
+        return jnp.isclose(point[1], -half_side, atol=1e-5)
+
+    def top(point):
+        return jnp.isclose(point[1], half_side, atol=1e-5)
+
+    location_fns = [left, right, bottom, top]
+
+    return (mesh, location_fns, ele_type)
