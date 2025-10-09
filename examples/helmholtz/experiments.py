@@ -5,38 +5,38 @@ import optax
 import matplotlib.pyplot as plt
 from jax_fem.solver import ad_wrapper, solver
 
-from mesh_setup import create_circular_mesh, create_rectangular_mesh
-from problems import AcousticHelmholtzImpedance, AcousticHelmholtzNeumann, Source
-from losses import J_objective, compute_acoustic_loss
+from mesh_setup import create_circular_mesh, create_rectangular_mesh_quads, create_rectangular_mesh_triangular
+from problems import AcousticHelmholtzImpedance, Source
+from losses import acoustic_focus_loss, compute_acoustic_loss
 
-def optimize_impedance(fwd_pred, problem, measurements, n_iterations, learning_rate):
-    """Optimize impedance to match measurements."""    
-
-    # Initialize impedance parameters
-    # Could be scalar, or array for spatially-varying impedance    
-    Z_init = 3.0 + 0.05j
+def optimize_impedance_focus_point(fwd_pred, problem, receiver_zone, beta, n_iterations, learning_rate):
+    """Optimize impedance to match measurements."""
     
     # Set up optimizer
     optimizer = optax.sgd(learning_rate)
-    opt_state = optimizer.init(Z_init)
+    opt_state = optimizer.init(beta)
 
-    Z_opt = Z_init
+    beta_opt = beta
     
     losses = []
-    Z_opt_list = []
+    beta_opt_list = []
     
     for i in range(n_iterations):
         # Compute loss and gradient
-        loss_fn = lambda Z: J_objective(Z, fwd_pred, problem, measurements)
-        loss, grad = jax.value_and_grad(loss_fn)(Z_opt)
+        loss_fn = lambda beta: acoustic_focus_loss(
+            problem, 
+            fwd_pred(beta), 
+            receiver_zone,
+        )
+        loss, grad = jax.value_and_grad(loss_fn)(beta_opt)
         grad = jnp.real(grad) -1j * jnp.imag(grad)
         
         # Update parameters
         updates, opt_state = optimizer.update(grad, opt_state)
-        Z_opt = optax.apply_updates(Z_opt, updates)
+        beta_opt = optax.apply_updates(beta_opt, updates)
         
         losses.append(loss)
-        Z_opt_list.append(Z_opt)
+        beta_opt_list.append(beta_opt)
         
         # Warning signs
         grad_norm = jnp.linalg.norm(grad)
@@ -46,21 +46,69 @@ def optimize_impedance(fwd_pred, problem, measurements, n_iterations, learning_r
             print("⚠️ WARNING: Gradient vanishing!")
             
         if i % 10 == 0:
-            print(f"\n*** Iteration {i}: Loss = {loss:.6f}, Z = {Z_opt} ***\n")
+            print(f"\n*** Iteration {i}: Loss = {loss:.6f}, Z = {beta_opt} ***\n")
     
-    return Z_opt, losses, Z_opt_list
+    return beta_opt, losses, beta_opt_list
+
+def optimize_impedance(fwd_pred, problem, measurements, n_iterations, learning_rate):
+    """Optimize impedance to match measurements."""    
+
+    # Initialize impedance parameters
+    # Could be scalar, or array for spatially-varying impedance    
+    beta_init = 3.0 + 0.05j
+    
+    # Set up optimizer
+    optimizer = optax.sgd(learning_rate)
+    opt_state = optimizer.init(beta_init)
+
+    beta_opt = beta_init
+    
+    losses = []
+    beta_opt_list = []
+    
+    for i in range(n_iterations):
+        # Compute loss and gradient
+        loss_fn = lambda beta: compute_acoustic_loss(
+            problem, fwd_pred(beta), measurements,
+            w_mag=0.5,
+            w_phase=0.5,
+            w_rel=0.0 # Helps with scaling
+        )
+        loss, grad = jax.value_and_grad(loss_fn)(beta_opt)
+        grad = jnp.real(grad) -1j * jnp.imag(grad)
+        
+        # Update parameters
+        updates, opt_state = optimizer.update(grad, opt_state)
+        beta_opt = optax.apply_updates(beta_opt, updates)
+        
+        losses.append(loss)
+        beta_opt_list.append(beta_opt)
+        
+        # Warning signs
+        grad_norm = jnp.linalg.norm(grad)
+        if grad_norm > 1e3:
+            print("⚠️ WARNING: Gradient explosion!")
+        if grad_norm < 1e-8:
+            print("⚠️ WARNING: Gradient vanishing!")
+            
+        if i % 10 == 0:
+            print(f"\n*** Iteration {i}: Loss = {loss:.6f}, Z = {beta_opt} ***\n")
+    
+    return beta_opt, losses, beta_opt_list
 
 def estimate_boundary_impedance(
     Lx, Ly,
     f_max,
     c,
-    Z_true,  
-    source_center=[1.0, 1.0],
+    beta_true,
+    source_center,
     ppw = 5.0,
     n_iterations = 200,
     learning_rate = 0.1,
-):    
-    mesh, location_fns2, ele_type = create_rectangular_mesh(Lx, Ly, c, f_max, ppw)
+): 
+    mesh, location_fns, ele_type = create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw, uniform_bc=False)
+    #WARNING: Gradient vanishing!
+    #mesh, location_fns, ele_type = create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw, uniform_bc=False)
 
     k_max = 2 * jnp.pi * f_max / c # wave number    
     source = Source(k_max=k_max, center=source_center, amplitude=1000)
@@ -69,13 +117,11 @@ def estimate_boundary_impedance(
     problem = AcousticHelmholtzImpedance(
         mesh=mesh, k=k_max, source_params=source,
         vec=1, dim=2, ele_type=ele_type,
-        # dirichlet_bc_info=dirichlet_bc_info, 
-        location_fns=location_fns2,
+        location_fns=location_fns,
         gauss_order=1)    
     
     fwd_pred = ad_wrapper(problem)
-
-    measurements = fwd_pred(Z_true)
+    measurements = fwd_pred(beta_true)
 
     # Add noise to measurements
     # measurements = measurements + 0.01 * jax.random.normal(jax.random.PRNGKey(0), measurements.shape)
@@ -85,8 +131,8 @@ def estimate_boundary_impedance(
     # Optimize
     Z_opt, losses, Z_opt_list = optimize_impedance(fwd_pred, problem, measurements, n_iterations=n_iterations, learning_rate=learning_rate)
 
-    print(f"\nTrue impedance: {Z_true}")
-    print(f"Estimated impedance: {Z_opt}")
+    print(f"\nTrue admittance: {beta_true}")
+    print(f"Estimated admittance: {Z_opt}")
 
     # Plot convergence
     plt.figure(figsize=(10, 4))
@@ -112,20 +158,83 @@ def estimate_boundary_impedance(
     # ... visualization code ...
     plt.show()
 
+def estimate_impedance_max_focus(
+    Lx, Ly,
+    f_max,
+    c,
+    beta,
+    source_center,
+    receiver_zone,    
+    ppw = 5.0,
+    n_iterations = 200,
+    learning_rate = 0.1,
+):    
+    # mesh, location_fns, ele_type = create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw)
+    mesh, location_fns, ele_type = create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw)
+
+    k_max = 2 * jnp.pi * f_max / c # wave number    
+    source = Source(k_max=k_max, center=source_center, amplitude=1000)
+
+    # Create problem instance
+    problem = AcousticHelmholtzImpedance(
+        mesh=mesh, k=k_max, source_params=source,
+        vec=1, dim=2, ele_type=ele_type,
+        location_fns=location_fns,
+        gauss_order=1)    
+    
+    fwd_pred = ad_wrapper(problem)
+    
+    # Optimize
+    Z_opt, losses, Z_opt_list = optimize_impedance_focus_point(
+        fwd_pred, problem, 
+        receiver_zone, 
+        beta, 
+        n_iterations=n_iterations, 
+        learning_rate=learning_rate
+    )
+
+    print(f"\Original admittance: {beta}")
+    print(f"Optimized impedance: {Z_opt}")
+
+    # Plot convergence
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 3, 1)
+    plt.semilogy(losses)
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Convergence')
+
+    plt.subplot(1, 3, 2)
+    plt.plot(np.real(Z_opt_list))
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Z (real)')
+
+    plt.subplot(1, 3, 3)
+    plt.plot(np.imag(Z_opt_list))
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('Z (imag)')
         
+    # Plot pressure field
+    # ... visualization code ...
+    plt.show()
+
 def frequency_to_time_domain(
     Lx, Ly,
     f_min,
     f_max,
     c,
-    Z,    
-    source_center=[1.0, 1.0],
+    beta,
+    source_center,
     ppw = 5.0,
 ):
     df = 10 # Hz (frequency resolution) TODO: calculate from time requirement?
     k_max = 2 * jnp.pi * f_max / c # wave number
 
-    mesh, location_fns2, ele_type = create_rectangular_mesh(Lx, Ly, c, f_max, ppw)
+    
+    mesh, location_fns, ele_type = create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw, uniform_bc=True)
+    # mesh, location_fns2, ele_type = create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw)
 
     N_freq = int((f_max - f_min) / df) + 1
     frequencies = np.linspace(f_min, f_max, N_freq)
@@ -141,10 +250,9 @@ def frequency_to_time_domain(
         problem = AcousticHelmholtzImpedance(
             mesh=mesh, k=k, source_params=source,
             vec=1, dim=2, ele_type=ele_type,
-            # dirichlet_bc_info=dirichlet_bc_info, 
-            location_fns=location_fns2,
+            location_fns=location_fns,
             gauss_order=1)        
-        problem.set_params(Z)
+        problem.set_params(beta)
 
         sol = solver(problem)
         pressure_freq.append(sol[0][:, 0])
@@ -183,13 +291,14 @@ def frequency_to_time_domain_circular(
     f_min,
     f_max,
     c,
-    source_center=[1.0, 1.0],
+    beta,
+    source_center,
     ppw = 5.0,
 ):
     df = 10 # Hz (frequency resolution) TODO: calculate from time requirement?
     k_max = 2 * jnp.pi * f_max / c # wave number
 
-    mesh, location_fns2, ele_type = create_circular_mesh(radius, c, f_max, ppw)
+    mesh, location_fns, ele_type = create_circular_mesh(radius, c, f_max, ppw)
 
     N_freq = int((f_max - f_min) / df) + 1
     frequencies = np.linspace(f_min, f_max, N_freq)
@@ -202,12 +311,12 @@ def frequency_to_time_domain_circular(
         k = 2 * jnp.pi * f / c
         
         # Create problem instance
-        problem = AcousticHelmholtzNeumann(
+        problem = AcousticHelmholtzImpedance(
             mesh=mesh, k=k, source_params=source,
             vec=1, dim=2, ele_type=ele_type,
-            # dirichlet_bc_info=dirichlet_bc_info, 
-            location_fns=location_fns2,
-            gauss_order=1)
+            location_fns=location_fns,
+            gauss_order=1)        
+        problem.set_params(beta)
 
         sol = solver(problem)
         pressure_freq.append(sol[0][:, 0])

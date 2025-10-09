@@ -5,6 +5,15 @@ import pygmsh
 import meshio
 import numpy as np
 
+def get_boundary_node_indices(mesh):
+        boundary_nodes = set()
+        for cell_block in mesh.cells:
+            if cell_block.type == "line":
+                for edge in cell_block.data:
+                    boundary_nodes.add(edge[0])
+                    boundary_nodes.add(edge[1])
+        return np.array(sorted(boundary_nodes))
+
 def create_circle_meshio(radius=1.0, mesh_size=0.1) -> meshio.Mesh:
     """Create a 2D circle mesh using pygmsh
     
@@ -18,15 +27,6 @@ def create_circle_meshio(radius=1.0, mesh_size=0.1) -> meshio.Mesh:
         geom.add_plane_surface(circle.curve_loop)
         # Generate mesh
         mesh = geom.generate_mesh()
-
-    def get_boundary_node_indices(mesh):
-        boundary_nodes = set()
-        for cell_block in mesh.cells:
-            if cell_block.type == "line":
-                for edge in cell_block.data:
-                    boundary_nodes.add(edge[0])
-                    boundary_nodes.add(edge[1])
-        return np.array(sorted(boundary_nodes))
 
     bc_indxs = get_boundary_node_indices(mesh)
     
@@ -51,45 +51,114 @@ def create_circle_meshio(radius=1.0, mesh_size=0.1) -> meshio.Mesh:
 
     return mesh, bc_indxs
 
-def create_rectangular_mesh(Lx, Ly, c, f_max, ppw) -> tuple:
+def create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw, uniform_bc=True) -> tuple:
+    """Create a rectangular mesh with triangular elements using pygmsh
+
+    Args:
+        side_length: length of square side
+        c: speed of sound (m/s)
+        f_max: maximum frequency (Hz)
+        ppw: points per wavelength
+    """
+    dx = c / (f_max * ppw)
+    print(f"Target element size: {dx}")
+
+    # Create mesh
+    ele_type = 'TRI3'
+    cell_type = get_meshio_cell_type(ele_type)
+
+    # Create square mesh with pygmsh
+    with pygmsh.geo.Geometry() as geom:
+        # Create a rectangle (square)
+        Lx_half = Lx / 2
+        Ly_half = Ly / 2
+        points = [
+            geom.add_point([-Lx_half, -Ly_half, 0.0], mesh_size=dx),
+            geom.add_point([Lx_half, -Ly_half, 0.0], mesh_size=dx),
+            geom.add_point([Lx_half, Ly_half, 0.0], mesh_size=dx),
+            geom.add_point([-Lx_half, Ly_half, 0.0], mesh_size=dx),
+        ]
+
+        # Create lines
+        lines = [
+            geom.add_line(points[0], points[1]),  # bottom
+            geom.add_line(points[1], points[2]),  # right
+            geom.add_line(points[2], points[3]),  # top
+            geom.add_line(points[3], points[0]),  # left
+        ]
+
+        # Create curve loop and surface
+        curve_loop = geom.add_curve_loop(lines)
+        geom.add_plane_surface(curve_loop)
+
+        # Generate mesh
+        meshio_mesh = geom.generate_mesh()
+
+    if uniform_bc:
+        bc_indxs = get_boundary_node_indices(meshio_mesh)
+        def on_a_boundary(point, indx):
+            return jnp.isin(indx, bc_indxs)
+
+        location_fns = [on_a_boundary]
+    else:
+        # Define boundary locations based on coordinates
+        def left(point):
+            return jnp.isclose(point[0], -Lx, atol=1e-5)
+
+        def right(point):
+            return jnp.isclose(point[0], Lx, atol=1e-5)
+
+        def bottom(point):
+            return jnp.isclose(point[1], -Ly, atol=1e-5)
+
+        def top(point):
+            return jnp.isclose(point[1], Ly, atol=1e-5)
+
+        location_fns = [left, right, bottom, top]
+
+    points = meshio_mesh.points[:, 0:2]
+    cells = meshio_mesh.cells_dict[cell_type]
+    cells = transform_cells(cells, points, ele_type) # not sure this is needed
+    mesh = Mesh(points, cells)
+
+    return (mesh, location_fns, ele_type)
+
+def create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw, uniform_bc=True) -> tuple:
     dx = c / (f_max * ppw)
     print(dx)
 
     # Create mesh
     ele_type = 'QUAD4'
     cell_type = get_meshio_cell_type(ele_type)
+    
+    Nx, Ny = ceil(Lx / dx), ceil(Ly / dx) # mesh resolution
+    meshio_mesh = rectangle_mesh(Nx, Ny, Lx, Ly)    
 
-    Nx, Ny = ceil(Lx / dx), ceil(Ly / dx)      # mesh resolution
-    meshio_mesh = rectangle_mesh(Nx, Ny, Lx, Ly)
+    if uniform_bc:
+        bc_indxs = get_boundary_node_indices(meshio_mesh)
+        def on_a_boundary(point, indx):
+            return jnp.isin(indx, bc_indxs)
+
+        location_fns = [on_a_boundary]
+    else:
+        # define boundary locations
+        def left(point):
+            return jnp.isclose(point[0], 0., atol=1e-5)
+
+        def right(point):
+            return jnp.isclose(point[0], Lx, atol=1e-5)
+
+        def bottom(point):
+            return jnp.isclose(point[1], 0., atol=1e-5)
+
+        def top(point):
+            return jnp.isclose(point[1], Ly, atol=1e-5)
+        
+        location_fns = [left, right, bottom, top]    
+
     mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
 
-    # define boundary locations
-    def left(point):
-        return jnp.isclose(point[0], 0., atol=1e-5)
-
-    def right(point):
-        return jnp.isclose(point[0], Lx, atol=1e-5)
-
-    def bottom(point):
-        return jnp.isclose(point[1], 0., atol=1e-5)
-
-    def top(point):
-        return jnp.isclose(point[1], Ly, atol=1e-5)
-
-    # def dirichlet_val_left(point):
-    #     return 0.
-
-    # def dirichlet_val_right(point):
-    #     return 0.
-
-    # location_fns1 = [left, right]
-    # value_fns = [dirichlet_val_left, dirichlet_val_right]
-    # vecs = [0, 0]
-    # dirichlet_bc_info = [location_fns1, vecs, value_fns]
-
-    location_fns2 = [left, right, bottom, top]
-
-    return (mesh, location_fns2, ele_type)
+    return (mesh, location_fns, ele_type)
 
 # [copied from jax-fem application examples]
 # A little program to find orientation of 3 points
@@ -161,7 +230,7 @@ def create_circular_mesh(radius, c, f_max, ppw) -> tuple:
     meshio_mesh, bc_indxs = create_circle_meshio(radius=radius, mesh_size=dx)
     points = meshio_mesh.points[:, 0:2]
     cells = meshio_mesh.cells_dict[cell_type]
-    cells = transform_cells(cells, points, ele_type)
+    cells = transform_cells(cells, points, ele_type) # not sure this is needed
     mesh = Mesh(points, cells)
 
     def on_a_boundary(point, indx):
