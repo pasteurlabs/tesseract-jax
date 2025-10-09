@@ -30,7 +30,7 @@ def get_quadrature_point_coordinates(fe):
     
     return coords
 
-def acoustic_focus_loss(problem, sol_list_pred, zone):
+def acoustic_focus_loss(problem, sol_list_pred, zone, quad_coords=None):
     """
     Compute loss in a zone around a receiver.
     
@@ -40,7 +40,8 @@ def acoustic_focus_loss(problem, sol_list_pred, zone):
     """
     p_pred_quad = problem.fes[0].convert_from_dof_to_quad(sol_list_pred[0])
 
-    quad_coords = get_quadrature_point_coordinates(problem.fes[0])
+    if quad_coords is None:
+        quad_coords = get_quadrature_point_coordinates(problem.fes[0])
     JxW = problem.fes[0].JxW[:, :, None]
     
     center = jnp.array(zone['center'])

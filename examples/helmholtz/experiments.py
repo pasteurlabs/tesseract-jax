@@ -7,7 +7,7 @@ from jax_fem.solver import ad_wrapper, solver
 
 from mesh_setup import create_circular_mesh, create_rectangular_mesh_quads, create_rectangular_mesh_triangular
 from problems import AcousticHelmholtzImpedance, Source
-from losses import acoustic_focus_loss, compute_acoustic_loss
+from losses import acoustic_focus_loss, compute_acoustic_loss, get_quadrature_point_coordinates
 
 def optimize_impedance_focus_point(fwd_pred, problem, receiver_zone, beta, n_iterations, learning_rate):
     """Optimize impedance to match measurements."""
@@ -21,12 +21,16 @@ def optimize_impedance_focus_point(fwd_pred, problem, receiver_zone, beta, n_ite
     losses = []
     beta_opt_list = []
     
+    # should be static!
+    quad_coords = get_quadrature_point_coordinates(problem.fes[0])
+    
     for i in range(n_iterations):
         # Compute loss and gradient
         loss_fn = lambda beta: acoustic_focus_loss(
             problem, 
             fwd_pred(beta), 
             receiver_zone,
+            quad_coords,
         )
         loss, grad = jax.value_and_grad(loss_fn)(beta_opt)
         grad = jnp.real(grad) -1j * jnp.imag(grad)
