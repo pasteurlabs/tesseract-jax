@@ -7,7 +7,10 @@ from jax_fem.solver import ad_wrapper, solver
 
 from mesh_setup import create_circular_mesh, create_rectangular_mesh_quads, create_rectangular_mesh_triangular
 from problems import AcousticHelmholtzImpedance, Source
-from losses import acoustic_focus_loss, compute_acoustic_loss, get_quadrature_point_coordinates
+from losses import acoustic_focus_loss, compute_acoustic_loss, compute_acoustic_loss_zone, get_quadrature_point_coordinates
+
+plt.matplotlib.rcParams.update({'font.size': 22})
+linewidth=4
 
 def optimize_impedance_focus_point(fwd_pred, problem, receiver_zone, beta, n_iterations, learning_rate):
     """Optimize impedance to match measurements."""
@@ -54,7 +57,7 @@ def optimize_impedance_focus_point(fwd_pred, problem, receiver_zone, beta, n_ite
     
     return beta_opt, losses, beta_opt_list
 
-def optimize_impedance(fwd_pred, problem, measurements, n_iterations, learning_rate):
+def optimize_impedance(fwd_pred, problem, measurements, receiver_zones, n_iterations, learning_rate):
     """Optimize impedance to match measurements."""    
 
     # Initialize impedance parameters
@@ -70,13 +73,16 @@ def optimize_impedance(fwd_pred, problem, measurements, n_iterations, learning_r
     losses = []
     beta_opt_list = []
     
+    # should be static!
+    quad_coords = get_quadrature_point_coordinates(problem.fes[0])
+
     for i in range(n_iterations):
         # Compute loss and gradient
-        loss_fn = lambda beta: compute_acoustic_loss(
-            problem, fwd_pred(beta), measurements,
+        loss_fn = lambda beta: compute_acoustic_loss_zone(
+            problem, fwd_pred(beta)[0], measurements, receiver_zones, quad_coords,
             w_mag=0.5,
-            w_phase=0.5,
-            w_rel=0.0 # Helps with scaling
+            w_phase=0.1,
+            w_rel=5.0 # Helps with scaling
         )
         loss, grad = jax.value_and_grad(loss_fn)(beta_opt)
         grad = jnp.real(grad) -1j * jnp.imag(grad)
@@ -106,12 +112,15 @@ def estimate_boundary_impedance(
     c,
     beta_true,
     source_center,
+    receiver_zones,
     ppw = 5.0,
     n_iterations = 200,
     learning_rate = 0.1,
+    noise_level = 0.02,
+    save_plots=False,
 ): 
     mesh, location_fns, ele_type = create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw, uniform_bc=False)
-    #WARNING: Gradient vanishing!
+    # NOTE: Gradients are vanishing for triangular mesh
     #mesh, location_fns, ele_type = create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw, uniform_bc=False)
 
     k_max = 2 * jnp.pi * f_max / c # wave number    
@@ -128,101 +137,60 @@ def estimate_boundary_impedance(
     measurements = fwd_pred(beta_true)
 
     # Add noise to measurements
-    # measurements = measurements + 0.01 * jax.random.normal(jax.random.PRNGKey(0), measurements.shape)
-
-    # test_impedance_sensitivity(problem, fwd_pred, Z_true=1.5+0.3j)
+    measurements = measurements[0] + noise_level * jax.random.normal(jax.random.PRNGKey(0), measurements[0].shape)
     
     # Optimize
-    Z_opt, losses, Z_opt_list = optimize_impedance(fwd_pred, problem, measurements, n_iterations=n_iterations, learning_rate=learning_rate)
+    Z_opt, losses, Z_opt_list = optimize_impedance(fwd_pred, problem, measurements, receiver_zones, n_iterations=n_iterations, learning_rate=learning_rate)
 
     print(f"\nTrue admittance: {beta_true}")
     print(f"Estimated admittance: {Z_opt}")
-
-    # Plot convergence
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 3, 1)
-    plt.semilogy(losses)
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Convergence')
-
-    plt.subplot(1, 3, 2)
-    plt.plot(np.real(Z_opt_list))
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Z (real)')
-
-    plt.subplot(1, 3, 3)
-    plt.plot(np.imag(Z_opt_list))
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Z (imag)')
-        
-    # Plot pressure field
-    # ... visualization code ...
-    plt.show()
-
-def estimate_impedance_max_focus(
-    Lx, Ly,
-    f_max,
-    c,
-    beta,
-    source_center,
-    receiver_zone,    
-    ppw = 5.0,
-    n_iterations = 200,
-    learning_rate = 0.1,
-):    
-    # mesh, location_fns, ele_type = create_rectangular_mesh_quads(Lx, Ly, c, f_max, ppw)
-    mesh, location_fns, ele_type = create_rectangular_mesh_triangular(Lx, Ly, c, f_max, ppw)
-
-    k_max = 2 * jnp.pi * f_max / c # wave number    
-    source = Source(k_max=k_max, center=source_center, amplitude=1000)
-
-    # Create problem instance
-    problem = AcousticHelmholtzImpedance(
-        mesh=mesh, k=k_max, source_params=source,
-        vec=1, dim=2, ele_type=ele_type,
-        location_fns=location_fns,
-        gauss_order=1)    
     
-    fwd_pred = ad_wrapper(problem)
-    
-    # Optimize
-    Z_opt, losses, Z_opt_list = optimize_impedance_focus_point(
-        fwd_pred, problem, 
-        receiver_zone, 
-        beta, 
-        n_iterations=n_iterations, 
-        learning_rate=learning_rate
-    )
-
-    print(f"\Original admittance: {beta}")
-    print(f"Optimized impedance: {Z_opt}")
-
-    # Plot convergence
-    plt.figure(figsize=(10, 4))
-    plt.subplot(1, 3, 1)
-    plt.semilogy(losses)
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Convergence')
-
-    plt.subplot(1, 3, 2)
-    plt.plot(np.real(Z_opt_list))
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Z (real)')
-
-    plt.subplot(1, 3, 3)
-    plt.plot(np.imag(Z_opt_list))
-    plt.xlabel('Iteration')
-    plt.ylabel('Loss')
-    plt.title('Z (imag)')
+    if save_plots:
+        # Plot convergence
+        plt.figure(figsize=(10, 8))
+        plt.semilogy(losses, linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.grid()
+        plt.savefig(f"convergence.png", bbox_inches='tight', pad_inches=0)
         
-    # Plot pressure field
-    # ... visualization code ...
-    plt.show()
+        plt.figure(figsize=(10, 8))
+        plt.plot(np.real(Z_opt_list), linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel(r'$\beta$ (real)')
+        plt.grid()
+        plt.savefig(f"betal_real.png", bbox_inches='tight', pad_inches=0)
+        
+        plt.figure(figsize=(10, 8))
+        plt.plot(np.imag(Z_opt_list), linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel(r'$\beta$ (imag)')
+        plt.grid()
+        plt.savefig(f"betal_imag.png", bbox_inches='tight', pad_inches=0)
+    else:
+        # Plot convergence
+        plt.figure(figsize=(10, 4))
+        plt.subplot(1, 3, 1)
+        plt.semilogy(losses, linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel('Loss')
+        plt.grid()        
+        plt.title('Convergence')
+        
+        plt.subplot(1, 3, 2)
+        plt.plot(np.real(Z_opt_list), linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel(r'$\beta$ (real)')
+        plt.grid()
+        plt.title('Normalized admittance (real)')
+        
+        plt.subplot(1, 3, 3)
+        plt.plot(np.imag(Z_opt_list), linewidth=4)
+        plt.xlabel('Iteration')
+        plt.ylabel(r'$\beta$ (imag)')
+        plt.grid()
+        plt.title('Normalized admittance (imag)')
+        plt.show()
 
 def frequency_to_time_domain(
     Lx, Ly,
