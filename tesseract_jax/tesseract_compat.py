@@ -52,6 +52,19 @@ def unflatten_args(
     if remove_static_args:
         result = _prune_nones(result)
 
+    # Since jax 0.8, when tracing stuff without jit arrays are wrapped
+    # by TypedNdArray (thin wrapper around a numpy array); this snippet converts them
+    # back to ndarrays for downstream calculations.
+    try:
+        from jax._src.literals import TypedNdArray
+
+        result = jax.tree.map(
+            lambda v: v.val if isinstance(v, TypedNdArray) else v, result
+        )
+
+    except ImportError:
+        pass
+
     return result
 
 
