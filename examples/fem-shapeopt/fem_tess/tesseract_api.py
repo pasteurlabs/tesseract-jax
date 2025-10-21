@@ -4,7 +4,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from jax_fem.generate_mesh import Mesh, get_meshio_cell_type, rectangle_mesh
+from jax_fem.generate_mesh import Mesh, box_mesh, get_meshio_cell_type
 
 # Import JAX-FEM specific modules
 from jax_fem.problem import Problem
@@ -34,24 +34,23 @@ class InputSchema(BaseModel):
     )
     Ly: float = Field(
         default=30.0,
-        description=(
-            "Length of the plane in the y direction. "
-            "This is a scalar value that defines the size of the plane along the y-axis."
-        ),
+        description=("Length of the simulation box in the y direction."),
     )
+    Lz: float = Field(
+        default=30.0, description="Length of the simulation box in the z direction."
+    )
+
     Nx: int = Field(
         default=60,
-        description=(
-            "Number of elements in the x direction. "
-            "This is an integer value that defines the resolution of the mesh along the x-axis."
-        ),
+        description=("Number of elements in the x direction."),
     )
     Ny: int = Field(
         default=30,
-        description=(
-            "Number of elements in the y direction. "
-            "This is an integer value that defines the resolution of the mesh along the y-axis."
-        ),
+        description=("Number of elements in the y direction."),
+    )
+    Nz: int = Field(
+        default=30,
+        description=("Number of elements in the z direction."),
     )
 
 
@@ -131,13 +130,15 @@ class Elasticity(Problem):
 def setup(
     Nx: int = 60,
     Ny: int = 30,
+    Nz: int = 30,
     Lx: float = 60.0,
     Ly: float = 30.0,
+    Lz: float = 30.0,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use first-order quadrilateral element.
     ele_type = "QUAD4"
     cell_type = get_meshio_cell_type(ele_type)
-    meshio_mesh = rectangle_mesh(Nx=Nx, Ny=Ny, domain_x=Lx, domain_y=Ly)
+    meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
     mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
 
     # Define boundary conditions and values.
@@ -161,7 +162,7 @@ def setup(
     problem = Elasticity(
         mesh,
         vec=2,
-        dim=2,
+        dim=3,
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
         location_fns=location_fns,
@@ -182,8 +183,10 @@ def apply_fn(inputs: dict) -> dict:
     problem, fwd_pred = setup(
         Nx=inputs["Nx"],
         Ny=inputs["Ny"],
+        Nz=inputs["Nz"],
         Lx=inputs["Lx"],
         Ly=inputs["Ly"],
+        Lz=inputs["Lz"],
     )
     rho = inputs["rho"]
     sol_list = fwd_pred(rho)

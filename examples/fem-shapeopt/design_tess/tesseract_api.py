@@ -27,45 +27,37 @@ class InputSchema(BaseModel):
 
     bar_radius: float = Field(
         default=1.5,
-        description=(
-            "Radius of the bars in the geometry. "
-            "This is a scalar value that defines the thickness of the bars."
-        ),
+        description=("Radius of the bars in the geometry. "),
     )
 
     Lx: float = Field(
         default=60.0,
-        description=(
-            "Length of the plane in the x direction. "
-            "This is a scalar value that defines the size of the plane along the x-axis."
-        ),
+        description=("Length of the SDF box in the x direction. "),
     )
     Ly: float = Field(
         default=30.0,
-        description=(
-            "Length of the plane in the y direction. "
-            "This is a scalar value that defines the size of the plane along the y-axis."
-        ),
+        description=("Length of the SDF box in the y direction. "),
+    )
+    Lz: float = Field(
+        default=30.0,
+        description=("Length of the SDF box in the z direction. "),
     )
     Nx: int = Field(
         default=60,
-        description=(
-            "Number of points in the x direction. "
-            "This is an integer value that defines the resolution of the plane along the x-axis."
-        ),
+        description=("Number of elements in the x direction. "),
     )
     Ny: int = Field(
         default=30,
-        description=(
-            "Number of points in the y direction. "
-            "This is an integer value that defines the resolution of the plane along the y-axis."
-        ),
+        description=("Number of elements in the y direction. "),
+    )
+    Nz: int = Field(
+        default=30,
+        description=("Number of elements in the z direction. "),
     )
     epsilon: float = Field(
         default=1e-5,
         description=(
             "Epsilon value for finite difference approximation of the Jacobian. "
-            "This is a small scalar value used to compute the numerical gradient."
         ),
     )
 
@@ -73,10 +65,7 @@ class InputSchema(BaseModel):
 class OutputSchema(BaseModel):
     sdf: Differentiable[
         Array[
-            (
-                None,
-                None,
-            ),
+            (None, None, None),
             Float32,
         ]
     ] = Field(description="SDF field of the geometry")
@@ -110,22 +99,34 @@ def compute_sdf(
     radius: float,
     Lx: float,
     Ly: float,
+    Lz: float,
     Nx: int,
     Ny: int,
+    Nz: int,
 ) -> pv.PolyData:
     """Create a pyvista plane that has the SDF values stored as a vertex attribute.
 
     The SDF field is computed based on the geometry defined by the parameters.
     """
-    grid_coords = pv.Plane(
-        center=(0, 0, 0),
-        direction=(0, 0, 1),
-        i_size=Lx,
-        j_size=Ly,
-        i_resolution=Nx - 1,
-        j_resolution=Ny - 1,
-    )
-    grid_coords = grid_coords.triangulate()
+    # grid_coords = pv.Plane(
+    #     center=(0, 0, 0),
+    #     direction=(0, 0, 1),
+    #     i_size=Lx,
+    #     j_size=Ly,
+    #     i_resolution=Nx - 1,
+    #     j_resolution=Ny - 1,
+    # )
+
+    # xs, ys, zs = np.mgrid[
+    #     -Lx / 2 : Lx / 2 : Nx * 1j,
+    #     -Ly / 2 : Ly / 2 : Ny * 1j,
+    #     -Lz / 2 : Lz / 2 : Nz * 1j,
+    # ]
+    # box = pv.UnstructuredGrid
+
+    box = None
+
+    # grid_coords = box.triangulate()
 
     geometries = build_geometry(
         params,
@@ -138,7 +139,7 @@ def compute_sdf(
         # Compute the implicit distance from the geometry to the grid coordinates.
         # The implicit distance is a signed distance field, where positive values
         # are outside the geometry and negative values are inside.
-        this_sdf = grid_coords.compute_implicit_distance(geometry.triangulate())
+        this_sdf = box.compute_implicit_distance(geometry.triangulate())
         if sdf_field is None:
             sdf_field = this_sdf
         else:
@@ -154,8 +155,10 @@ def apply_fn(
     radius: float,
     Lx: float,
     Ly: float,
+    Lz: float,
     Nx: int,
     Ny: int,
+    Nz: int,
 ) -> np.ndarray:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
     sdf_geom = compute_sdf(
@@ -163,13 +166,15 @@ def apply_fn(
         radius=radius,
         Lx=Lx,
         Ly=Ly,
+        Lz=Lz,
         Nx=Nx,
         Ny=Ny,
+        Nz=Nz,
     )["implicit_distance"]
 
     # The implicit distance is a 1D where the indexing is tranposed.
     # We need to reshape it to a 2D array with the shape (Ny, Nx) and then transpose it to get the correct orientation.
-    return sdf_geom.reshape((Ny, Nx)).T
+    return sdf_geom.reshape((Ny, Nx, Nz)).T
 
 
 def jac_sdf_wrt_params(
@@ -177,8 +182,10 @@ def jac_sdf_wrt_params(
     radius: float,
     Lx: float,
     Ly: float,
+    Lz: float,
     Nx: int,
     Ny: int,
+    Nz: int,
     epsilon: float,
 ) -> np.ndarray:
     """Compute the Jacobian of the SDF values with respect to the parameters.
@@ -204,8 +211,10 @@ def jac_sdf_wrt_params(
         radius=radius,
         Lx=Lx,
         Ly=Ly,
+        Lz=Lz,
         Nx=Nx,
         Ny=Ny,
+        Nz=Nz,
     )
 
     for chain in range(n_chains):
@@ -220,8 +229,10 @@ def jac_sdf_wrt_params(
                 radius=radius,
                 Lx=Lx,
                 Ly=Ly,
+                Lz=Lz,
                 Nx=Nx,
                 Ny=Ny,
+                Nz=Nz,
             )
             jac[chain, vertex, i] = (sdf_epsilon - sdf_base) / epsilon
 
@@ -240,8 +251,10 @@ def apply(inputs: InputSchema) -> OutputSchema:
             radius=inputs.bar_radius,
             Lx=inputs.Lx,
             Ly=inputs.Ly,
+            Lz=inputs.Lz,
             Nx=inputs.Nx,
             Ny=inputs.Ny,
+            Nz=inputs.Nz,
         )
     )
 
@@ -260,8 +273,10 @@ def vector_jacobian_product(
         radius=inputs.bar_radius,
         Lx=inputs.Lx,
         Ly=inputs.Ly,
+        Lz=inputs.Lz,
         Nx=inputs.Nx,
         Ny=inputs.Ny,
+        Nz=inputs.Nz,
         epsilon=inputs.epsilon,
     )
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
