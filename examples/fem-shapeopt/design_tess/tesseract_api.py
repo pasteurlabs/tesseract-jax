@@ -238,21 +238,21 @@ def jac_sdf_wrt_params(
     for chain in range(n_chains):
         for vertex in range(0, n_edges_per_chain + 1):
             # we only care about the y coordinate
-            i = 1
-            params_eps = params.copy()
-            params_eps[chain, vertex, i] += epsilon
+            for i in [1, 2]:
+                params_eps = params.copy()
+                params_eps[chain, vertex, i] += epsilon
 
-            sdf_epsilon, _ = apply_fn(
-                params_eps,
-                radius=radius,
-                Lx=Lx,
-                Ly=Ly,
-                Lz=Lz,
-                Nx=Nx,
-                Ny=Ny,
-                Nz=Nz,
-            )
-            jac[chain, vertex, i] = (sdf_epsilon - sd_field_base) / epsilon
+                sdf_epsilon, _ = apply_fn(
+                    params_eps,
+                    radius=radius,
+                    Lx=Lx,
+                    Ly=Ly,
+                    Lz=Lz,
+                    Nx=Nx,
+                    Ny=Ny,
+                    Nz=Nz,
+                )
+                jac[chain, vertex, i] = (sdf_epsilon - sd_field_base) / epsilon
 
     return jac
 

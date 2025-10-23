@@ -87,20 +87,31 @@ class Elasticity(Problem):
             penal = 3.0
             E = Emin + (Emax - Emin) * theta[0] ** penal
             epsilon = 0.5 * (u_grad + u_grad.T)
-            eps11 = epsilon[0, 0]
-            eps22 = epsilon[1, 1]
-            eps12 = epsilon[0, 1]
-            sig11 = E / (1 + nu) / (1 - nu) * (eps11 + nu * eps22)
-            sig22 = E / (1 + nu) / (1 - nu) * (nu * eps11 + eps22)
-            sig12 = E / (1 + nu) * eps12
-            sigma = jnp.array([[sig11, sig12], [sig12, sig22]])
+            # eps11 = epsilon[0, 0]
+            # eps22 = epsilon[1, 1]
+            # eps12 = epsilon[0, 1]
+            # mu = E / (2 * (1 + nu))
+            # sigma = jnp.trace(epsilon) * jnp.eye(self.dim) + 2*mu*epsilon
+            # # sig11 = E / (1 + nu) / (1 - nu) * (eps11 + nu * eps22)
+            # # sig22 = E / (1 + nu) / (1 - nu) * (nu * eps11 + eps22)
+            # # sig12 = E / (1 + nu) * eps12
+            # # sigma = jnp.array([[sig11, sig12], [sig12, sig22]])
+
+            # Correct 3D linear elasticity constitutive law
+            # Lamé parameters
+            lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))  # First Lamé parameter
+            mu = E / (2.0 * (1.0 + nu))  # Second Lamé parameter (shear modulus)
+
+            # Stress-strain relationship
+            sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2.0 * mu * epsilon
+
             return sigma
 
         return stress
 
     def get_surface_maps(self):
         def surface_map(u, x):
-            return jnp.array([0.0, 100.0])
+            return jnp.array([0.0, 0.0, 100.0])
 
         return [surface_map]
 
@@ -138,7 +149,7 @@ def setup(
     Ly: float = 30.0,
     Lz: float = 30.0,
 ) -> tuple[Elasticity, Callable]:
-    # Specify mesh-related information. We use first-order quadrilateral element.
+    # Specify mesh-related information. We use a structured box mesh here.
     ele_type = "HEX8"
     cell_type = get_meshio_cell_type(ele_type)
     meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
@@ -157,14 +168,14 @@ def setup(
     def dirichlet_val(point):
         return 0.0
 
-    dirichlet_bc_info = [[fixed_location] * 2, [0, 1], [dirichlet_val] * 2]
+    dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
 
     location_fns = [load_location]
 
     # Define forward problem
     problem = Elasticity(
         mesh,
-        vec=2,
+        vec=3,
         dim=3,
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
