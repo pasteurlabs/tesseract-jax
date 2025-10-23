@@ -2,6 +2,7 @@ from typing import Any
 
 import numpy as np
 import pyvista as pv
+import trimesh
 from pydantic import BaseModel, Field
 from pysdf import SDF
 from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
@@ -63,7 +64,23 @@ class InputSchema(BaseModel):
     )
 
 
+class TriangularMesh(BaseModel):
+    points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
+    faces: Array[(None, 3), Float32] = Field(
+        description="Array of triangular faces defined by indices into the points array."
+    )
+    n_points: int = Field(
+        default=0, description="Number of valid points in the points array."
+    )
+    n_faces: int = Field(
+        default=0, description="Number of valid faces in the faces array."
+    )
+
+
 class OutputSchema(BaseModel):
+    mesh: TriangularMesh = Field(
+        description="Triangular mesh representation of the geometry"
+    )
     sdf: Differentiable[
         Array[
             (None, None, None),
@@ -89,13 +106,14 @@ def build_geometry(
     geometry = []
 
     for chain in range(n_chains):
-        tube = pv.Spline(points=params[chain]).tube(radius=radius, capping=False)
+        tube = pv.Spline(points=params[chain]).tube(radius=radius, capping=True)
+        tube = tube.triangulate()
         geometry.append(tube)
 
     return geometry
 
 
-def pyvista_to_trimesh(mesh: pv.PolyData) -> tuple[np.ndarray, np.ndarray]:
+def pyvista_to_trimesh(mesh: pv.PolyData) -> trimesh.Trimesh:
     """Convert a pyvista mesh to a trimesh style polygon mesh."""
     points = mesh.points
     points_per_face = mesh.faces[0]
@@ -103,12 +121,11 @@ def pyvista_to_trimesh(mesh: pv.PolyData) -> tuple[np.ndarray, np.ndarray]:
 
     faces = mesh.faces.reshape(n_faces, (points_per_face + 1))[:, 1:]
 
-    return points, faces
+    return trimesh.Trimesh(vertices=points, faces=faces)
 
 
 def compute_sdf(
-    params: np.ndarray,
-    radius: float,
+    geometry: trimesh.Trimesh,
     Lx: float,
     Ly: float,
     Lz: float,
@@ -127,33 +144,14 @@ def compute_sdf(
         indexing="ij",
     )
 
-    geometries = build_geometry(
-        params,
-        radius=radius,
-    )
+    points, faces = geometry.vertices, geometry.faces
 
-    sd_field = None
+    sdf_function = SDF(points, faces)
 
-    # Compute the implicit distance from the geometry to the grid coordinates.
-    # The implicit distance is a signed distance field, where positive values
-    # are outside the geometry and negative values are inside.
-    for geometry in geometries:
-        # convert to trimesh from pyvista
-        geometry = pv.wrap(geometry).triangulate()
+    grid_points = np.vstack((x.ravel(), y.ravel(), z.ravel())).T
+    sdf_values = sdf_function(grid_points).astype(np.float32)
 
-        points, faces = pyvista_to_trimesh(geometry)
-
-        sdf_function = SDF(points, faces)
-
-        grid_points = np.vstack((x.ravel(), y.ravel(), z.ravel())).T
-        sdf_values = sdf_function(grid_points).astype(np.float32)
-
-        this_sd_field = sdf_values.reshape((Nx, Ny, Nz))
-
-        if sd_field is None:
-            sd_field = this_sd_field
-        else:
-            sd_field = np.minimum(sd_field, this_sd_field)
+    sd_field = sdf_values.reshape((Nx, Ny, Nz))
 
     return sd_field
 
@@ -167,11 +165,23 @@ def apply_fn(
     Nx: int,
     Ny: int,
     Nz: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, trimesh.Trimesh]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
-    sd_field = compute_sdf(
+    geometries = build_geometry(
         params,
         radius=radius,
+    )
+
+    # convert each geometry in a trimesh style mesh and combine them
+    base = pyvista_to_trimesh(geometries[0])
+
+    for geom in geometries[1:]:
+        other = pyvista_to_trimesh(geom)
+
+        base = base.union(other)
+
+    sd_field = compute_sdf(
+        base,
         Lx=Lx,
         Ly=Ly,
         Lz=Lz,
@@ -180,7 +190,7 @@ def apply_fn(
         Nz=Nz,
     )
 
-    return sd_field
+    return sd_field, base
 
 
 def jac_sdf_wrt_params(
@@ -212,7 +222,7 @@ def jac_sdf_wrt_params(
         )
     )
 
-    sd_field_base = apply_fn(
+    sd_field_base, _ = apply_fn(
         params,
         radius=radius,
         Lx=Lx,
@@ -249,19 +259,35 @@ def jac_sdf_wrt_params(
 # Tesseract endpoints
 #
 
+N_POINTS = 1000
+N_FACES = 2000
+
 
 def apply(inputs: InputSchema) -> OutputSchema:
+    sdf, mesh = apply_fn(
+        inputs.bar_params,
+        radius=inputs.bar_radius,
+        Lx=inputs.Lx,
+        Ly=inputs.Ly,
+        Lz=inputs.Lz,
+        Nx=inputs.Nx,
+        Ny=inputs.Ny,
+        Nz=inputs.Nz,
+    )
+    points = np.zeros((N_POINTS, 3), dtype=np.float32)
+    faces = np.zeros((N_FACES, 3), dtype=np.float32)
+
+    points[: mesh.vertices.shape[0], :] = mesh.vertices.astype(np.float32)
+    faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.float32)
+
     return OutputSchema(
-        sdf=apply_fn(
-            inputs.bar_params,
-            radius=inputs.bar_radius,
-            Lx=inputs.Lx,
-            Ly=inputs.Ly,
-            Lz=inputs.Lz,
-            Nx=inputs.Nx,
-            Ny=inputs.Ny,
-            Nz=inputs.Nz,
-        )
+        sdf=sdf,
+        mesh=TriangularMesh(
+            points=points,
+            faces=faces,
+            n_points=mesh.vertices.shape[0],
+            n_faces=mesh.faces.shape[0],
+        ),
     )
 
 
@@ -295,5 +321,11 @@ def abstract_eval(abstract_inputs):
     return {
         "sdf": ShapeDType(
             shape=(abstract_inputs.Nx, abstract_inputs.Ny), dtype="float32"
-        )
+        ),
+        "triangular_mesh": {
+            "points": ShapeDType(shape=(N_POINTS, 3), dtype="float32"),
+            "faces": ShapeDType(shape=(N_FACES, 3), dtype="float32"),
+            "n_points": ShapeDType(shape=(), dtype="int32"),
+            "n_faces": ShapeDType(shape=(), dtype="int32"),
+        },
     }
