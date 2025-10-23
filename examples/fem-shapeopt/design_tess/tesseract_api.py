@@ -5,7 +5,7 @@ import pyvista as pv
 import trimesh
 from pydantic import BaseModel, Field
 from pysdf import SDF
-from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
+from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
 
 #
 # Schemata
@@ -69,10 +69,10 @@ class TriangularMesh(BaseModel):
     faces: Array[(None, 3), Float32] = Field(
         description="Array of triangular faces defined by indices into the points array."
     )
-    n_points: int = Field(
+    n_points: Int32 = Field(
         default=0, description="Number of valid points in the points array."
     )
-    n_faces: int = Field(
+    n_faces: Int32 = Field(
         default=0, description="Number of valid faces in the faces array."
     )
 
@@ -97,7 +97,7 @@ class OutputSchema(BaseModel):
 def build_geometry(
     params: np.ndarray,
     radius: float,
-) -> list[pv.PolyData]:
+) -> list[trimesh.Trimesh]:
     """Build a pyvista geometry from the parameters.
 
     The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
@@ -106,8 +106,11 @@ def build_geometry(
     geometry = []
 
     for chain in range(n_chains):
-        tube = pv.Spline(points=params[chain]).tube(radius=radius, capping=True)
+        tube = pv.Spline(points=params[chain]).tube(
+            radius=radius, capping=True, n_sides=8
+        )
         tube = tube.triangulate()
+        tube = pyvista_to_trimesh(tube)
         geometry.append(tube)
 
     return geometry
@@ -173,12 +176,10 @@ def apply_fn(
     )
 
     # convert each geometry in a trimesh style mesh and combine them
-    base = pyvista_to_trimesh(geometries[0])
+    base = geometries[0]
 
     for geom in geometries[1:]:
-        other = pyvista_to_trimesh(geom)
-
-        base = base.union(other)
+        base = base.union(geom)
 
     sd_field = compute_sdf(
         base,
@@ -219,6 +220,7 @@ def jac_sdf_wrt_params(
             3,  # number of dimensions (x, y, z)
             Nx,
             Ny,
+            Nz,
         )
     )
 
@@ -240,7 +242,7 @@ def jac_sdf_wrt_params(
             params_eps = params.copy()
             params_eps[chain, vertex, i] += epsilon
 
-            sdf_epsilon = apply_fn(
+            sdf_epsilon, _ = apply_fn(
                 params_eps,
                 radius=radius,
                 Lx=Lx,
@@ -278,7 +280,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     faces = np.zeros((N_FACES, 3), dtype=np.float32)
 
     points[: mesh.vertices.shape[0], :] = mesh.vertices.astype(np.float32)
-    faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.float32)
+    faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.int32)
 
     return OutputSchema(
         sdf=sdf,
@@ -312,7 +314,7 @@ def vector_jacobian_product(
         epsilon=inputs.epsilon,
     )
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
-    vjp = np.einsum("ijklm,lm->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
+    vjp = np.einsum("ijklmn,lmn->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
     return {"bar_params": vjp}
 
 
@@ -320,9 +322,10 @@ def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
     return {
         "sdf": ShapeDType(
-            shape=(abstract_inputs.Nx, abstract_inputs.Ny), dtype="float32"
+            shape=(abstract_inputs.Nx, abstract_inputs.Ny, abstract_inputs.Nz),
+            dtype="float32",
         ),
-        "triangular_mesh": {
+        "mesh": {
             "points": ShapeDType(shape=(N_POINTS, 3), dtype="float32"),
             "faces": ShapeDType(shape=(N_FACES, 3), dtype="float32"),
             "n_points": ShapeDType(shape=(), dtype="int32"),

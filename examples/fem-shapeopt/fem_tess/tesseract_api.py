@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -13,6 +14,8 @@ from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
 
+crt_file_path = os.path.dirname(__file__)
+data_dir = os.path.join(crt_file_path, "data")
 #
 # Schemata
 #
@@ -136,7 +139,7 @@ def setup(
     Lz: float = 30.0,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use first-order quadrilateral element.
-    ele_type = "QUAD4"
+    ele_type = "HEX8"
     cell_type = get_meshio_cell_type(ele_type)
     meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
     mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
