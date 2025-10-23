@@ -3,6 +3,7 @@ from typing import Any
 import numpy as np
 import pyvista as pv
 from pydantic import BaseModel, Field
+from pysdf import SDF
 from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 
 #
@@ -94,6 +95,17 @@ def build_geometry(
     return geometry
 
 
+def pyvista_to_trimesh(mesh: pv.PolyData) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a pyvista mesh to a trimesh style polygon mesh."""
+    points = mesh.points
+    points_per_face = mesh.faces[0]
+    n_faces = mesh.faces.shape[0] // (points_per_face + 1)
+
+    faces = mesh.faces.reshape(n_faces, (points_per_face + 1))[:, 1:]
+
+    return points, faces
+
+
 def compute_sdf(
     params: np.ndarray,
     radius: float,
@@ -103,51 +115,47 @@ def compute_sdf(
     Nx: int,
     Ny: int,
     Nz: int,
-) -> pv.PolyData:
+) -> np.ndarray:
     """Create a pyvista plane that has the SDF values stored as a vertex attribute.
 
     The SDF field is computed based on the geometry defined by the parameters.
     """
-    # grid_coords = pv.Plane(
-    #     center=(0, 0, 0),
-    #     direction=(0, 0, 1),
-    #     i_size=Lx,
-    #     j_size=Ly,
-    #     i_resolution=Nx - 1,
-    #     j_resolution=Ny - 1,
-    # )
-
-    # xs, ys, zs = np.mgrid[
-    #     -Lx / 2 : Lx / 2 : Nx * 1j,
-    #     -Ly / 2 : Ly / 2 : Ny * 1j,
-    #     -Lz / 2 : Lz / 2 : Nz * 1j,
-    # ]
-    # box = pv.UnstructuredGrid
-
-    box = None
-
-    # grid_coords = box.triangulate()
+    x, y, z = np.meshgrid(
+        np.linspace(-Lx / 2, Lx / 2, Nx),
+        np.linspace(-Ly / 2, Ly / 2, Ny),
+        np.linspace(-Lz / 2, Lz / 2, Nz),
+        indexing="ij",
+    )
 
     geometries = build_geometry(
         params,
         radius=radius,
     )
 
-    sdf_field = None
+    sd_field = None
 
+    # Compute the implicit distance from the geometry to the grid coordinates.
+    # The implicit distance is a signed distance field, where positive values
+    # are outside the geometry and negative values are inside.
     for geometry in geometries:
-        # Compute the implicit distance from the geometry to the grid coordinates.
-        # The implicit distance is a signed distance field, where positive values
-        # are outside the geometry and negative values are inside.
-        this_sdf = box.compute_implicit_distance(geometry.triangulate())
-        if sdf_field is None:
-            sdf_field = this_sdf
-        else:
-            sdf_field["implicit_distance"] = np.minimum(
-                sdf_field["implicit_distance"], this_sdf["implicit_distance"]
-            )
+        # convert to trimesh from pyvista
+        geometry = pv.wrap(geometry).triangulate()
 
-    return sdf_field
+        points, faces = pyvista_to_trimesh(geometry)
+
+        sdf_function = SDF(points, faces)
+
+        grid_points = np.vstack((x.ravel(), y.ravel(), z.ravel())).T
+        sdf_values = sdf_function(grid_points).astype(np.float32)
+
+        this_sd_field = sdf_values.reshape((Nx, Ny, Nz))
+
+        if sd_field is None:
+            sd_field = this_sd_field
+        else:
+            sd_field = np.minimum(sd_field, this_sd_field)
+
+    return sd_field
 
 
 def apply_fn(
@@ -161,7 +169,7 @@ def apply_fn(
     Nz: int,
 ) -> np.ndarray:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
-    sdf_geom = compute_sdf(
+    sd_field = compute_sdf(
         params,
         radius=radius,
         Lx=Lx,
@@ -170,11 +178,9 @@ def apply_fn(
         Nx=Nx,
         Ny=Ny,
         Nz=Nz,
-    )["implicit_distance"]
+    )
 
-    # The implicit distance is a 1D where the indexing is tranposed.
-    # We need to reshape it to a 2D array with the shape (Ny, Nx) and then transpose it to get the correct orientation.
-    return sdf_geom.reshape((Ny, Nx, Nz)).T
+    return sd_field
 
 
 def jac_sdf_wrt_params(
@@ -206,7 +212,7 @@ def jac_sdf_wrt_params(
         )
     )
 
-    sdf_base = apply_fn(
+    sd_field_base = apply_fn(
         params,
         radius=radius,
         Lx=Lx,
@@ -234,7 +240,7 @@ def jac_sdf_wrt_params(
                 Ny=Ny,
                 Nz=Nz,
             )
-            jac[chain, vertex, i] = (sdf_epsilon - sdf_base) / epsilon
+            jac[chain, vertex, i] = (sdf_epsilon - sd_field_base) / epsilon
 
     return jac
 
