@@ -62,6 +62,16 @@ class InputSchema(BaseModel):
             "Epsilon value for finite difference approximation of the Jacobian. "
         ),
     )
+    normalize_jacobian: bool = Field(
+        default=False,
+        description=("Whether to normalize the Jacobian by the number of elements"),
+    )
+    normalize_vjp: bool = Field(
+        default=False,
+        description=(
+            "Whether to normalize the vector-Jacobian product (VJP) to have a std of 1. "
+        ),
+    )
 
 
 class TriangularMesh(BaseModel):
@@ -107,7 +117,7 @@ def build_geometry(
 
     for chain in range(n_chains):
         tube = pv.Spline(points=params[chain]).tube(
-            radius=radius, capping=True, n_sides=8
+            radius=radius, capping=True, n_sides=30
         )
         tube = tube.triangulate()
         tube = pyvista_to_trimesh(tube)
@@ -156,7 +166,7 @@ def compute_sdf(
 
     sd_field = sdf_values.reshape((Nx, Ny, Nz))
 
-    return sd_field
+    return -sd_field
 
 
 def apply_fn(
@@ -238,7 +248,7 @@ def jac_sdf_wrt_params(
     for chain in range(n_chains):
         for vertex in range(0, n_edges_per_chain + 1):
             # we only care about the y coordinate
-            for i in [1, 2]:
+            for i in [1]:
                 params_eps = params.copy()
                 params_eps[chain, vertex, i] += epsilon
 
@@ -313,8 +323,16 @@ def vector_jacobian_product(
         Nz=inputs.Nz,
         epsilon=inputs.epsilon,
     )
+    if inputs.normalize_jacobian:
+        n_elements = inputs.Nx * inputs.Ny * inputs.Nz
+        jac = jac / n_elements
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
     vjp = np.einsum("ijklmn,lmn->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
+    if inputs.normalize_vjp:
+        vjp_std = np.std(vjp)
+        if vjp_std > 0:
+            vjp = vjp / vjp_std
+
     return {"bar_params": vjp}
 
 
