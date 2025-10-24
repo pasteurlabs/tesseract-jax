@@ -247,8 +247,8 @@ def jac_sdf_wrt_params(
 
     for chain in range(n_chains):
         for vertex in range(0, n_edges_per_chain + 1):
-            # we only care about the y coordinate
-            for i in [1]:
+            # we only care about the y and z coordinate
+            for i in [1, 2]:
                 params_eps = params.copy()
                 params_eps[chain, vertex, i] += epsilon
 
