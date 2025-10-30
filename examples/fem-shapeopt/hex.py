@@ -1,4 +1,5 @@
 import jax.numpy as jnp
+import jax
 from jax.scipy.interpolate import RegularGridInterpolator
 
 def create_hex(
@@ -66,6 +67,7 @@ def vectorized_subdivide_hex_mesh(
     voxel_sizes = jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]])
     
     center_points = jnp.mean(pts_coords[hex_cells], axis=1)  # (n_hex, 3)
+    # TODO: something wrong on 3rd recursion level here.
     offsets = jnp.array([
         [-0.25, -0.25, -0.25],
         [0.25, -0.25, -0.25],
@@ -75,16 +77,17 @@ def vectorized_subdivide_hex_mesh(
         [0.25, -0.25, 0.25],
         [0.25, 0.25, 0.25],
         [-0.25, 0.25, 0.25],
-    ]) * voxel_sizes
+    ]).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.repeat(8, axis=0)
+    offsets = offsets.reshape((n_hex, 8, 3))
 
     for cell in range(8):
-        center = center_points + offsets[cell]
+        center = center_points + offsets[:, cell]
 
         for corner in range(8):
             new_pts_coords = new_pts_coords.at[
                 jnp.arange(n_hex) * 64 + cell * 8 + corner
             ].set(
-                center + offsets[corner]
+                center - offsets[:, corner]
             )
 
             new_hex_cells = new_hex_cells.at[
@@ -185,6 +188,13 @@ def remove_duplicate_points(
 Lx, Ly, Lz = 1.0, 1.0, 1.0
 
 initial_pts, initial_hex_cells = create_hex(Lx, Ly, Lz)
+
+key = jax.random.PRNGKey(0)
+sizing = jax.random.uniform(key, shape=(8, 8, 8), minval=0.05, maxval=0.2)
+
+pts, hex_cells = recursive_subdivide_hex_mesh(
+    initial_hex_cells, initial_pts, sizing, levels=3, Lx=Lx, Ly=Ly, Lz=Lz
+)
 
 print("Initial points: ", initial_pts)
 print("Initial hex cells: ", initial_hex_cells)
