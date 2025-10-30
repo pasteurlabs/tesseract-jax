@@ -1,5 +1,5 @@
 import jax.numpy as jnp
-
+from jax.scipy.interpolate import RegularGridInterpolator
 
 def create_hex(
     Lx: float,
@@ -82,7 +82,7 @@ def vectorized_subdivide_hex_mesh(
 
         for corner in range(8):
             new_pts_coords = new_pts_coords.at[
-                jnp.arange(n_hex) * 36 + cell * 8 + corner
+                jnp.arange(n_hex) * 64 + cell * 8 + corner
             ].set(
                 center + offsets[corner]
             )
@@ -90,7 +90,7 @@ def vectorized_subdivide_hex_mesh(
             new_hex_cells = new_hex_cells.at[
                 jnp.arange(n_hex) * 8 + cell, corner
             ].set(
-                jnp.arange(n_hex) * 36 + cell * 8 + corner
+                jnp.arange(n_hex) * 64 + cell * 8 + corner
             )
 
     def reindex_and_mask(
@@ -127,6 +127,48 @@ def vectorized_subdivide_hex_mesh(
     combined_hex_cells = jnp.vstack([new_hex_cells, old_hex_cells])
 
     return combined_pts_coords, combined_hex_cells
+
+
+def recursive_subdivide_hex_mesh(
+    hex_cells: jnp.ndarray,
+    pts_coords: jnp.ndarray,
+    sizing_field: jnp.ndarray,
+    levels: int,
+    Lx: float,
+    Ly: float,
+    Lz: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Recursively subdivide HEX8 mesh.
+
+    Args:
+        hex_cells: (n_hex, 8) array of hexahedron cell indices.
+        pts_coords: (n_points, 3) array of point coordinates.
+        sizing_field: Sizing field values at each point. 
+            Must be 2^levels in each dimension.
+        levels: Number of subdivision levels.
+
+    Returns:
+        Subdivided points and hex cells.
+    """
+
+    # lets build the kd-tree for fast nearest neighbor search
+    xs = jnp.linspace(-Lx / 2, Lx / 2, sizing_field.shape[0])
+    ys = jnp.linspace(-Ly / 2, Ly / 2, sizing_field.shape[1])
+    zs = jnp.linspace(-Lz / 2, Lz / 2, sizing_field.shape[2])
+
+    interpolator = RegularGridInterpolator(
+        (xs, ys, zs), sizing_field, method="nearest", bounds_error=False, fill_value=jnp.max(sizing_field)
+    )
+
+    for _ in range(levels):
+        voxel_sizes = jnp.max(jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]]), axis=1)
+        sizing_values = interpolator(pts_coords[hex_cells].mean(axis=1))
+        subdivision_mask = voxel_sizes > sizing_values
+        pts_coords, hex_cells = vectorized_subdivide_hex_mesh(
+            hex_cells, pts_coords, subdivision_mask
+        )
+
+    return pts_coords, hex_cells
 
 def remove_duplicate_points(
     pts_coords: jnp.ndarray,
