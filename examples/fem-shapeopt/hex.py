@@ -96,18 +96,20 @@ def vectorized_subdivide_hex_mesh(
     def reindex_and_mask(
         coords: jnp.ndarray,
         cells: jnp.ndarray,
-        cell_mask: jnp.ndarray
+        keep_mask: jnp.ndarray
     ) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Reindex points and cells based on mask.
         """
-
+        # map mask to points
+        point_mask = jnp.zeros(coords.shape[0], dtype=jnp.float32)
+        point_mask = point_mask.at[cells.flatten()].add(keep_mask.repeat(8))
         # Reindex new points and cells based on mask
-        index_offset = jnp.cumsum(jnp.logical_not(cell_mask)) * 36
-        cells = cells - index_offset[:, None]
+        index_offset = jnp.cumsum(jnp.logical_not(point_mask))
+        cells = cells - index_offset.at[cells.flatten()].get().reshape(cells.shape)
 
         # apply mask to keep only subdivided hexes
-        coords = coords.at[cell_mask.repeat(8)].get()
-        cells = cells.at[cell_mask].get()
+        coords = coords.at[keep_mask.repeat(8)].get()
+        cells = cells.at[keep_mask].get()
 
         return coords, cells
 
