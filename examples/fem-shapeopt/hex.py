@@ -77,8 +77,7 @@ def vectorized_subdivide_hex_mesh(
         [0.25, -0.25, 0.25],
         [0.25, 0.25, 0.25],
         [-0.25, 0.25, 0.25],
-    ]).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.repeat(8, axis=0)
-    offsets = offsets.reshape((n_hex, 8, 3))
+    ]).reshape((1, 8, 3)).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.reshape((n_hex, 1, 3)).repeat(8, axis=1)
 
     for cell in range(8):
         center = center_points + offsets[:, cell]
