@@ -1,15 +1,15 @@
 from typing import Any
 
-import trimesh
+from functools import lru_cache
 from pydantic import BaseModel, Field
 from jax.scipy.interpolate import RegularGridInterpolator
 from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
+from scipy.interpolate import griddata
 import jax.numpy as jnp
 
 #
-# Schemata
+# Schemata  
 #
-
 
 class InputSchema(BaseModel):
     field_values : Differentiable[
@@ -22,18 +22,14 @@ class InputSchema(BaseModel):
             "Values defined on a regular grid that are to be differentiated."
         )
     )
-
-    sizing_field : Differentiable[
-        Array[
+    sizing_field : Array[
             (None, None, None),
             Float32,
-        ]
-    ] = Field(
+        ] = Field(
         description=(
             "Sizing field values defined on a regular grid for mesh adaptation."
         )
     )
-
     Lx: float = Field(
         default=60.0,
         description=("Length of the domain in the x direction. "),
@@ -82,7 +78,7 @@ class OutputSchema(BaseModel):
     )
     mesh_cell_values: Differentiable[
         Array[
-            (None, None,),
+            (None,),
             Float32,
         ]
     ] = Field(description="Cell-centered values defined on the hexahedral mesh.")
@@ -276,17 +272,73 @@ def recursive_subdivide_hex_mesh(
 
     return pts_coords, hex_cells
 
+# @lru_cache(maxsize=1)
+def generate_mesh(
+    Lx: float,
+    Ly: float,
+    Lz: float,
+    sizing_field: jnp.ndarray,
+    max_levels: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Generate adapted HEX8 mesh based on sizing field.
+
+    Args:
+        Lx: Length of the domain in x direction.
+        Ly: Length of the domain in y direction.
+        Lz: Length of the domain in z direction.
+        sizing_field: Sizing field values on a regular grid.
+        max_levels: Maximum number of subdivision levels.
+
+    Returns:
+        points: (n_points, 3) array of vertex positions.
+        hex_cells: (n_hex, 8) array of hexahedron cell indices.
+    """
+
+    initial_pts, initial_hex_cells = create_single_hex(Lx, Ly, Lz)
+
+    pts, cells = recursive_subdivide_hex_mesh(
+        initial_hex_cells, initial_pts, sizing_field, levels=max_levels, Lx=Lx, Ly=Ly, Lz=Lz
+    )
+
+    return pts, cells
 
 def apply(inputs: InputSchema) -> OutputSchema:
 
-    initial_pts, initial_hex_cells = create_single_hex(inputs.Lx, inputs.Ly, inputs.Lz)
-
-    pts_2, hex_cells_2 = recursive_subdivide_hex_mesh(
-        initial_hex_cells, initial_pts, inputs.sizing_field, levels=inputs.max_subdivision_levels, Lx=inputs.Lx, Ly=inputs.Ly, Lz=inputs.Lz
+    pts, cells = generate_mesh(
+        Lx=inputs.Lx,
+        Ly=inputs.Ly,
+        Lz=inputs.Lz,
+        sizing_field=inputs.sizing_field,
+        max_levels=inputs.max_subdivision_levels,
     )
 
+    pts_padded = jnp.zeros((inputs.max_points, 3), dtype=pts.dtype)
+    pts_padded = pts_padded.at[:pts.shape[0], :].set(pts)  
+    cells_padded = jnp.zeros((inputs.max_cells, 8), dtype=cells.dtype)
+    cells_padded = cells_padded.at[:cells.shape[0], :].set(cells)
+
+    xs = jnp.linspace(-inputs.Lx / 2, inputs.Lx / 2, inputs.field_values.shape[0])
+    ys = jnp.linspace(-inputs.Ly / 2, inputs.Ly / 2, inputs.field_values.shape[1])
+    zs = jnp.linspace(-inputs.Lz / 2, inputs.Lz / 2, inputs.field_values.shape[2])
+
+    interpolator = RegularGridInterpolator(
+        (xs, ys, zs), inputs.field_values, method="linear", bounds_error=False, fill_value=-1
+    )
+
+    cell_centers = jnp.mean(pts[cells], axis=1)
+    cell_values = interpolator(cell_centers)
+
+    cell_values_padded = jnp.zeros((inputs.max_cells,), dtype=cell_values.dtype)
+    cell_values_padded = cell_values_padded.at[:cell_values.shape[0]].set(cell_values)
+
     return OutputSchema(
-        
+        mesh=HexMesh(
+            points=pts_padded,
+            faces=cells_padded,
+            n_points=pts.shape[0],
+            n_faces=cells.shape[0],
+        ),
+        mesh_cell_values=cell_values_padded
     )
 
 
@@ -296,43 +348,53 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
-    assert vjp_inputs == {"bar_params"}
-    assert vjp_outputs == {"sdf"}
+    assert vjp_inputs == {"field_values"}
+    assert vjp_outputs == {"mesh_cell_values"}
 
-    jac = jac_sdf_wrt_params(
-        inputs.bar_params,
-        radius=inputs.bar_radius,
+    # our cotangent gradient is defined on the cells centers
+    # we need to backpropagate it to the field values defined on the regular grid
+    # this can be done using interpolation
+    # We need to have the mesh cell center positions here, so instead of recomputing the mesh,
+    # lets use the cached mesh from the last forward pass
+    # print(generate_mesh.cache_info())
+    pts, cells = generate_mesh(
         Lx=inputs.Lx,
         Ly=inputs.Ly,
         Lz=inputs.Lz,
-        Nx=inputs.Nx,
-        Ny=inputs.Ny,
-        Nz=inputs.Nz,
-        epsilon=inputs.epsilon,
+        sizing_field=inputs.sizing_field,
+        max_levels=inputs.max_subdivision_levels,
     )
-    if inputs.normalize_jacobian:
-        n_elements = inputs.Nx * inputs.Ny * inputs.Nz
-        jac = jac / n_elements
-    # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
-    vjp = np.einsum("ijklmn,lmn->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
-    if inputs.normalize_vjp:
-        vjp_std = np.std(vjp)
-        if vjp_std > 0:
-            vjp = vjp / vjp_std
+    cell_centers = jnp.mean(pts[cells], axis=1)
 
-    return {"bar_params": vjp}
+    xs = jnp.linspace(-inputs.Lx / 2, inputs.Lx / 2, inputs.field_values.shape[0])
+    ys = jnp.linspace(-inputs.Ly / 2, inputs.Ly / 2, inputs.field_values.shape[1])
+    zs = jnp.linspace(-inputs.Lz / 2, inputs.Lz / 2, inputs.field_values.shape[2])
+    xs, ys, zs = jnp.meshgrid(xs, ys, zs, indexing='ij')
+
+    field_cotangent_vector = griddata(
+        cell_centers,
+        cotangent_vector["mesh_cell_values"][:cells.shape[0]],
+        (
+            xs,
+            ys,
+            zs
+        ),
+        method="nearest",
+    )
+
+    return {"field_values": field_cotangent_vector}
 
 
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
     return {
-        "sdf": ShapeDType(
-            shape=(abstract_inputs.Nx, abstract_inputs.Ny, abstract_inputs.Nz),
+        "mesh_cell_values": ShapeDType(
+            shape=(abstract_inputs.max_cells,),
             dtype="float32",
         ),
         "mesh": {
-            "points": ShapeDType(shape=(N_POINTS, 3), dtype="float32"),
-            "faces": ShapeDType(shape=(N_FACES, 3), dtype="float32"),
+            "points": ShapeDType(shape=(abstract_inputs.max_points, 3), dtype="float32"),
+            "faces": ShapeDType(shape=(abstract_inputs.max_cells, 8), dtype="float32"),
             "n_points": ShapeDType(shape=(), dtype="int32"),
             "n_faces": ShapeDType(shape=(), dtype="int32"),
         },
