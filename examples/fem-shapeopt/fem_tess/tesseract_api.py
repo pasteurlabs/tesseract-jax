@@ -6,6 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 from jax_fem.generate_mesh import Mesh, box_mesh, get_meshio_cell_type
+import meshio
 
 # Import JAX-FEM specific modules
 from jax_fem.problem import Problem
@@ -20,6 +21,17 @@ data_dir = os.path.join(crt_file_path, "data")
 # Schemata
 #
 
+class HexMesh(BaseModel):
+    points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
+    faces: Array[(None, 8), Float32] = Field(
+        description="Array of hexahedral faces defined by indices into the points array."
+    )
+    n_points: int = Field(
+        default=0, description="Number of valid points in the points array."
+    )
+    n_faces: int = Field(
+        default=0, description="Number of valid faces in the faces array."
+    )
 
 class InputSchema(BaseModel):
     rho: Differentiable[
@@ -31,7 +43,6 @@ class InputSchema(BaseModel):
             Float32,
         ]
     ] = Field(description="2D density field for topology optimization")
-
     Lx: float = Field(
         default=60.0, description="Length of the simulation box in the x direction."
     )
@@ -42,7 +53,6 @@ class InputSchema(BaseModel):
     Lz: float = Field(
         default=30.0, description="Length of the simulation box in the z direction."
     )
-
     Nx: int = Field(
         default=60,
         description=("Number of elements in the x direction."),
@@ -55,6 +65,11 @@ class InputSchema(BaseModel):
         default=30,
         description=("Number of elements in the z direction."),
     )
+    hex_mesh : HexMesh = Field(
+        description="Hexahedral mesh representation of the geometry",
+        default=None,
+    )
+    
 
 
 class OutputSchema(BaseModel):
@@ -148,12 +163,17 @@ def setup(
     Lx: float = 60.0,
     Ly: float = 30.0,
     Lz: float = 30.0,
+    pts : jnp.ndarray = None,
+    cells : jnp.ndarray = None,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use a structured box mesh here.
-    ele_type = "HEX8"
-    cell_type = get_meshio_cell_type(ele_type)
-    meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
-    mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
+    if pts is not None and cells is not None:
+        ele_type = "HEX8"
+        cell_type = get_meshio_cell_type(ele_type)
+        meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
+        mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
+    else:
+        mesh = Mesh(pts, cells)
 
     # Define boundary conditions and values.
     def fixed_location(point):
@@ -201,6 +221,8 @@ def apply_fn(inputs: dict) -> dict:
         Lx=inputs["Lx"],
         Ly=inputs["Ly"],
         Lz=inputs["Lz"],
+        pts=inputs["hex_mesh"].points[: inputs["hex_mesh"].n_points],
+        cells=inputs["hex_mesh"].faces[: inputs["hex_mesh"].n_faces],
     )
     rho = inputs["rho"]
     sol_list = fwd_pred(rho)
