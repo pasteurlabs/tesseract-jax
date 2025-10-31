@@ -12,7 +12,7 @@ import meshio
 from jax_fem.problem import Problem
 from jax_fem.solver import ad_wrapper
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
+from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType, Int32
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
 
 crt_file_path = os.path.dirname(__file__)
@@ -23,7 +23,7 @@ data_dir = os.path.join(crt_file_path, "data")
 
 class HexMesh(BaseModel):
     points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
-    faces: Array[(None, 8), Float32] = Field(
+    faces: Array[(None, 8), Int32] = Field(
         description="Array of hexahedral faces defined by indices into the points array."
     )
     n_points: int = Field(
@@ -67,7 +67,9 @@ class InputSchema(BaseModel):
     )
     hex_mesh : HexMesh = Field(
         description="Hexahedral mesh representation of the geometry",
-        default=None,
+    )
+    use_regular_grid: bool = Field(
+        description="Toggle to use a regular grid mesh instead of imported mesh",
     )
     
 
@@ -155,7 +157,7 @@ class Elasticity(Problem):
 
 
 # Memoize the setup function to avoid expensive recomputation
-@lru_cache(maxsize=1)
+# @lru_cache(maxsize=1)
 def setup(
     Nx: int = 60,
     Ny: int = 30,
@@ -167,8 +169,8 @@ def setup(
     cells : jnp.ndarray = None,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use a structured box mesh here.
-    if pts is not None and cells is not None:
-        ele_type = "HEX8"
+    ele_type = "HEX8"
+    if pts is None and cells is None:
         cell_type = get_meshio_cell_type(ele_type)
         meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
         mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
@@ -214,17 +216,35 @@ def setup(
 
 def apply_fn(inputs: dict) -> dict:
     """Compute the compliance of the structure given a density field."""
-    problem, fwd_pred = setup(
-        Nx=inputs["Nx"],
-        Ny=inputs["Ny"],
-        Nz=inputs["Nz"],
-        Lx=inputs["Lx"],
-        Ly=inputs["Ly"],
-        Lz=inputs["Lz"],
-        pts=inputs["hex_mesh"].points[: inputs["hex_mesh"].n_points],
-        cells=inputs["hex_mesh"].faces[: inputs["hex_mesh"].n_faces],
-    )
-    rho = inputs["rho"]
+    if inputs["use_regular_grid"] == False:
+        print(inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]])
+        print(inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]].min())
+        problem, fwd_pred = setup(
+            Nx=inputs["Nx"],
+            Ny=inputs["Ny"],
+            Nz=inputs["Nz"],
+            Lx=inputs["Lx"],
+            Ly=inputs["Ly"],
+            Lz=inputs["Lz"],
+            pts=inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]],
+            cells=inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]],
+        )
+    else:
+        problem, fwd_pred = setup(
+            Nx=inputs["Nx"],
+            Ny=inputs["Ny"],
+            Nz=inputs["Nz"],
+            Lx=inputs["Lx"],
+            Ly=inputs["Ly"],
+            Lz=inputs["Lz"],
+        )
+    print(f"Setup completed with mesh of {problem.fe.num_cells} elements.")
+    if inputs["use_regular_grid"] == True: 
+        rho = inputs["rho"]
+    else:
+        rho = inputs["rho"][:inputs["hex_mesh"]["n_faces"]]
+    # print(rho)
+
     sol_list = fwd_pred(rho)
     compliance = problem.compute_compliance(sol_list[0])
     return {"compliance": compliance.astype(jnp.float32)}

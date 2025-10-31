@@ -61,7 +61,7 @@ class InputSchema(BaseModel):
 
 class HexMesh(BaseModel):
     points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
-    faces: Array[(None, 8), Float32] = Field(
+    faces: Array[(None, 8), Int32] = Field(
         description="Array of hexahedral faces defined by indices into the points array."
     )
     n_points: Int32 = Field(
@@ -124,7 +124,7 @@ def vectorized_subdivide_hex_mesh(
     This method introduces duplicates of points that should later be merged.
 
     Hexahedron is constructed as follows:
-             3 -------- 2
+          3 -------- 2
          /|         /|
         7 -------- 6 |
         | |        | |
@@ -188,6 +188,7 @@ def vectorized_subdivide_hex_mesh(
         # map mask to points
         point_mask = jnp.zeros(coords.shape[0], dtype=jnp.float32)
         point_mask = point_mask.at[cells.flatten()].add(keep_mask.repeat(8))
+        
         # Reindex new points and cells based on mask
         index_offset = jnp.cumsum(jnp.logical_not(point_mask))
         cells = cells - index_offset.at[cells.flatten()].get().reshape(cells.shape)
@@ -333,8 +334,8 @@ def apply(inputs: InputSchema) -> OutputSchema:
 
     return OutputSchema(
         mesh=HexMesh(
-            points=pts_padded,
-            faces=cells_padded,
+            points=pts_padded.astype(jnp.float32),
+            faces=cells_padded.astype(jnp.int32),
             n_points=pts.shape[0],
             n_faces=cells.shape[0],
         ),
@@ -382,7 +383,7 @@ def vector_jacobian_product(
         method="nearest",
     )
 
-    return {"field_values": field_cotangent_vector}
+    return {"field_values": jnp.array(field_cotangent_vector).astype(jnp.float32)}
 
 
 def abstract_eval(abstract_inputs):
@@ -394,7 +395,7 @@ def abstract_eval(abstract_inputs):
         ),
         "mesh": {
             "points": ShapeDType(shape=(abstract_inputs.max_points, 3), dtype="float32"),
-            "faces": ShapeDType(shape=(abstract_inputs.max_cells, 8), dtype="float32"),
+            "faces": ShapeDType(shape=(abstract_inputs.max_cells, 8), dtype="int32"),
             "n_points": ShapeDType(shape=(), dtype="int32"),
             "n_faces": ShapeDType(shape=(), dtype="int32"),
         },
