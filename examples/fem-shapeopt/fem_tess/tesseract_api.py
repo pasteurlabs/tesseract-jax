@@ -197,7 +197,7 @@ def setup(
         )
         mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
     else:
-        mesh = Mesh(pts, cells)
+        mesh = Mesh(pts, cells)#, ele_type=ele_type)
 
     def bc_factory(
         masks: jnp.ndarray,
@@ -237,13 +237,13 @@ def setup(
             
     # # Define boundary conditions and values.
     def fixed_location(point, index):
-        return jnp.isclose(point[0], -Lx/2, atol=1e-2)
+        return jnp.isclose(point[0], -Lx/2, atol=0.1)
 
     def load_location(point):
-        return jnp.logical_and(
+        return jnp.logical_and(jnp.logical_and(
             jnp.isclose(point[0], Lx/2, atol=1e-2),
             jnp.isclose(point[2], -Lz/2, atol=1e-2),
-        )
+        ), jnp.isclose(point[1], Ly/2, atol=1e-2))
 
     def dirichlet_val(point):
         return 0.0
