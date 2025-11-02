@@ -1,18 +1,16 @@
 import os
 from collections.abc import Callable
-from functools import lru_cache
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 from jax_fem.generate_mesh import Mesh, box_mesh, get_meshio_cell_type
-import meshio
 
 # Import JAX-FEM specific modules
 from jax_fem.problem import Problem
 from jax_fem.solver import ad_wrapper
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType, Int32
+from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
 
 crt_file_path = os.path.dirname(__file__)
@@ -20,6 +18,7 @@ data_dir = os.path.join(crt_file_path, "data")
 #
 # Schemata
 #
+
 
 class HexMesh(BaseModel):
     points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
@@ -32,6 +31,7 @@ class HexMesh(BaseModel):
     n_faces: int = Field(
         default=0, description="Number of valid faces in the faces array."
     )
+
 
 class InputSchema(BaseModel):
     rho: Differentiable[
@@ -65,13 +65,24 @@ class InputSchema(BaseModel):
         default=30,
         description=("Number of elements in the z direction."),
     )
-    hex_mesh : HexMesh = Field(
+    hex_mesh: HexMesh = Field(
         description="Hexahedral mesh representation of the geometry",
     )
     use_regular_grid: bool = Field(
         description="Toggle to use a regular grid mesh instead of imported mesh",
     )
-    
+    van_neumann_mask: Array[(None,), Int32] = Field(
+        description="Mask for van Neumann boundary conditions",
+    )
+    van_neumann_values: Array[(None, None), Float32] = Field(
+        description="Values for van Neumann boundary conditions",
+    )
+    dirichlet_mask: Array[(None,), Int32] = Field(
+        description="Mask for Dirichlet boundary conditions",
+    )
+    dirichlet_values: Array[(None,), Float32] = Field(
+        description="Values for Dirichlet boundary conditions",
+    )
 
 
 class OutputSchema(BaseModel):
@@ -165,14 +176,16 @@ def setup(
     Lx: float = 60.0,
     Ly: float = 30.0,
     Lz: float = 30.0,
-    pts : jnp.ndarray = None,
-    cells : jnp.ndarray = None,
+    pts: jnp.ndarray = None,
+    cells: jnp.ndarray = None,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use a structured box mesh here.
     ele_type = "HEX8"
     if pts is None and cells is None:
         cell_type = get_meshio_cell_type(ele_type)
-        meshio_mesh = box_mesh(Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz)
+        meshio_mesh = box_mesh(
+            Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz
+        )
         mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
     else:
         mesh = Mesh(pts, cells)
@@ -216,7 +229,7 @@ def setup(
 
 def apply_fn(inputs: dict) -> dict:
     """Compute the compliance of the structure given a density field."""
-    if inputs["use_regular_grid"] == False:
+    if not inputs["use_regular_grid"]:
         print(inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]])
         print(inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]].min())
         problem, fwd_pred = setup(
@@ -239,10 +252,10 @@ def apply_fn(inputs: dict) -> dict:
             Lz=inputs["Lz"],
         )
     print(f"Setup completed with mesh of {problem.fe.num_cells} elements.")
-    if inputs["use_regular_grid"] == True: 
+    if inputs["use_regular_grid"]:
         rho = inputs["rho"]
     else:
-        rho = inputs["rho"][:inputs["hex_mesh"]["n_faces"]]
+        rho = inputs["rho"][: inputs["hex_mesh"]["n_faces"]]
     # print(rho)
 
     sol_list = fwd_pred(rho)
