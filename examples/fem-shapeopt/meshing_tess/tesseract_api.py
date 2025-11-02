@@ -194,7 +194,7 @@ def vectorized_subdivide_hex_mesh(
         cells = cells - index_offset.at[cells.flatten()].get().reshape(cells.shape)
 
         # apply mask to keep only subdivided hexes
-        coords = coords.at[keep_mask.repeat(8)].get()
+        coords = coords.at[point_mask > 0].get()
         cells = cells.at[keep_mask].get()
 
         return coords, cells
@@ -202,7 +202,6 @@ def vectorized_subdivide_hex_mesh(
     new_pts_coords, new_hex_cells = reindex_and_mask(
         new_pts_coords, new_hex_cells, mask.repeat(8)
     )
-    # TODO: This does not work when duplicate edges are removed inbetween subdivisions
     old_pts_coords, old_hex_cells = reindex_and_mask(
         pts_coords, hex_cells, jnp.logical_not(mask)
     )
@@ -267,9 +266,8 @@ def recursive_subdivide_hex_mesh(
         pts_coords, hex_cells = vectorized_subdivide_hex_mesh(
             hex_cells, pts_coords, subdivision_mask
         )
-       
 
-    pts_coords, hex_cells = remove_duplicate_points(pts_coords, hex_cells)
+        pts_coords, hex_cells = remove_duplicate_points(pts_coords, hex_cells)
 
     return pts_coords, hex_cells
 

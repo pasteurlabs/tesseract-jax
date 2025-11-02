@@ -38,6 +38,24 @@ def vectorized_subdivide_hex_mesh(
     """Vectorized subdivision of HEX8 mesh.
 
     This method introduces duplicates of points that should later be merged.
+
+    Hexahedron is constructed as follows:
+          3 -------- 2
+         /|         /|
+        7 -------- 6 |
+        | |        | |
+        | 0 -------|-1
+        |/         |/
+        4 -------- 5
+    
+    Axis orientation:
+        y
+        |
+        |____ x
+       /
+      /
+     z
+
     """
 
     n_hex = hex_cells.shape[0]
@@ -46,28 +64,9 @@ def vectorized_subdivide_hex_mesh(
     new_pts_coords = jnp.zeros((n_new_pts, 3), dtype=pts_coords.dtype)
     new_hex_cells = jnp.zeros((n_hex * 8, 8), dtype=hex_cells.dtype)
 
-    # Hexahedron is constructed as follows:
-    #
-    #      3 -------- 2
-    #      /|         /|
-    #     7 -------- 6 |
-    #     | |        | |
-    #     | 0 -------|-1
-    #     |/         |/
-    #     4 -------- 5
-    # 
-    # Axis orientation:
-    #     y
-    #     |
-    #     |____ x
-    #    /
-    #   /
-    #  z
-
     voxel_sizes = jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]])
     
     center_points = jnp.mean(pts_coords[hex_cells], axis=1)  # (n_hex, 3)
-    # TODO: something wrong on 3rd recursion level here.
     offsets = jnp.array([
         [-0.25, -0.25, -0.25],
         [0.25, -0.25, -0.25],
@@ -105,12 +104,13 @@ def vectorized_subdivide_hex_mesh(
         # map mask to points
         point_mask = jnp.zeros(coords.shape[0], dtype=jnp.float32)
         point_mask = point_mask.at[cells.flatten()].add(keep_mask.repeat(8))
+        
         # Reindex new points and cells based on mask
         index_offset = jnp.cumsum(jnp.logical_not(point_mask))
         cells = cells - index_offset.at[cells.flatten()].get().reshape(cells.shape)
 
         # apply mask to keep only subdivided hexes
-        coords = coords.at[keep_mask.repeat(8)].get()
+        coords = coords.at[point_mask == 1].get()
         cells = cells.at[keep_mask].get()
 
         return coords, cells
@@ -140,13 +140,12 @@ def recursive_subdivide_hex_mesh(
     Ly: float,
     Lz: float,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Recursively subdivide HEX8 mesh.
+    """Recursively (unrolled) subdivide HEX8 mesh.
 
     Args:
         hex_cells: (n_hex, 8) array of hexahedron cell indices.
         pts_coords: (n_points, 3) array of point coordinates.
         sizing_field: Sizing field values at each point. 
-            Must be 2^levels in each dimension.
         levels: Number of subdivision levels.
 
     Returns:
@@ -159,16 +158,21 @@ def recursive_subdivide_hex_mesh(
     zs = jnp.linspace(-Lz / 2, Lz / 2, sizing_field.shape[2])
 
     interpolator = RegularGridInterpolator(
-        (xs, ys, zs), sizing_field, method="nearest", bounds_error=False, fill_value=jnp.max(sizing_field)
+        (xs, ys, zs), sizing_field, method="linear", bounds_error=False, fill_value=-1
     )
 
     for _ in range(levels):
+
         voxel_sizes = jnp.max(jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]]), axis=1)
-        sizing_values = interpolator(pts_coords[hex_cells].mean(axis=1))
+        voxel_center_points = jnp.mean(pts_coords[hex_cells], axis=1)
+        sizing_values = interpolator(voxel_center_points)
         subdivision_mask = voxel_sizes > sizing_values
+
         pts_coords, hex_cells = vectorized_subdivide_hex_mesh(
             hex_cells, pts_coords, subdivision_mask
         )
+
+        pts_coords, hex_cells = remove_duplicate_points(pts_coords, hex_cells)
 
     return pts_coords, hex_cells
 
@@ -191,9 +195,9 @@ initial_pts, initial_hex_cells = create_hex(Lx, Ly, Lz)
 key = jax.random.PRNGKey(0)
 sizing = jax.random.uniform(key, shape=(8, 8, 8), minval=0.05, maxval=0.2)
 
-pts, hex_cells = recursive_subdivide_hex_mesh(
-    initial_hex_cells, initial_pts, sizing, levels=3, Lx=Lx, Ly=Ly, Lz=Lz
-)
+# pts, hex_cells = recursive_subdivide_hex_mesh(
+#     initial_hex_cells, initial_pts, sizing, levels=3, Lx=Lx, Ly=Ly, Lz=Lz
+# )
 
 print("Initial points: ", initial_pts)
 print("Initial hex cells: ", initial_hex_cells)

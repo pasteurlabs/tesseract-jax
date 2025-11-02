@@ -138,10 +138,11 @@ class Elasticity(Problem):
         return stress
 
     def get_surface_maps(self):
-        def surface_map(u, x):
-            return jnp.array([0.0, 0.0, 100.0])
+        # def surface_map(u, x):
+        #     return jnp.array([0.0, 0.0, 100.0])
 
-        return [surface_map]
+        # return [surface_map]
+        return self.additional_info[0]
 
     def set_params(self, params):
         # Override base class method.
@@ -178,6 +179,10 @@ def setup(
     Lz: float = 30.0,
     pts: jnp.ndarray = None,
     cells: jnp.ndarray = None,
+    dirichlet_mask: jnp.ndarray = None,
+    dirichlet_values: jnp.ndarray = None,
+    van_neumann_mask: jnp.ndarray = None,
+    van_neumann_values: jnp.ndarray = None,
 ) -> tuple[Elasticity, Callable]:
     # Specify mesh-related information. We use a structured box mesh here.
     ele_type = "HEX8"
@@ -190,22 +195,50 @@ def setup(
     else:
         mesh = Mesh(pts, cells)
 
-    # Define boundary conditions and values.
-    def fixed_location(point):
-        return jnp.isclose(point[0], 0.0, atol=1e-5)
+    def generate_bc_functions(
+        dirichlet_mask: jnp.ndarray,
+        dirichlet_values: jnp.ndarray,
+    ) -> tuple[list[Callable], list[Callable]]:
+        location_functions = []
+        value_functions = []
+        for i in range(dirichlet_mask.shape[0]):
+            def fixed_location(point, index):
+                return dirichlet_mask[index]
+            def dirichlet_val(point):
+                return dirichlet_values[i]
+            location_functions.append(fixed_location)
+            value_functions.append(dirichlet_val)
+        return location_functions, value_functions
 
-    def load_location(point):
-        return jnp.logical_and(
-            jnp.isclose(point[0], Lx, atol=1e-5),
-            jnp.isclose(point[1], 0.0, atol=0.1 * Ly + 1e-5),
-        )
+    dirichlet_location_fns, dirichlet_value_fns = generate_bc_functions(
+        dirichlet_mask, dirichlet_values
+    )
 
-    def dirichlet_val(point):
-        return 0.0
+    van_neumann_locations, van_neumann_value_fns = generate_bc_functions(
+        van_neumann_mask, van_neumann_values
+    )
 
-    dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
+    dirichlet_bc_info = [dirichlet_location_fns, list(range(len(dirichlet_location_fns))), dirichlet_value_fns]
 
-    location_fns = [load_location]
+    location_fns = van_neumann_locations
+            
+    # # Define boundary conditions and values.
+    # def fixed_location(point, index):
+    #     dirichlet_mask[index]
+    #     return jnp.isclose(point[0], 0.0, atol=1e-5)
+
+    # def load_location(point):
+    #     return jnp.logical_and(
+    #         jnp.isclose(point[0], Lx, atol=1e-5),
+    #         jnp.isclose(point[1], 0.0, atol=0.1 * Ly + 1e-5),
+    #     )
+
+    # def dirichlet_val(point):
+    #     return 0.0
+
+    # dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
+
+    # location_fns = [load_location]
 
     # Define forward problem
     problem = Elasticity(
@@ -215,6 +248,7 @@ def setup(
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
         location_fns=location_fns,
+        additional_info=(van_neumann_value_fns)
     )
 
     # Apply the automatic differentiation wrapper
