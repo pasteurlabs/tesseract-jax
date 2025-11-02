@@ -4,6 +4,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import meshio
 from jax_fem.generate_mesh import Mesh, box_mesh, get_meshio_cell_type
 
 # Import JAX-FEM specific modules
@@ -25,10 +26,10 @@ class HexMesh(BaseModel):
     faces: Array[(None, 8), Int32] = Field(
         description="Array of hexahedral faces defined by indices into the points array."
     )
-    n_points: int = Field(
+    n_points: Int32 = Field(
         default=0, description="Number of valid points in the points array."
     )
-    n_faces: int = Field(
+    n_faces: Int32 = Field(
         default=0, description="Number of valid faces in the faces array."
     )
 
@@ -107,7 +108,7 @@ class Elasticity(Problem):
         self.fe = self.fes[0]
         self.fe.flex_inds = jnp.arange(len(self.fe.cells))
 
-        # self.van_neumann_value_fns = van_neumann_value_fns
+        self.van_neumann_value_fns = van_neumann_value_fns
 
 
     def get_tensor_map(self):
@@ -141,12 +142,12 @@ class Elasticity(Problem):
         return stress
 
     def get_surface_maps(self):
-        def surface_map(u, x):
-            return jnp.array([0.0, 0.0, 100.0])
+        # def surface_map(u, x):
+        #     return jnp.array([0.0, 0.0, 100.0])
 
-        return [surface_map]
+        # return [surface_map]
 
-        # return self.van_neumann_value_fns
+        return self.van_neumann_value_fns
 
     def set_params(self, params):
         # Override base class method.
@@ -167,7 +168,7 @@ class Elasticity(Problem):
         u_face = jnp.sum(u_face, axis=2)
         subset_quad_points = self.physical_surface_quad_points[0]
         neumann_fn = self.get_surface_maps()[0]
-        traction = -jax.vmap(jax.vmap(neumann_fn))(u_face, subset_quad_points)
+        traction = jax.vmap(jax.vmap(neumann_fn))(u_face, subset_quad_points)
         val = jnp.sum(traction * u_face * nanson_scale[:, :, None])
         return val
 
@@ -197,7 +198,8 @@ def setup(
         )
         mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
     else:
-        mesh = Mesh(pts, cells)#, ele_type=ele_type)
+        meshio_mesh = meshio.Mesh(points=pts, cells={'hexahedron': cells})
+        mesh = Mesh(pts, meshio_mesh.cells_dict['hexahedron'])
 
     def bc_factory(
         masks: jnp.ndarray,
@@ -223,34 +225,63 @@ def setup(
 
         return location_functions, value_functions
 
-    # dirichlet_location_fns, dirichlet_value_fns = bc_factory(
-    #     dirichlet_mask, dirichlet_values
-    # )
+    dirichlet_location_fns, dirichlet_value_fns = bc_factory(
+        dirichlet_mask, dirichlet_values
+    )
 
-    # van_neumann_locations, van_neumann_value_fns = bc_factory(
-    #     van_neumann_mask, van_neumann_values, is_van_neumann=True
-    # )
+    van_neumann_locations, van_neumann_value_fns = bc_factory(
+        van_neumann_mask, van_neumann_values, is_van_neumann=True
+    )
 
-    # dirichlet_bc_info = [dirichlet_location_fns, list(range(len(dirichlet_location_fns))), dirichlet_value_fns]
+    dirichlet_bc_info = [dirichlet_location_fns * 3, [0, 1, 2], dirichlet_value_fns * 3]
 
-    # location_fns = van_neumann_locations
+    location_fns = van_neumann_locations
+
+    # Define boundary conditions and values.
+    # def fixed_location(point):
+    #     return jnp.isclose(point[0], 0, atol=1e-5)
+
+    # print(Lx, Ly, Lz)
+    # print(f"Mesh pts bounds: x[{mesh.points[:,0].min()},{mesh.points[:,0].max()}], y[{mesh.points[:,1].min()},{mesh.points[:,1].max()}], z[{mesh.points[:,2].min()},{mesh.points[:,2].max()}]")
+    # def fixed_location(point):
+    #     # return jnp.isclose(point[0], -Lx / 3, atol=0.1)
+    #     return point[0] < (-Lx / 2 + 1e-5)  # Left face
+
+    # def load_location(point):
+
+    #     # return jnp.logical_and(
+    #     #     jnp.logical_and(
+    #     #         jnp.isclose(point[0], Lx / 2, atol=1e-5),
+    #     #         jnp.isclose(point[1], -Ly / 2, atol=1e-5),
+    #     #     ),
+    #     #     jnp.isclose(point[2], Lz / 2, atol=1e-5),
+    #     # )
+        
+    #     return jnp.logical_and(
+    #         jnp.isclose(point[0], 0, atol=1e-5),
+    #         jnp.isclose(point[1], 0, atol=0.1 * Ly + 1e-5),
+    #     )
+
+    # def dirichlet_val(point):
+    #     return 0.0
+
             
-    # # Define boundary conditions and values.
-    def fixed_location(point, index):
-        return jnp.isclose(point[0], -Lx/2, atol=0.1)
+    # # # Define boundary conditions and values.
+    # def fixed_location(point, index):
+    #     return jnp.isclose(point[0], -Lx/2, atol=0.1)
 
-    def load_location(point):
-        return jnp.logical_and(jnp.logical_and(
-            jnp.isclose(point[0], Lx/2, atol=1e-2),
-            jnp.isclose(point[2], -Lz/2, atol=1e-2),
-        ), jnp.isclose(point[1], Ly/2, atol=1e-2))
+    # def load_location(point):
+    #     return jnp.logical_and(jnp.logical_and(
+    #         jnp.isclose(point[0], Lx/2, atol=1e-2),
+    #         jnp.isclose(point[2], -Lz/2, atol=1e-2),
+    #     ), jnp.isclose(point[1], Ly/2, atol=1e-2))
 
-    def dirichlet_val(point):
-        return 0.0
+    # def dirichlet_val(point):
+    #     return 0.0
 
-    dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
+    # dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
 
-    location_fns = [load_location]
+    # location_fns = [load_location]
 
     # Define forward problem
     problem = Elasticity(
@@ -260,8 +291,8 @@ def setup(
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
         location_fns=location_fns,
-        # additional_info=(van_neumann_value_fns,)
-        additional_info=([0.1],)
+        additional_info=(van_neumann_value_fns,)
+        # additional_info=([0.1],)
     )
 
     # Apply the automatic differentiation wrapper
@@ -277,8 +308,6 @@ def setup(
 def apply_fn(inputs: dict) -> dict:
     """Compute the compliance of the structure given a density field."""
     if not inputs["use_regular_grid"]:
-        print(inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]])
-        print(inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]].min())
         problem, fwd_pred = setup(
             Nx=inputs["Nx"],
             Ny=inputs["Ny"],
