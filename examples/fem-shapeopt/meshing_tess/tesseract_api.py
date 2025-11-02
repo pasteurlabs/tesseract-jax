@@ -256,12 +256,16 @@ def recursive_subdivide_hex_mesh(
         (xs, ys, zs), sizing_field, method="linear", bounds_error=False, fill_value=-1
     )
 
-    for _ in range(levels):
+    for l in range(levels):
 
         voxel_sizes = jnp.max(jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]]), axis=1)
         voxel_center_points = jnp.mean(pts_coords[hex_cells], axis=1)
         sizing_values = interpolator(voxel_center_points)
         subdivision_mask = voxel_sizes > sizing_values
+
+        if not jnp.any(subdivision_mask):
+            print(f"No more subdivisions needed at level {l}.")
+            break
 
         pts_coords, hex_cells = vectorized_subdivide_hex_mesh(
             hex_cells, pts_coords, subdivision_mask
