@@ -582,6 +582,7 @@ def test_tesseract_loss(served_vectoradd_tesseract, use_jit):
         )
 
         c = vectoradd_fn_a(a)["c"]
+        c = jax.lax.stop_gradient(c)
 
         vectoradd_fn_b: jax.Callable = lambda a: apply_tesseract(
             vectoradd_tess,
@@ -589,6 +590,7 @@ def test_tesseract_loss(served_vectoradd_tesseract, use_jit):
                 a=a,
                 b=c,
             ),
+            static_arg_names=["b"],
         )
 
         outputs = vectoradd_fn_b(a)
