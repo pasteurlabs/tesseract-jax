@@ -6,6 +6,7 @@ import trimesh
 from pydantic import BaseModel, Field
 from pysdf import SDF
 from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
+from tesseract_core.runtime.experimental import TesseractReference
 
 #
 # Schemata
@@ -29,10 +30,7 @@ class InputSchema(BaseModel):
         )
     )
 
-    bar_radius: float = Field(
-        default=1.5,
-        description=("Radius of the bars in the geometry. "),
-    )
+    stl_tesseract: TesseractReference = Field(description="Tesseract to call.")
 
     Lx: float = Field(
         default=60.0,
@@ -67,12 +65,6 @@ class InputSchema(BaseModel):
     normalize_jacobian: bool = Field(
         default=False,
         description=("Whether to normalize the Jacobian by the number of elements"),
-    )
-    normalize_vjp: bool = Field(
-        default=False,
-        description=(
-            "Whether to normalize the vector-Jacobian product (VJP) to have a std of 1. "
-        ),
     )
 
 
@@ -110,26 +102,19 @@ class OutputSchema(BaseModel):
 #
 
 
-def build_geometry(
-    params: np.ndarray,
-    radius: float,
-) -> list[trimesh.Trimesh]:
+def get_geometry(target: TesseractReference, params: dict) -> trimesh.Trimesh:
     """Build a pyvista geometry from the parameters.
 
     The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
     """
-    n_chains = params.shape[0]
-    geometry = []
+    mesh = target.apply(params)["mesh"]
 
-    for chain in range(n_chains):
-        tube = pv.Spline(points=params[chain]).tube(
-            radius=radius, capping=True, n_sides=30
-        )
-        tube = tube.triangulate()
-        tube = pyvista_to_trimesh(tube)
-        geometry.append(tube)
+    mesh = trimesh.Trimesh(
+        vertices=mesh.point,
+        faces=mesh.faces,
+    )
 
-    return geometry
+    return mesh
 
 
 def pyvista_to_trimesh(mesh: pv.PolyData) -> trimesh.Trimesh:
@@ -186,19 +171,13 @@ def apply_fn(
     Nz: int,
 ) -> tuple[np.ndarray, trimesh.Trimesh]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
-    geometries = build_geometry(
+    geo = get_geometry(
         params,
         radius=radius,
     )
 
-    # convert each geometry in a trimesh style mesh and combine them
-    base = geometries[0]
-
-    for geom in geometries[1:]:
-        base = base.union(geom)
-
     sd_field = compute_sdf(
-        base,
+        geo,
         Lx=Lx,
         Ly=Ly,
         Lz=Lz,
@@ -207,7 +186,7 @@ def apply_fn(
         Nz=Nz,
     )
 
-    return sd_field, base
+    return sd_field, geo
 
 
 def jac_sdf_wrt_params(
@@ -353,10 +332,6 @@ def vector_jacobian_product(
         jac = jac / n_elements
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
     vjp = np.einsum("ijklmn,lmn->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
-    if inputs.normalize_vjp:
-        vjp_std = np.std(vjp)
-        if vjp_std > 0:
-            vjp = vjp / vjp_std
 
     return {"bar_params": vjp}
 
