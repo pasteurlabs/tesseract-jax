@@ -31,11 +31,15 @@ class InputSchema(BaseModel):
         Float32,
     ] = Field(description="Flattened array of non-differentiable geometry parameters.")
 
-    geometry_ints: list[int] = Field(
+    static_parameters: list[int] = Field(
         description=(
             "List of integers used to construct the geometry."
             " The first integer is the number of bars, and the second integer is the number of vertices per bar."
         )
+    )
+
+    string_parameters: list[str] = Field(
+        description="List of string parameters for geometry construction."
     )
 
 
@@ -64,14 +68,14 @@ class OutputSchema(BaseModel):
 def build_geometry(
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
-    geometry_ints: list[int],
+    static_parameters: list[int],
 ) -> list[trimesh.Trimesh]:
     """Build a pyvista geometry from the parameters.
 
     The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
     """
-    n_chains = geometry_ints[0]
-    n_vertices_per_chain = geometry_ints[1]
+    n_chains = static_parameters[0]
+    n_vertices_per_chain = static_parameters[1]
     geometry = []
 
     params = differentiable_parameters.reshape((n_chains, n_vertices_per_chain, 3))
@@ -122,7 +126,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     mesh = build_geometry(
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
-        geometry_ints=inputs.geometry_ints,
+        static_parameters=inputs.static_parameters,
     )
 
     return OutputSchema(

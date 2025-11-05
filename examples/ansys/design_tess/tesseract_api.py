@@ -29,8 +29,12 @@ class InputSchema(BaseModel):
         Float32,
     ] = Field(description="Flattened array of non-differentiable geometry parameters.")
 
-    geometry_ints: list[int] = Field(
+    static_parameters: list[int] = Field(
         description=("List of static integers used to construct the geometry.")
+    )
+
+    string_parameters: list[str] = Field(
+        description=("List of string parameters used to construct the geometry.")
     )
 
     mesh_tesseract: TesseractReference = Field(description="Tesseract to call.")
@@ -93,7 +97,8 @@ def get_geometry(
     target: TesseractReference,
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
-    geometry_ints: list[int],
+    static_parameters: list[int],
+    string_parameters: list[str],
 ) -> trimesh.Trimesh:
     """Build a pyvista geometry from the parameters.
 
@@ -103,7 +108,8 @@ def get_geometry(
         {
             "differentiable_parameters": differentiable_parameters,
             "non_differentiable_parameters": non_differentiable_parameters,
-            "geometry_ints": geometry_ints,
+            "static_parameters": static_parameters,
+            "string_parameters": string_parameters,
         }
     )["mesh"]
 
@@ -151,7 +157,8 @@ def apply_fn(
     target: TesseractReference,
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
-    geometry_ints: list[int],
+    static_parameters: list[int],
+    string_parameters: list[str],
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
 ) -> tuple[np.ndarray, trimesh.Trimesh]:
@@ -160,7 +167,8 @@ def apply_fn(
         target=target,
         differentiable_parameters=differentiable_parameters,
         non_differentiable_parameters=non_differentiable_parameters,
-        geometry_ints=geometry_ints,
+        static_parameters=static_parameters,
+        string_parameters=string_parameters,
     )
 
     sd_field = compute_sdf(
@@ -180,7 +188,8 @@ def jac_sdf_wrt_params(
     target: TesseractReference,
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
-    geometry_ints: list[int],
+    static_parameters: list[int],
+    string_parameters: list[str],
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
     epsilon: float,
@@ -203,7 +212,8 @@ def jac_sdf_wrt_params(
         target=target,
         differentiable_parameters=differentiable_parameters,
         non_differentiable_parameters=non_differentiable_parameters,
-        geometry_ints=geometry_ints,
+        static_parameters=static_parameters,
+        string_parameters=string_parameters,
         grid_elements=grid_elements,
         grid_size=grid_size,
     )
@@ -218,7 +228,8 @@ def jac_sdf_wrt_params(
             target=target,
             differentiable_parameters=params_eps,
             non_differentiable_parameters=non_differentiable_parameters,
-            geometry_ints=geometry_ints,
+            static_parameters=static_parameters,
+            string_parameters=string_parameters,
             grid_elements=grid_elements,
             grid_size=grid_size,
         )
@@ -249,7 +260,8 @@ def apply(inputs: InputSchema) -> OutputSchema:
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         grid_size=inputs.grid_size,
-        geometry_ints=inputs.geometry_ints,
+        static_parameters=inputs.static_parameters,
+        string_parameters=inputs.string_parameters,
         grid_elements=inputs.grid_elements,
     )
 
@@ -294,7 +306,8 @@ def vector_jacobian_product(
         target=inputs.mesh_tesseract,
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
-        geometry_ints=inputs.geometry_ints,
+        geometry_ints=inputs.static_parameters,
+        string_parameters=inputs.string_parameters,
         grid_size=inputs.grid_size,
         grid_elements=inputs.grid_elements,
         epsilon=inputs.epsilon,
