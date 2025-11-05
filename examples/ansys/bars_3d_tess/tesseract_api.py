@@ -125,8 +125,6 @@ def apply(inputs: InputSchema) -> OutputSchema:
         geometry_ints=inputs.geometry_ints,
     )
 
-    print(mesh)
-
     return OutputSchema(
         mesh=TriangularMesh(
             points=mesh.vertices.astype(np.float32),
