@@ -299,14 +299,14 @@ def vector_jacobian_product(
     Returns:
         Dictionary containing VJP for the specified inputs.
     """
-    assert vjp_inputs == {"bar_params"}
+    assert vjp_inputs == {"differentiable_parameters"}
     assert vjp_outputs == {"sdf"}
 
     jac = jac_sdf_wrt_params(
         target=inputs.mesh_tesseract,
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
-        geometry_ints=inputs.static_parameters,
+        static_parameters=inputs.static_parameters,
         string_parameters=inputs.string_parameters,
         grid_size=inputs.grid_size,
         grid_elements=inputs.grid_elements,
@@ -316,9 +316,10 @@ def vector_jacobian_product(
         n_elements = inputs.Nx * inputs.Ny * inputs.Nz
         jac = jac / n_elements
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
-    vjp = np.einsum("ijklmn,lmn->ijk", jac, cotangent_vector["sdf"]).astype(np.float32)
+    vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"]).astype(np.float32)
 
-    return {"bar_params": vjp}
+    print(vjp.shape)
+    return {"differentiable_parameters": vjp}
 
 
 def abstract_eval(abstract_inputs: InputSchema) -> dict:
