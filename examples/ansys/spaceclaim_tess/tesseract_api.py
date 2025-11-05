@@ -9,6 +9,7 @@ from pathlib import Path, WindowsPath
 from tempfile import TemporaryDirectory
 
 from pydantic import BaseModel, Field
+from tesseract_core.runtime import Array, Float32
 
 # Temporary hardcoded spaceclaim .exe and script files
 spaceclaim_exe = "F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe"
@@ -38,6 +39,36 @@ keyvalues_test = {"__params__.z2": "200",
 """
 
 
+class GridParameters(BaseModel):
+    z_planes: Array[
+        (None,),
+        Float32,
+    ] = Field(
+        description="Array of Z cutting plane locations",
+    )
+    beam_starts: Array[
+        (None,),
+        Float32,
+    ] = Field(
+        description="Array of beam start angles (radians)",
+    )
+    beam_ends: Array[
+        (None,),
+        Float32,
+    ] = Field(
+        description="Array of beam end angles (radians)",
+    )
+
+
+class TriangularMesh(BaseModel):
+    """Triangular mesh representation with fixed-size arrays."""
+
+    points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
+    faces: Array[(None, 3), Float32] = Field(
+        description="Array of triangular faces defined by indices into the points array."
+    )
+
+
 class InputSchema(BaseModel):
     grid_parameters: dict = Field(
         description="Parameter dictionary defining location of grid beams and Z cutting plane"
@@ -45,8 +76,8 @@ class InputSchema(BaseModel):
 
 
 class OutputSchema(BaseModel):
-    placeholder_output: str = Field(
-        description="A placeholder output as this tesseract creates a .stl."
+    mesh: TriangularMesh = Field(
+        description="Output triangular mesh of the grid fin geometry"
     )
 
 
@@ -137,7 +168,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
         shutil.copy(spaceclaim_script, copied_file_path)
 
         # Update temp spaceclaim script and use to generate .stl
-        update_script = _find_and_replace_keys_in_archive(copied_file_path, keyvalues)
+        # update_script = _find_and_replace_keys_in_archive(copied_file_path, keyvalues)
         spaceclaim_result = run_spaceclaim(spaceclaim_exe, copied_file_path)
 
     return OutputSchema(

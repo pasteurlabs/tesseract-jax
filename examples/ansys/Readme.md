@@ -4,18 +4,34 @@ This directory contains an example Tesseract configuration and scripts demonstra
 
 ## Get Started
 
+### PL internal instructions:
+
+- Our open ports are: 443 and 50052.
+- Make sure to be connected to the PL VPN.
+
+### Prerequisites
+
+For the windows machine:
+1. ANSYS installed and an active license.
+2. Python and a python environment (e.g., conda, venv).
+3. Two open ports.
+
+For the linux machine:
+1. Docker installed and running.
+2. Python and a python environment (e.g., conda, venv).
+
 ### SpaceClaim Tesseract
 
-On a windows machine, install [ansys-spaceclaim](https://www.ansys.com/products/3d-design/ansys-spaceclaim) and create a new python env. Assuming you using windows powerhsell, install the required dependencies:
+Create a new python env. Assuming you using windows powerhsell, install the required dependencies:
 
 ```bash
 pip install tesseract-core[runtime]
 ```
 
-Clone this repository, navigate to the `examples/ansys/spaceclaim` directory and start the Tesseract runtime server with:
+Clone this repository, navigate to the `examples/ansys/spaceclaim_tess` directory and start the Tesseract runtime server with:
 
 ```bash
-tesseract-runtime serve
+tesseract-runtime serve --port <port_number_1>
 ```
 Note that we dont build a Tesseract image for SpaceClaim in this example. This is because SpaceClaim cannot be installed in a containerized environment. You can test it using:
 
@@ -48,6 +64,33 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8000/apply" -Method Post -Body (
 ) -ContentType "application/json"
 ```
 
-### PyMAPDL Tesseract
+### PyMAPDL Server
 
-On
+On a windows machine, make sure ansys is installed. Then run the following powershell command to start ansys with grpc server enabled:
+
+```powershell
+Start-Process -FilePath "F:\ANSYS Inc\v242\ansys\bin\winx64\ANSYS242.exe" -ArgumentList "-grpc", "-port", "<port_number_2>"
+```
+
+replace "v242" with your ansys version.
+
+### Build tesseracts
+
+1. Obtain the ip adress of the windows machine by running:
+
+```powershell
+(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi","Ethernet" | Where-Object {$_.IPAddress -notlike "169.254.*" -and $_.IPAddress -ne $null}).IPAddress
+```
+2. On the linux machine, create a new python env and install tesseract-core with:
+
+```bash
+pip install tesseract-core[runtime]
+```
+
+3. Build all relevant tesseracts:
+
+```bash
+tesseract build fem_tess
+tesseract build pymapdl_tess
+tesseract build meshing_tess
+```
