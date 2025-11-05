@@ -1,7 +1,6 @@
 from typing import Any
 
 import numpy as np
-import pyvista as pv
 import trimesh
 from pydantic import BaseModel, Field
 from pysdf import SDF
@@ -16,46 +15,34 @@ from tesseract_core.runtime.experimental import TesseractReference
 class InputSchema(BaseModel):
     """Input schema for bar geometry design and SDF generation."""
 
-    bar_params: Differentiable[
+    differentiable_parameters: Differentiable[
         Array[
-            (None, None, 3),
+            (None,),
             Float32,
         ]
     ] = Field(
-        description=(
-            "Vertex positions of the bar geometry. "
-            "The shape is (num_bars, num_vertices, 3), where num_bars is the number of bars "
-            "and num_vertices is the number of vertices per bar. The last dimension represents "
-            "the x, y, z coordinates of each vertex."
-        )
+        description="Flattened array of geometry parameters that are passed to the mesh_tesseract."
     )
 
-    stl_tesseract: TesseractReference = Field(description="Tesseract to call.")
+    non_differentiable_parameters: Array[
+        (None,),
+        Float32,
+    ] = Field(description="Flattened array of non-differentiable geometry parameters.")
 
-    Lx: float = Field(
-        default=60.0,
-        description=("Length of the SDF box in the x direction. "),
+    geometry_ints: list[int] = Field(
+        description=("List of static integers used to construct the geometry.")
     )
-    Ly: float = Field(
-        default=30.0,
-        description=("Length of the SDF box in the y direction. "),
+
+    mesh_tesseract: TesseractReference = Field(description="Tesseract to call.")
+
+    grid_size: Array[(3,), Float32] = Field(
+        description="Size of the bounding box in x, y, z directions."
     )
-    Lz: float = Field(
-        default=30.0,
-        description=("Length of the SDF box in the z direction. "),
+
+    grid_elements: Array[(3,), Int32] = Field(
+        description="Number of elements in the bounding box in x, y, z directions."
     )
-    Nx: int = Field(
-        default=60,
-        description=("Number of elements in the x direction. "),
-    )
-    Ny: int = Field(
-        default=30,
-        description=("Number of elements in the y direction. "),
-    )
-    Nz: int = Field(
-        default=30,
-        description=("Number of elements in the z direction. "),
-    )
+
     epsilon: float = Field(
         default=1e-5,
         description=(
@@ -102,30 +89,30 @@ class OutputSchema(BaseModel):
 #
 
 
-def get_geometry(target: TesseractReference, params: dict) -> trimesh.Trimesh:
+def get_geometry(
+    target: TesseractReference,
+    differentiable_parameters: np.ndarray,
+    non_differentiable_parameters: np.ndarray,
+    geometry_ints: list[int],
+) -> trimesh.Trimesh:
     """Build a pyvista geometry from the parameters.
 
     The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
     """
-    mesh = target.apply(params)["mesh"]
+    mesh = target.apply(
+        {
+            "differentiable_parameters": differentiable_parameters,
+            "non_differentiable_parameters": non_differentiable_parameters,
+            "geometry_ints": geometry_ints,
+        }
+    )["mesh"]
 
     mesh = trimesh.Trimesh(
-        vertices=mesh.point,
-        faces=mesh.faces,
+        vertices=mesh["points"],
+        faces=mesh["faces"],
     )
 
     return mesh
-
-
-def pyvista_to_trimesh(mesh: pv.PolyData) -> trimesh.Trimesh:
-    """Convert a pyvista mesh to a trimesh style polygon mesh."""
-    points = mesh.points
-    points_per_face = mesh.faces[0]
-    n_faces = mesh.faces.shape[0] // (points_per_face + 1)
-
-    faces = mesh.faces.reshape(n_faces, (points_per_face + 1))[:, 1:]
-
-    return trimesh.Trimesh(vertices=points, faces=faces)
 
 
 def compute_sdf(
@@ -161,43 +148,41 @@ def compute_sdf(
 
 
 def apply_fn(
-    params: np.ndarray,
-    radius: float,
-    Lx: float,
-    Ly: float,
-    Lz: float,
-    Nx: int,
-    Ny: int,
-    Nz: int,
+    target: TesseractReference,
+    differentiable_parameters: np.ndarray,
+    non_differentiable_parameters: np.ndarray,
+    geometry_ints: list[int],
+    grid_size: np.ndarray,
+    grid_elements: np.ndarray,
 ) -> tuple[np.ndarray, trimesh.Trimesh]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
     geo = get_geometry(
-        params,
-        radius=radius,
+        target=target,
+        differentiable_parameters=differentiable_parameters,
+        non_differentiable_parameters=non_differentiable_parameters,
+        geometry_ints=geometry_ints,
     )
 
     sd_field = compute_sdf(
         geo,
-        Lx=Lx,
-        Ly=Ly,
-        Lz=Lz,
-        Nx=Nx,
-        Ny=Ny,
-        Nz=Nz,
+        Lx=grid_size[0],
+        Ly=grid_size[1],
+        Lz=grid_size[2],
+        Nx=grid_elements[0],
+        Ny=grid_elements[1],
+        Nz=grid_elements[2],
     )
 
     return sd_field, geo
 
 
 def jac_sdf_wrt_params(
-    params: np.ndarray,
-    radius: float,
-    Lx: float,
-    Ly: float,
-    Lz: float,
-    Nx: int,
-    Ny: int,
-    Nz: int,
+    target: TesseractReference,
+    differentiable_parameters: np.ndarray,
+    non_differentiable_parameters: np.ndarray,
+    geometry_ints: list[int],
+    grid_size: np.ndarray,
+    grid_elements: np.ndarray,
     epsilon: float,
 ) -> np.ndarray:
     """Compute the Jacobian of the SDF values with respect to the parameters.
@@ -205,49 +190,39 @@ def jac_sdf_wrt_params(
     The Jacobian is computed by finite differences.
     The shape of the Jacobian is (n_chains, n_edges_per_chain + 1, 3, Nx, Ny).
     """
-    n_chains = params.shape[0]
-    n_edges_per_chain = params.shape[1] - 1
-
     jac = np.zeros(
         (
-            n_chains,
-            n_edges_per_chain + 1,
-            3,  # number of dimensions (x, y, z)
-            Nx,
-            Ny,
-            Nz,
+            differentiable_parameters.size,
+            grid_elements[0],
+            grid_elements[1],
+            grid_elements[2],
         )
     )
 
     sd_field_base, _ = apply_fn(
-        params,
-        radius=radius,
-        Lx=Lx,
-        Ly=Ly,
-        Lz=Lz,
-        Nx=Nx,
-        Ny=Ny,
-        Nz=Nz,
+        target=target,
+        differentiable_parameters=differentiable_parameters,
+        non_differentiable_parameters=non_differentiable_parameters,
+        geometry_ints=geometry_ints,
+        grid_elements=grid_elements,
+        grid_size=grid_size,
     )
 
-    for chain in range(n_chains):
-        for vertex in range(0, n_edges_per_chain + 1):
-            # we only care about the y and z coordinate
-            for i in [1, 2]:
-                params_eps = params.copy()
-                params_eps[chain, vertex, i] += epsilon
+    for i in range(differentiable_parameters.size):
+        # we only care about the y and z coordinate
 
-                sdf_epsilon, _ = apply_fn(
-                    params_eps,
-                    radius=radius,
-                    Lx=Lx,
-                    Ly=Ly,
-                    Lz=Lz,
-                    Nx=Nx,
-                    Ny=Ny,
-                    Nz=Nz,
-                )
-                jac[chain, vertex, i] = (sdf_epsilon - sd_field_base) / epsilon
+        params_eps = differentiable_parameters.copy()
+        params_eps[i] += epsilon
+
+        sdf_epsilon, _ = apply_fn(
+            target=target,
+            differentiable_parameters=params_eps,
+            non_differentiable_parameters=non_differentiable_parameters,
+            geometry_ints=geometry_ints,
+            grid_elements=grid_elements,
+            grid_size=grid_size,
+        )
+        jac[i] = (sdf_epsilon - sd_field_base) / epsilon
 
     return jac
 
@@ -270,15 +245,14 @@ def apply(inputs: InputSchema) -> OutputSchema:
         Output schema with generated mesh and SDF field.
     """
     sdf, mesh = apply_fn(
-        inputs.bar_params,
-        radius=inputs.bar_radius,
-        Lx=inputs.Lx,
-        Ly=inputs.Ly,
-        Lz=inputs.Lz,
-        Nx=inputs.Nx,
-        Ny=inputs.Ny,
-        Nz=inputs.Nz,
+        target=inputs.mesh_tesseract,
+        differentiable_parameters=inputs.differentiable_parameters,
+        non_differentiable_parameters=inputs.non_differentiable_parameters,
+        grid_size=inputs.grid_size,
+        geometry_ints=inputs.geometry_ints,
+        grid_elements=inputs.grid_elements,
     )
+
     points = np.zeros((N_POINTS, 3), dtype=np.float32)
     faces = np.zeros((N_FACES, 3), dtype=np.float32)
 
@@ -317,14 +291,12 @@ def vector_jacobian_product(
     assert vjp_outputs == {"sdf"}
 
     jac = jac_sdf_wrt_params(
-        inputs.bar_params,
-        radius=inputs.bar_radius,
-        Lx=inputs.Lx,
-        Ly=inputs.Ly,
-        Lz=inputs.Lz,
-        Nx=inputs.Nx,
-        Ny=inputs.Ny,
-        Nz=inputs.Nz,
+        target=inputs.mesh_tesseract,
+        differentiable_parameters=inputs.differentiable_parameters,
+        non_differentiable_parameters=inputs.non_differentiable_parameters,
+        geometry_ints=inputs.geometry_ints,
+        grid_size=inputs.grid_size,
+        grid_elements=inputs.grid_elements,
         epsilon=inputs.epsilon,
     )
     if inputs.normalize_jacobian:
