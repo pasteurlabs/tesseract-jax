@@ -131,6 +131,7 @@ def vectorized_subdivide_hex_mesh(
     This method introduces duplicates of points that should later be merged.
 
     Hexahedron is constructed as follows:
+
           3 -------- 2
          /|         /|
         7 -------- 6 |
@@ -140,23 +141,26 @@ def vectorized_subdivide_hex_mesh(
         4 -------- 5
 
     Axis orientation:
-        y
-        |
-        |____ x
-       /
-      /
-     z
+
+           y
+           |
+           |____ x
+          /
+         /
+        z
 
     """
-    n_hex = hex_cells.shape[0]
-    n_new_pts = (8 * 8) * n_hex  # 8 corners per new hex, 8 new hexes per old hex
+    n_hex_new = mask.sum()
+    n_new_pts = (8 * 8) * n_hex_new  # 8 corners per new hex, 8 new hexes per old hex
 
     new_pts_coords = jnp.zeros((n_new_pts, 3), dtype=pts_coords.dtype)
-    new_hex_cells = jnp.zeros((n_hex * 8, 8), dtype=hex_cells.dtype)
+    new_hex_cells = jnp.zeros((n_hex_new * 8, 8), dtype=hex_cells.dtype)
 
-    voxel_sizes = jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]])
+    voxel_sizes = jnp.abs(
+        pts_coords[hex_cells[mask, 6]] - pts_coords[hex_cells[mask, 0]]
+    )
 
-    center_points = jnp.mean(pts_coords[hex_cells], axis=1)  # (n_hex, 3)
+    center_points = jnp.mean(pts_coords[hex_cells[mask]], axis=1)  # (n_hex, 3)
     offsets = jnp.array(
         [
             [-0.25, -0.25, -0.25],
@@ -169,7 +173,7 @@ def vectorized_subdivide_hex_mesh(
             [-0.25, 0.25, 0.25],
         ]
     ).reshape((1, 8, 3)).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.reshape(
-        (n_hex, 1, 3)
+        (n_hex_new, 1, 3)
     ).repeat(8, axis=1)
 
     for cell in range(8):
@@ -177,12 +181,12 @@ def vectorized_subdivide_hex_mesh(
 
         for corner in range(8):
             new_pts_coords = new_pts_coords.at[
-                jnp.arange(n_hex) * 64 + cell * 8 + corner
+                jnp.arange(n_hex_new) * 64 + cell * 8 + corner
             ].set(center - offsets[:, corner])
 
-            new_hex_cells = new_hex_cells.at[jnp.arange(n_hex) * 8 + cell, corner].set(
-                jnp.arange(n_hex) * 64 + cell * 8 + corner
-            )
+            new_hex_cells = new_hex_cells.at[
+                jnp.arange(n_hex_new) * 8 + cell, corner
+            ].set(jnp.arange(n_hex_new) * 64 + cell * 8 + corner)
 
     def reindex_and_mask(
         coords: jnp.ndarray, cells: jnp.ndarray, keep_mask: jnp.ndarray
@@ -202,9 +206,9 @@ def vectorized_subdivide_hex_mesh(
 
         return coords, cells
 
-    new_pts_coords, new_hex_cells = reindex_and_mask(
-        new_pts_coords, new_hex_cells, mask.repeat(8)
-    )
+    # new_pts_coords, new_hex_cells = reindex_and_mask(
+    #     new_pts_coords, new_hex_cells, mask.repeat(8)
+    # )
     old_pts_coords, old_hex_cells = reindex_and_mask(
         pts_coords, hex_cells, jnp.logical_not(mask)
     )
@@ -279,7 +283,6 @@ def recursive_subdivide_hex_mesh(
 
     return pts_coords, hex_cells
 
-mesh = None  # cache for the last generated mesh
 
 # @lru_cache(maxsize=1)
 def generate_mesh(
@@ -313,8 +316,6 @@ def generate_mesh(
         Ly=Ly,
         Lz=Lz,
     )
-
-    mesh = (pts, cells)  # cache the generated mesh
 
     return pts, cells
 
@@ -397,17 +398,14 @@ def vector_jacobian_product(
     assert vjp_inputs == {"field_values"}
     assert vjp_outputs == {"mesh_cell_values"}
 
-    if mesh is None:
-        pts, cells = generate_mesh(
-            Lx=inputs.Lx,
-            Ly=inputs.Ly,
-            Lz=inputs.Lz,
-            sizing_field=inputs.sizing_field,
-            max_levels=inputs.max_subdivision_levels,
-        )
-    else:
-        print("Using cached mesh for VJP computation.")
-        pts, cells = mesh
+    pts, cells = generate_mesh(
+        Lx=inputs.Lx,
+        Ly=inputs.Ly,
+        Lz=inputs.Lz,
+        sizing_field=inputs.sizing_field,
+        max_levels=inputs.max_subdivision_levels,
+    )
+
     cell_centers = jnp.mean(pts[cells], axis=1)
 
     xs = jnp.linspace(-inputs.Lx / 2, inputs.Lx / 2, inputs.field_values.shape[0])
