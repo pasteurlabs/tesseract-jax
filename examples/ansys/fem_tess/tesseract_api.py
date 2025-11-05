@@ -4,9 +4,8 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 import meshio
-from jax_fem.generate_mesh import Mesh, box_mesh, get_meshio_cell_type
+from jax_fem.generate_mesh import Mesh
 
 # Import JAX-FEM specific modules
 from jax_fem.problem import Problem
@@ -64,31 +63,6 @@ class InputSchema(BaseModel):
     hex_mesh: HexMesh = Field(
         description="Hexahedral mesh representation of the geometry",
     )
-    Lx: float = Field(
-        default=60.0, description="Length of the simulation box in the x direction."
-    )
-    Ly: float = Field(
-        default=30.0,
-        description=("Length of the simulation box in the y direction."),
-    )
-    Lz: float = Field(
-        default=30.0, description="Length of the simulation box in the z direction."
-    )
-    Nx: int = Field(
-        default=60,
-        description=("Number of elements in the x direction."),
-    )
-    Ny: int = Field(
-        default=30,
-        description=("Number of elements in the y direction."),
-    )
-    Nz: int = Field(
-        default=30,
-        description=("Number of elements in the z direction."),
-    )
-    use_regular_grid: bool = Field(
-        description="Toggle to use a regular grid mesh instead of imported mesh",
-    )
 
 
 class OutputSchema(BaseModel):
@@ -131,7 +105,7 @@ class Elasticity(Problem):
             Callable that computes stress from strain gradient and density.
         """
 
-        def stress(u_grad, theta):  # noqa: ANN001
+        def stress(u_grad, theta):
             Emax = 70.0e3
             Emin = 1e-3 * Emax
             nu = 0.3
@@ -166,12 +140,13 @@ class Elasticity(Problem):
         Returns:
             List of van Neumann boundary condition value functions.
         """
-        # def surface_map(u, x):
-        #     return jnp.array([0.0, 0.0, 100.0])
 
-        # return [surface_map]
+        def surface_map(u, x):
+            return jnp.array([0.0, 0.0, 100.0])
 
-        return self.van_neumann_value_fns
+        return [surface_map]
+
+        # return self.van_neumann_value_fns
 
     def set_params(self, params: jnp.ndarray) -> None:
         """Set density parameters for topology optimization.
@@ -205,7 +180,7 @@ class Elasticity(Problem):
         u_face = jnp.sum(u_face, axis=2)
         subset_quad_points = self.physical_surface_quad_points[0]
         neumann_fn = self.get_surface_maps()[0]
-        traction = jax.vmap(jax.vmap(neumann_fn))(u_face, subset_quad_points)
+        traction = -jax.vmap(jax.vmap(neumann_fn))(u_face, subset_quad_points)
         val = jnp.sum(traction * u_face * nanson_scale[:, :, None])
         return val
 
@@ -213,12 +188,6 @@ class Elasticity(Problem):
 # Memoize the setup function to avoid expensive recomputation
 # @lru_cache(maxsize=1)
 def setup(
-    Nx: int = 60,
-    Ny: int = 30,
-    Nz: int = 30,
-    Lx: float = 60.0,
-    Ly: float = 30.0,
-    Lz: float = 30.0,
     pts: jnp.ndarray = None,
     cells: jnp.ndarray = None,
     dirichlet_mask: jnp.ndarray = None,
@@ -229,12 +198,6 @@ def setup(
     """Setup the elasticity problem and its differentiable solver.
 
     Args:
-        Nx: Number of elements in x direction for regular grid.
-        Ny: Number of elements in y direction for regular grid.
-        Nz: Number of elements in z direction for regular grid.
-        Lx: Length of the domain in x direction for regular grid.
-        Ly: Length of the domain in y direction for regular grid.
-        Lz: Length of the domain in z direction for regular grid.
         pts: Optional array of mesh vertex positions for custom mesh.
         cells: Optional array of hexahedral cell definitions for custom mesh.
         dirichlet_mask: Mask array for Dirichlet boundary conditions.
@@ -247,56 +210,11 @@ def setup(
         problem instance and fwd_pred is the differentiable forward solver.
     """
     ele_type = "HEX8"
-    if pts is None and cells is None:
-        cell_type = get_meshio_cell_type(ele_type)
-        meshio_mesh = box_mesh(
-            Nx=Nx, Ny=Ny, Nz=Nz, domain_x=Lx, domain_y=Ly, domain_z=Lz
-        )
-        mesh = Mesh(meshio_mesh.points, meshio_mesh.cells_dict[cell_type])
-    else:
-        meshio_mesh = meshio.Mesh(points=pts, cells={"hexahedron": cells})
-        mesh = Mesh(pts, meshio_mesh.cells_dict["hexahedron"])
 
-    def bc_factory(
-        masks: jnp.ndarray,
-        values: jnp.ndarray,
-        is_van_neumann: bool = False,
-    ) -> tuple[list[Callable], list[Callable]]:
-        location_functions = []
-        value_functions = []
-        for i in range(values.shape[0]):
+    meshio_mesh = meshio.Mesh(points=pts, cells={"hexahedron": cells})
+    mesh = Mesh(pts, meshio_mesh.cells_dict["hexahedron"])
 
-            def location_fn(point, index):  # noqa: ANN001
-                # return mask[index]
-                return (
-                    jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False) == i
-                )
-
-            def value_fn(point):  # noqa: ANN001
-                return values[i]
-
-            def value_fn_vn(u, x):  # noqa: ANN001
-                return values[i]
-
-            location_functions.append(location_fn)
-            value_functions.append(value_fn_vn if is_van_neumann else value_fn)
-
-        return location_functions, value_functions
-
-    dirichlet_values = np.array(dirichlet_values)
-    van_neumann_values = np.array(van_neumann_values)
-
-    dirichlet_location_fns, dirichlet_value_fns = bc_factory(
-        dirichlet_mask, dirichlet_values
-    )
-
-    van_neumann_locations, van_neumann_value_fns = bc_factory(
-        van_neumann_mask, van_neumann_values, is_van_neumann=True
-    )
-
-    dirichlet_bc_info = [dirichlet_location_fns * 3, [0, 1, 2], dirichlet_value_fns * 3]
-
-    location_fns = van_neumann_locations
+    print(f"pts min: {jnp.min(pts, axis=0)}, pts max: {jnp.max(pts, axis=0)}")
 
     # # Define boundary conditions and values.
     # def fixed_location(point):
@@ -343,6 +261,26 @@ def setup(
 
     # location_fns = [load_location]
 
+    Lx = jnp.max(pts[:, 0]) - jnp.min(pts[:, 0])
+    Ly = jnp.max(pts[:, 1]) - jnp.min(pts[:, 1])
+    # Lz = jnp.max(pts[:, 2]) - jnp.min(pts[:, 2])
+
+    def fixed_location(point):
+        return jnp.isclose(point[0], 0.0, atol=1e-5)
+
+    def load_location(point):
+        return jnp.logical_and(
+            jnp.isclose(point[0], Lx, atol=1e-5),
+            jnp.isclose(point[1], 0.0, atol=0.1 * Ly + 1e-5),
+        )
+
+    def dirichlet_val(point):
+        return 0.0
+
+    dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
+
+    location_fns = [load_location]
+
     # Define forward problem
     problem = Elasticity(
         mesh,
@@ -351,8 +289,8 @@ def setup(
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
         location_fns=location_fns,
-        additional_info=(van_neumann_value_fns,),
-        # additional_info=([0.1],)
+        # additional_info=(van_neumann_value_fns,),
+        additional_info=([0.1],),
     )
 
     # Apply the automatic differentiation wrapper
@@ -374,53 +312,20 @@ def apply_fn(inputs: dict) -> dict:
     Returns:
         Dictionary containing the compliance of the structure.
     """
-    
-    if not inputs["use_regular_grid"]:
-        problem, fwd_pred = setup(
-            Nx=inputs["Nx"],
-            Ny=inputs["Ny"],
-            Nz=inputs["Nz"],
-            Lx=inputs["Lx"],
-            Ly=inputs["Ly"],
-            Lz=inputs["Lz"],
-            # pts=jax.lax.dynamic_slice_in_dim(
-            #     inputs["hex_mesh"]["points"],
-            #     0,
-            #     inputs["hex_mesh"]["n_points"],
-            #     axis=0,
-            # ),
-            # cells=jax.lax.dynamic_slice_in_dim(
-            #     inputs["hex_mesh"]["faces"],
-            #     0,
-            #     inputs["hex_mesh"]["n_faces"],
-            #     axis=0,
-            # ),
-            pts=inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]],
-            cells=inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]],
-            dirichlet_mask=inputs["dirichlet_mask"],
-            dirichlet_values=inputs["dirichlet_values"],
-            van_neumann_mask=inputs["van_neumann_mask"],
-            van_neumann_values=inputs["van_neumann_values"],
-        )
-    else:
-        problem, fwd_pred = setup(
-            Nx=inputs["Nx"],
-            Ny=inputs["Ny"],
-            Nz=inputs["Nz"],
-            Lx=inputs["Lx"],
-            Ly=inputs["Ly"],
-            Lz=inputs["Lz"],
-        )
-    print(f"Setup completed with mesh of {problem.fe.num_cells} elements.")
-    if inputs["use_regular_grid"]:
-        rho = inputs["rho"]
-    else:
-        rho = inputs["rho"][: inputs["hex_mesh"]["n_faces"]]
-    # print(rho)
+    problem, fwd_pred = setup(
+        pts=inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]],
+        cells=inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]],
+        dirichlet_mask=inputs["dirichlet_mask"],
+        dirichlet_values=inputs["dirichlet_values"],
+        van_neumann_mask=inputs["van_neumann_mask"],
+        van_neumann_values=inputs["van_neumann_values"],
+    )
 
-    print(rho.shape)
+    rho = inputs["rho"][: inputs["hex_mesh"]["n_points"]]
+
     sol_list = fwd_pred(rho)
     compliance = problem.compute_compliance(sol_list[0])
+
     return {"compliance": compliance.astype(jnp.float32)}
 
 
