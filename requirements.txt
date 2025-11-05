@@ -41,7 +41,7 @@ numpy==2.2.4
     #   tesseract-core
 opt-einsum==3.4.0
     # via jax
-pip==25.2
+pip==25.3
     # via tesseract-core
 pydantic==2.11.0
     # via tesseract-core
