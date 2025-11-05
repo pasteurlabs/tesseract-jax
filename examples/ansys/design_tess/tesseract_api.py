@@ -35,11 +35,11 @@ class InputSchema(BaseModel):
 
     mesh_tesseract: TesseractReference = Field(description="Tesseract to call.")
 
-    grid_size: Array[(3,), Float32] = Field(
+    grid_size: list[float] = Field(
         description="Size of the bounding box in x, y, z directions."
     )
 
-    grid_elements: Array[(3,), Int32] = Field(
+    grid_elements: list[int] = Field(
         description="Number of elements in the bounding box in x, y, z directions."
     )
 
@@ -319,7 +319,11 @@ def abstract_eval(abstract_inputs: InputSchema) -> dict:
     """
     return {
         "sdf": ShapeDType(
-            shape=(abstract_inputs.Nx, abstract_inputs.Ny, abstract_inputs.Nz),
+            shape=(
+                abstract_inputs.grid_elements[0],
+                abstract_inputs.grid_elements[1],
+                abstract_inputs.grid_elements[2],
+            ),
             dtype="float32",
         ),
         "mesh": {
