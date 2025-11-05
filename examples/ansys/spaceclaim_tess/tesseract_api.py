@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path, WindowsPath
 from tempfile import TemporaryDirectory
 
+import trimesh
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Float32
 
@@ -159,6 +160,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     cwd = os.getcwd()
     output_file = os.path.join(cwd, "grid_fin.stl")
 
+    # TODO:  lets make sure the parameters are transformed into a correct dict to be used in the script
     keyvalues = inputs.grid_parameters.copy()
     keyvalues["__output__"] = output_file
 
@@ -169,8 +171,16 @@ def apply(inputs: InputSchema) -> OutputSchema:
 
         # Update temp spaceclaim script and use to generate .stl
         # update_script = _find_and_replace_keys_in_archive(copied_file_path, keyvalues)
-        spaceclaim_result = run_spaceclaim(spaceclaim_exe, copied_file_path)
+        # spaceclaim_result = run_spaceclaim(spaceclaim_exe, copied_file_path)
 
+    # TODO: lets read the .stl file using trimesh
+    mesh = trimesh.load(output_file)
     return OutputSchema(
-        placeholder_output=f"Subprocess return code: {spaceclaim_result}"
+        mesh=TriangularMesh(
+            points=Array(mesh.vertices.astype("float32")),
+            faces=Array(mesh.faces.astype("float32")),
+        )
     )
+    # return OutputSchema(
+    #     placeholder_output=f"Subprocess return code: {spaceclaim_result}"
+    # )
