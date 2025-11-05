@@ -1,0 +1,3 @@
+[submodule "examples/fem-shapeopt/jax-fem"]
+	path = examples/fem-shapeopt/jax-fem
+	url = https://github.com/andrinr/jax-fem.git
