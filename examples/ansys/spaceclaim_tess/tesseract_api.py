@@ -120,16 +120,16 @@ def build_geometry(
     # and instead use the unique run directory created everytime the
     # tesseract is run (so there is history).
     with TemporaryDirectory() as temp_dir:
-        prepped_file_path, output_file = _prep_scscript(
+        prepped_script_path, output_file = _prep_scscript(
             temp_dir,
             spaceclaim_script,
             differentiable_bar_parameters,
             differentiable_plane_parameters,
             non_differentiable_parameters,
         )
-        run_spaceclaim(spaceclaim_exe, prepped_file_path)
+        run_spaceclaim(spaceclaim_exe, prepped_script_path)
 
-    mesh = trimesh.load(output_file)
+        mesh = trimesh.load(output_file)
 
     return mesh
 
@@ -147,12 +147,10 @@ def _prep_scscript(
     """
     # Define output file name and location
     # TODO: Same as before: can we output grid_fin.stl in the tesseract
-    # unique run directory instead of cwd?
-    cwd = os.getcwd()
-    output_file = os.path.join(cwd, "grid_fin.stl")
-
-    prepped_file_path = os.path.join(temp_dir, os.path.basename(spaceclaim_script))
-    shutil.copy(spaceclaim_script, prepped_file_path)
+    # unique run directory instead of temp dir to keep history?
+    output_file = os.path.join(temp_dir, "grid_fin.stl")
+    prepped_script_path = os.path.join(temp_dir, os.path.basename(spaceclaim_script))
+    shutil.copy(spaceclaim_script, prepped_script_path)
 
     # Define dict used to input params to .scscript
     keyvalues = {}
@@ -168,9 +166,9 @@ def _prep_scscript(
         keyvalues[f"__params__.s{i + 1}"] = str(differentiable_bar_parameters[i][0])
         keyvalues[f"__params__.e{i + 1}"] = str(differentiable_bar_parameters[i][1])
 
-    _find_and_replace_keys_in_archive(prepped_file_path, keyvalues)
+    _find_and_replace_keys_in_archive(prepped_script_path, keyvalues)
 
-    return [prepped_file_path, output_file]
+    return [prepped_script_path, output_file]
 
 
 def _safereplace(filedata: str, key: str, value: str) -> str:
