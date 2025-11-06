@@ -106,30 +106,13 @@ class Elasticity(Problem):
         """
 
         def stress(u_grad, theta):
-            Emax = 70.0e3
-            Emin = 1e-3 * Emax
+            E = 70e3
             nu = 0.3
-            penal = 3.0
-            E = Emin + (Emax - Emin) * theta[0] ** penal
+            mu = E / (2.0 * (1.0 + nu))
+            lmbda = E * nu / ((1 + nu) * (1 - 2 * nu))
+
             epsilon = 0.5 * (u_grad + u_grad.T)
-            # eps11 = epsilon[0, 0]
-            # eps22 = epsilon[1, 1]
-            # eps12 = epsilon[0, 1]
-            # mu = E / (2 * (1 + nu))
-            # sigma = jnp.trace(epsilon) * jnp.eye(self.dim) + 2*mu*epsilon
-            # # sig11 = E / (1 + nu) / (1 - nu) * (eps11 + nu * eps22)
-            # # sig22 = E / (1 + nu) / (1 - nu) * (nu * eps11 + eps22)
-            # # sig12 = E / (1 + nu) * eps12
-            # # sigma = jnp.array([[sig11, sig12], [sig12, sig22]])
-
-            # Correct 3D linear elasticity constitutive law
-            # Lamé parameters
-            lmbda = E * nu / ((1.0 + nu) * (1.0 - 2.0 * nu))  # First Lamé parameter
-            mu = E / (2.0 * (1.0 + nu))  # Second Lamé parameter (shear modulus)
-
-            # Stress-strain relationship
-            sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2.0 * mu * epsilon
-
+            sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2 * mu * epsilon
             return sigma
 
         return stress
@@ -210,76 +193,61 @@ def setup(
         problem instance and fwd_pred is the differentiable forward solver.
     """
     ele_type = "HEX8"
-
     meshio_mesh = meshio.Mesh(points=pts, cells={"hexahedron": cells})
     mesh = Mesh(pts, meshio_mesh.cells_dict["hexahedron"])
 
-    print(f"pts min: {jnp.min(pts, axis=0)}, pts max: {jnp.max(pts, axis=0)}")
+    def bc_factory(
+        masks: jnp.ndarray,
+        values: jnp.ndarray,
+        is_van_neumann: bool = False,
+    ) -> tuple[list[Callable], list[Callable]]:
+        location_functions = []
+        value_functions = []
 
-    # # Define boundary conditions and values.
-    # def fixed_location(point):
-    #     return jnp.isclose(point[0], 0, atol=1e-5)
+        for i in range(values.shape[0]):
+            # Create a factory that captures the current value of i
+            def make_location_fn(idx):
+                def location_fn(point, index):
+                    return (
+                        jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False)
+                        == idx
+                    )
 
-    # print(Lx, Ly, Lz)
+                return location_fn
 
-    # def fixed_location(point):
-    #     # return jnp.isclose(point[0], -Lx / 3, atol=0.1)
-    #     return point[0] < (-Lx / 2 + 1e-5)  # Left face
+            def make_value_fn(idx):
+                def value_fn(point):
+                    return values[idx]
 
-    # def load_location(point):
+                return value_fn
 
-    #     # return jnp.logical_and(
-    #     #     jnp.logical_and(
-    #     #         jnp.isclose(point[0], Lx / 2, atol=1e-5),
-    #     #         jnp.isclose(point[1], -Ly / 2, atol=1e-5),
-    #     #     ),
-    #     #     jnp.isclose(point[2], Lz / 2, atol=1e-5),
-    #     # )
+            def make_value_fn_vn(idx):
+                def value_fn_vn(u, x):
+                    return values[idx]
 
-    #     return jnp.logical_and(
-    #         jnp.isclose(point[0], 0, atol=1e-5),
-    #         jnp.isclose(point[1], 0, atol=0.1 * Ly + 1e-5),
-    #     )
+                return value_fn_vn
 
-    # def dirichlet_val(point):
-    #     return 0.0
+            location_functions.append(make_location_fn(i))
+            value_functions.append(
+                make_value_fn_vn(i) if is_van_neumann else make_value_fn(i)
+            )
 
-    # # # Define boundary conditions and values.
-    # def fixed_location(point, index):
-    #     return jnp.isclose(point[0], -Lx/2, atol=0.1)
+        return location_functions, value_functions
 
-    # def load_location(point):
-    #     return jnp.logical_and(jnp.logical_and(
-    #         jnp.isclose(point[0], Lx/2, atol=1e-2),
-    #         jnp.isclose(point[2], -Lz/2, atol=1e-2),
-    #     ), jnp.isclose(point[1], Ly/2, atol=1e-2))
+    dirichlet_values = jnp.array(dirichlet_values)
+    van_neumann_values = jnp.array(van_neumann_values)
 
-    # def dirichlet_val(point):
-    #     return 0.0
+    dirichlet_location_fns, dirichlet_value_fns = bc_factory(
+        dirichlet_mask, dirichlet_values
+    )
 
-    # dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
+    van_neumann_locations, van_neumann_value_fns = bc_factory(
+        van_neumann_mask, van_neumann_values, is_van_neumann=True
+    )
 
-    # location_fns = [load_location]
+    dirichlet_bc_info = [dirichlet_location_fns * 3, [0, 1, 2], dirichlet_value_fns * 3]
 
-    Lx = jnp.max(pts[:, 0]) - jnp.min(pts[:, 0])
-    Ly = jnp.max(pts[:, 1]) - jnp.min(pts[:, 1])
-    # Lz = jnp.max(pts[:, 2]) - jnp.min(pts[:, 2])
-
-    def fixed_location(point):
-        return jnp.isclose(point[0], 0.0, atol=1e-5)
-
-    def load_location(point):
-        return jnp.logical_and(
-            jnp.isclose(point[0], Lx, atol=1e-5),
-            jnp.isclose(point[1], 0.0, atol=0.1 * Ly + 1e-5),
-        )
-
-    def dirichlet_val(point):
-        return 0.0
-
-    dirichlet_bc_info = [[fixed_location] * 3, [0, 1, 2], [dirichlet_val] * 3]
-
-    location_fns = [load_location]
+    location_fns = van_neumann_locations
 
     # Define forward problem
     problem = Elasticity(
@@ -289,8 +257,8 @@ def setup(
         ele_type=ele_type,
         dirichlet_bc_info=dirichlet_bc_info,
         location_fns=location_fns,
-        # additional_info=(van_neumann_value_fns,),
-        additional_info=([0.1],),
+        additional_info=(van_neumann_value_fns,),
+        # additional_info=([0.1],),
     )
 
     # Apply the automatic differentiation wrapper
