@@ -117,7 +117,6 @@ class Elasticity(Problem):
             lmbda = E * nu / ((1 + nu) * (1 - 2 * nu))
 
             epsilon = 0.5 * (u_grad + u_grad.T)
-            sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2 * mu * epsilon
 
             sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2.0 * mu * epsilon
             return sigma
@@ -141,6 +140,7 @@ class Elasticity(Problem):
         # Override base class method.
         full_params = jnp.ones((self.fe.num_cells, params.shape[1]))
         full_params = full_params.at[self.fe.flex_inds].set(params)
+        print(self.fe.num_quads)
         thetas = jnp.repeat(full_params[:, None, :], self.fe.num_quads, axis=1)
         self.full_params = full_params
         self.internal_vars = [thetas]
@@ -209,6 +209,7 @@ def setup(
             # Create a factory that captures the current value of i
             def make_location_fn(idx):
                 def location_fn(point, index):
+                    # jax.debug.print("Mask at point {}: {}", point, jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False))
                     return (
                         jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False)
                         == idx
@@ -218,12 +219,18 @@ def setup(
 
             def make_value_fn(idx):
                 def value_fn(point):
+                    # jax.debug.print("Value {} at point {}", jax.lax.dynamic_index_in_dim(values, idx, 0, keepdims=False), point)
                     return values[idx]
 
                 return value_fn
 
             def make_value_fn_vn(idx):
                 def value_fn_vn(u, x):
+                    jax.debug.print(
+                        "Van Neumann Value {} at point {}",
+                        jax.lax.dynamic_index_in_dim(values, idx, 0, keepdims=False),
+                        x,
+                    )
                     return values[idx]
 
                 return value_fn_vn
@@ -237,6 +244,9 @@ def setup(
 
     dirichlet_values = jnp.array(dirichlet_values)
     van_neumann_values = jnp.array(van_neumann_values)
+
+    print(f"dirichlet_values: {dirichlet_values}")
+    print(f"van_neumann_values: {van_neumann_values}")
 
     dirichlet_location_fns, dirichlet_value_fns = bc_factory(
         dirichlet_mask, dirichlet_values
@@ -281,40 +291,6 @@ def apply_fn(inputs: dict) -> dict:
     Returns:
         Dictionary containing the compliance of the structure.
     """
-    from typing import TypeVar
-
-    T = TypeVar("T")
-
-    def stop_grads_int(x: T) -> T:
-        """Stops gradient computation.
-
-        We cannot use jax.lax.stop_gradient directly because Tesseract meshes are
-        nested dictionaries with arrays and integers, and jax.lax.stop_gradient
-        does not support integers.
-
-        Args:
-                x: Input value.
-
-        Returns:
-                Value with stopped gradients.
-        """
-
-        def stop(x):
-            return jax._src.ad_util.stop_gradient_p.bind(x)
-
-        return jax.tree_util.tree_map(stop, x)
-
-    # stop grads on all inputs except rho
-
-    # problem, fwd_pred = setup(
-    #     pts=stop_grads_int(inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]]),
-    #     cells=stop_grads_int(inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]]),
-    #     dirichlet_mask=stop_grads_int(inputs["dirichlet_mask"]),
-    #     dirichlet_values=stop_grads_int(inputs["dirichlet_values"]),
-    #     van_neumann_mask=stop_grads_int(inputs["van_neumann_mask"]),
-    #     van_neumann_values=stop_grads_int(inputs["van_neumann_values"]),
-    # )
-
     # no stop grads
     problem, fwd_pred = setup(
         pts=inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]],

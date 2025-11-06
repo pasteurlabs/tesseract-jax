@@ -25,19 +25,20 @@ For the linux machine:
 Create a new python env. Assuming you using windows powerhsell, install the required dependencies:
 
 ```bash
-pip install tesseract-core[runtime]
+pip install tesseract-core[runtime] trimesh
 ```
 
 Clone this repository, navigate to the `examples/ansys/spaceclaim_tess` directory and start the Tesseract runtime server with:
 
 ```bash
-tesseract-runtime serve --port <port_number_1>
+tesseract-runtime serve --port <port_number_1> --host 0.0.0.0
 ```
 Note that we dont build a Tesseract image for SpaceClaim in this example. This is because SpaceClaim cannot be installed in a containerized environment. You can test it using git bash and your specific Spaceclaim.exe Path:
 
 ```bash
-curl -d '{"inputs":{"differentiable_bar_parameters": [[0, 3.14], [0.39, 3.53], [0.79, 3.93], [1.18, 4.32], [1.57, 4.71], [1.96, 5.11], [2.36, 5.50], [2.75, 5.89]], "differentiable_plane_parameters": [200, 600], "non_differentiable_parameters": [800, 100], "string_parameters":["F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe", "geometry_generation.scscript"]}}' -H "Content-Type: application/json" http://127.0.0.1:8000/apply
+curl -d '{"inputs":{"differentiable_bar_parameters": [[0, 3.14], [0.39, 3.53], [0.79, 3.93], [1.18, 4.32], [1.57, 4.71], [1.96, 5.11], [2.36, 5.50], [2.75, 5.89]], "differentiable_plane_parameters": [200, 600], "non_differentiable_parameters": [800, 100], "string_parameters":["F:\\ANSYS Inc\\v242\\scdm\\SpaceClaim.exe", "geometry_generation.scscript"]}}' -H "Content-Type: application/json" http://172.26.3.35:443/apply
 ```
+
 
 or the equivalent on powershell:
 
