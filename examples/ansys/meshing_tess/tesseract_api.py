@@ -413,6 +413,7 @@ def vector_jacobian_product(
         cotangent_vector["mesh_cell_values"][: cells.shape[0]],
         (xs, ys, zs),
         method="nearest",
+        # fill_value=0.0,
     )
 
     return {"field_values": jnp.array(field_cotangent_vector).astype(jnp.float32)}
