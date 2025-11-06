@@ -76,6 +76,11 @@ class OutputSchema(BaseModel):
     ] = Field(description="Compliance of the structure, a measure of stiffness")
 
 
+#     displacement: Array[
+#         (None, 3),
+#         Float32,
+#     ] = Field(description="Nodal displacement field")
+
 #
 # Helper functions
 #
@@ -140,7 +145,6 @@ class Elasticity(Problem):
         # Override base class method.
         full_params = jnp.ones((self.fe.num_cells, params.shape[1]))
         full_params = full_params.at[self.fe.flex_inds].set(params)
-        print(self.fe.num_quads)
         thetas = jnp.repeat(full_params[:, None, :], self.fe.num_quads, axis=1)
         self.full_params = full_params
         self.internal_vars = [thetas]
@@ -209,28 +213,25 @@ def setup(
             # Create a factory that captures the current value of i
             def make_location_fn(idx):
                 def location_fn(point, index):
-                    # jax.debug.print("Mask at point {}: {}", point, jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False))
                     return (
-                        jax.lax.dynamic_index_in_dim(masks, index, 0, keepdims=False)
-                        == idx
-                    )
+                        jnp.sum(
+                            jax.lax.dynamic_index_in_dim(
+                                masks, index, 0, keepdims=False
+                            )
+                        )
+                        == idx + 1
+                    ).astype(jnp.bool_)
 
                 return location_fn
 
             def make_value_fn(idx):
                 def value_fn(point):
-                    # jax.debug.print("Value {} at point {}", jax.lax.dynamic_index_in_dim(values, idx, 0, keepdims=False), point)
                     return values[idx]
 
                 return value_fn
 
             def make_value_fn_vn(idx):
                 def value_fn_vn(u, x):
-                    jax.debug.print(
-                        "Van Neumann Value {} at point {}",
-                        jax.lax.dynamic_index_in_dim(values, idx, 0, keepdims=False),
-                        x,
-                    )
                     return values[idx]
 
                 return value_fn_vn
@@ -242,11 +243,8 @@ def setup(
 
         return location_functions, value_functions
 
-    dirichlet_values = jnp.array(dirichlet_values)
-    van_neumann_values = jnp.array(van_neumann_values)
-
-    print(f"dirichlet_values: {dirichlet_values}")
-    print(f"van_neumann_values: {van_neumann_values}")
+    dirichlet_mask = jnp.array(dirichlet_mask)
+    van_neumann_mask = jnp.array(van_neumann_mask)
 
     dirichlet_location_fns, dirichlet_value_fns = bc_factory(
         dirichlet_mask, dirichlet_values
