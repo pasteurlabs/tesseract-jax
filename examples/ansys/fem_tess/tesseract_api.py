@@ -106,13 +106,20 @@ class Elasticity(Problem):
         """
 
         def stress(u_grad, theta):
-            E = 70e3
+            Emax = 70.0e3
+            Emin = 1e-3 * Emax
+            penal = 3.0
+
+            E = Emin + (Emax - Emin) * theta[0] ** penal
+
             nu = 0.3
             mu = E / (2.0 * (1.0 + nu))
             lmbda = E * nu / ((1 + nu) * (1 - 2 * nu))
 
             epsilon = 0.5 * (u_grad + u_grad.T)
             sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2 * mu * epsilon
+
+            sigma = lmbda * jnp.trace(epsilon) * jnp.eye(self.dim) + 2.0 * mu * epsilon
             return sigma
 
         return stress
@@ -123,13 +130,7 @@ class Elasticity(Problem):
         Returns:
             List of van Neumann boundary condition value functions.
         """
-
-        def surface_map(u, x):
-            return jnp.array([0.0, 0.0, 100.0])
-
-        return [surface_map]
-
-        # return self.van_neumann_value_fns
+        return self.van_neumann_value_fns
 
     def set_params(self, params: jnp.ndarray) -> None:
         """Set density parameters for topology optimization.
@@ -280,6 +281,41 @@ def apply_fn(inputs: dict) -> dict:
     Returns:
         Dictionary containing the compliance of the structure.
     """
+    from typing import TypeVar
+
+    T = TypeVar("T")
+
+    def stop_grads_int(x: T) -> T:
+        """Stops gradient computation.
+
+        We cannot use jax.lax.stop_gradient directly because Tesseract meshes are
+        nested dictionaries with arrays and integers, and jax.lax.stop_gradient
+        does not support integers.
+
+        Args:
+                x: Input value.
+
+        Returns:
+                Value with stopped gradients.
+        """
+
+        def stop(x):
+            return jax._src.ad_util.stop_gradient_p.bind(x)
+
+        return jax.tree_util.tree_map(stop, x)
+
+    # stop grads on all inputs except rho
+
+    # problem, fwd_pred = setup(
+    #     pts=stop_grads_int(inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]]),
+    #     cells=stop_grads_int(inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]]),
+    #     dirichlet_mask=stop_grads_int(inputs["dirichlet_mask"]),
+    #     dirichlet_values=stop_grads_int(inputs["dirichlet_values"]),
+    #     van_neumann_mask=stop_grads_int(inputs["van_neumann_mask"]),
+    #     van_neumann_values=stop_grads_int(inputs["van_neumann_values"]),
+    # )
+
+    # no stop grads
     problem, fwd_pred = setup(
         pts=inputs["hex_mesh"]["points"][: inputs["hex_mesh"]["n_points"]],
         cells=inputs["hex_mesh"]["faces"][: inputs["hex_mesh"]["n_faces"]],
@@ -289,7 +325,7 @@ def apply_fn(inputs: dict) -> dict:
         van_neumann_values=inputs["van_neumann_values"],
     )
 
-    rho = inputs["rho"][: inputs["hex_mesh"]["n_points"]]
+    rho = inputs["rho"][: inputs["hex_mesh"]["n_faces"]]
 
     sol_list = fwd_pred(rho)
     compliance = problem.compute_compliance(sol_list[0])

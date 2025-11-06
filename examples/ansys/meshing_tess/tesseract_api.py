@@ -30,17 +30,8 @@ class InputSchema(BaseModel):
             "Sizing field values defined on a regular grid for mesh adaptation."
         )
     )
-    Lx: float = Field(
-        default=60.0,
-        description=("Length of the domain in the x direction. "),
-    )
-    Ly: float = Field(
-        default=30.0,
-        description=("Length of the domain in the y direction. "),
-    )
-    Lz: float = Field(
-        default=30.0,
-        description=("Length of the domain in the z direction. "),
+    domain_size: tuple[float, float, float] = Field(
+        description=("Size of the domain in x, y, z directions.")
     )
 
     max_points: int = Field(
@@ -326,10 +317,13 @@ def apply(inputs: InputSchema) -> OutputSchema:
     Returns:
         OutputSchema, outputs of the function.
     """
+    Lx = inputs.domain_size[0]
+    Ly = inputs.domain_size[1]
+    Lz = inputs.domain_size[2]
     pts, cells = generate_mesh(
-        Lx=inputs.Lx,
-        Ly=inputs.Ly,
-        Lz=inputs.Lz,
+        Lx=Lx,
+        Ly=Ly,
+        Lz=Lz,
         sizing_field=inputs.sizing_field,
         max_levels=inputs.max_subdivision_levels,
     )
@@ -339,9 +333,9 @@ def apply(inputs: InputSchema) -> OutputSchema:
     cells_padded = jnp.zeros((inputs.max_cells, 8), dtype=cells.dtype)
     cells_padded = cells_padded.at[: cells.shape[0], :].set(cells)
 
-    xs = jnp.linspace(-inputs.Lx / 2, inputs.Lx / 2, inputs.field_values.shape[0])
-    ys = jnp.linspace(-inputs.Ly / 2, inputs.Ly / 2, inputs.field_values.shape[1])
-    zs = jnp.linspace(-inputs.Lz / 2, inputs.Lz / 2, inputs.field_values.shape[2])
+    xs = jnp.linspace(-Lx / 2, Lx / 2, inputs.field_values.shape[0])
+    ys = jnp.linspace(-Ly / 2, Ly / 2, inputs.field_values.shape[1])
+    zs = jnp.linspace(-Lz / 2, Lz / 2, inputs.field_values.shape[2])
 
     interpolator = RegularGridInterpolator(
         (xs, ys, zs),
@@ -395,19 +389,23 @@ def vector_jacobian_product(
     assert vjp_inputs == {"field_values"}
     assert vjp_outputs == {"mesh_cell_values"}
 
+    Lx = inputs.domain_size[0]
+    Ly = inputs.domain_size[1]
+    Lz = inputs.domain_size[2]
+
     pts, cells = generate_mesh(
-        Lx=inputs.Lx,
-        Ly=inputs.Ly,
-        Lz=inputs.Lz,
+        Lx=Lx,
+        Ly=Ly,
+        Lz=Lz,
         sizing_field=inputs.sizing_field,
         max_levels=inputs.max_subdivision_levels,
     )
 
     cell_centers = jnp.mean(pts[cells], axis=1)
 
-    xs = jnp.linspace(-inputs.Lx / 2, inputs.Lx / 2, inputs.field_values.shape[0])
-    ys = jnp.linspace(-inputs.Ly / 2, inputs.Ly / 2, inputs.field_values.shape[1])
-    zs = jnp.linspace(-inputs.Lz / 2, inputs.Lz / 2, inputs.field_values.shape[2])
+    xs = jnp.linspace(-Lx / 2, Lx / 2, inputs.field_values.shape[0])
+    ys = jnp.linspace(-Ly / 2, Ly / 2, inputs.field_values.shape[1])
+    zs = jnp.linspace(-Lz / 2, Lz / 2, inputs.field_values.shape[2])
     xs, ys, zs = jnp.meshgrid(xs, ys, zs, indexing="ij")
 
     field_cotangent_vector = griddata(

@@ -313,7 +313,9 @@ def vector_jacobian_product(
         epsilon=inputs.epsilon,
     )
     if inputs.normalize_jacobian:
-        n_elements = inputs.Nx * inputs.Ny * inputs.Nz
+        n_elements = (
+            inputs.grid_elements[0] * inputs.grid_elements[1] * inputs.grid_elements[2]
+        )
         jac = jac / n_elements
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
     vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"]).astype(np.float32)
