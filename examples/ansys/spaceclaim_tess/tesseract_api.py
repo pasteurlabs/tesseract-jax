@@ -8,56 +8,76 @@ import zipfile
 from pathlib import Path, WindowsPath
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import trimesh
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Float32
+from tesseract_core.runtime import Array, Differentiable, Float32
 
-# Temporary hardcoded spaceclaim .exe and script files
-spaceclaim_exe = "F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe"
-spaceclaim_script = "geometry_generation.scscript"  # Relies on being executed in same directory as tesseract_api.py
+# Example spaceclaim .exe and script file Paths
+# spaceclaim_exe = "F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe"
+# spaceclaim_script = "geometry_generation.scscript"  # Relies on being executed in same directory as tesseract_api.py
 
-"""
-Example dict for 8 beam start (s) and end (e) parameters and two z-plane params
-
-keyvalues_test = {"__params__.z2": "200",
-                  "__params__.z3": "600",
-                  "__params__.s1": "0",
-                  "__params__.s2": "1 * (math.pi / 8)",
-                  "__params__.s3": "2 * (math.pi / 8)",
-                  "__params__.s4": "3 * (math.pi / 8)",
-                  "__params__.s5": "4 * (math.pi / 8)",
-                  "__params__.s6": "5 * (math.pi / 8)",
-                  "__params__.s7": "6 * (math.pi / 8)",
-                  "__params__.s8": "7 * (math.pi / 8)",
-                  "__params__.e1": "(0) + math.pi",
-                  "__params__.e2": "(1 * (math.pi / 8)) + math.pi",
-                  "__params__.e3": "(2 * (math.pi / 8)) + math.pi",
-                  "__params__.e4": "(3 * (math.pi / 8)) + math.pi",
-                  "__params__.e5": "(4 * (math.pi / 8)) + math.pi",
-                  "__params__.e6": "(5 * (math.pi / 8)) + math.pi",
-                  "__params__.e7": "(6 * (math.pi / 8)) + math.pi",
-                  "__params__.e8": "(7 * (math.pi / 8)) + math.pi"}
-"""
+#
+# Schemata
+#
 
 
-class GridParameters(BaseModel):
-    z_planes: Array[
-        (None,),
-        Float32,
+class InputSchema(BaseModel):
+    """Input schema for bar geometry design and SDF generation."""
+
+    differentiable_bar_parameters: Differentiable[
+        Array[
+            (None, None),
+            Float32,
+        ]
     ] = Field(
-        description="Array of Z cutting plane locations",
+        description=(
+            "Angular positions around the unit circle for the bar geometry. "
+            "The shape is (num_bars, 2), where num_bars is the number of bars "
+            "and the second dimension has the start then end location of each bar."
+            "The final +1 entry represents the two z height coordinates for the cutting plane which combine with "
+            "a third fixed coordinate centered on the grid with z = grid_height / 2"
+        )
     )
-    beam_starts: Array[
-        (None,),
-        Float32,
+
+    differentiable_plane_parameters: Differentiable[
+        Array[
+            (None,),
+            Float32,
+        ]
     ] = Field(
-        description="Array of beam start angles (radians)",
+        description=(
+            "Two cutting plane z point heights which combine with a fixed third point "
+            "centered on the grid at z = grid_height / 2. "
+            "The shape is (2) "
+            "The two points are orthognal at the maximum extemts of the grid (+X and +Y)."
+        )
     )
-    beam_ends: Array[
+
+    non_differentiable_parameters: Array[
         (None,),
         Float32,
     ] = Field(
-        description="Array of beam end angles (radians)",
+        description=(
+            "Flattened array of non-differentiable geometry parameters. "
+            "The shape is (2), the first float is the maximum height (mm) of the "
+            "grid (pre z-plane cutting). The second is the beam thickness (mm)."
+        )
+    )
+
+    """static_parameters: list[int] = Field(
+        description=(
+            "List of integers used to construct the geometry. "
+            "The first integer is the number of bars."
+        )
+    )"""
+
+    string_parameters: list[str] = Field(
+        description=(
+            "Two string parameters for geometry construction. "
+            "First str is Path to Spaceclaim executable. "
+            "Second str is Path to Spaceclaim Script (.scscript)."
+        )
     )
 
 
@@ -70,16 +90,85 @@ class TriangularMesh(BaseModel):
     )
 
 
-class InputSchema(BaseModel):
-    grid_parameters: dict = Field(
-        description="Parameter dictionary defining location of grid beams and Z cutting plane"
-    )
-
-
 class OutputSchema(BaseModel):
+    """Output schema for generated geometry and SDF field."""
+
     mesh: TriangularMesh = Field(
-        description="Output triangular mesh of the grid fin geometry"
+        description="Triangular mesh representation of the geometry"
     )
+
+
+#
+# Helper functions
+#
+
+
+def build_geometry(
+    differentiable_bar_parameters: np.ndarray,
+    differentiable_plane_parameters: np.ndarray,
+    non_differentiable_parameters: np.ndarray,
+    string_parameters: list[str],
+) -> list[trimesh.Trimesh]:
+    """Build a Spaceclaim geometry from the parameters by modifying template .scscript.
+
+    Return a TriangularMesh object.
+    """
+    spaceclaim_exe = Path(string_parameters[0])
+    spaceclaim_script = Path(string_parameters[1])
+
+    # TODO: Want to stop using TemporaryDirectory for spaceclaim script
+    # and instead use the unique run directory created everytime the
+    # tesseract is run (so there is history).
+    with TemporaryDirectory() as temp_dir:
+        prepped_script_path, output_file = _prep_scscript(
+            temp_dir,
+            spaceclaim_script,
+            differentiable_bar_parameters,
+            differentiable_plane_parameters,
+            non_differentiable_parameters,
+        )
+        run_spaceclaim(spaceclaim_exe, prepped_script_path)
+
+        mesh = trimesh.load(output_file)
+
+    return mesh
+
+
+def _prep_scscript(
+    temp_dir: TemporaryDirectory,
+    spaceclaim_script: Path,
+    differentiable_bar_parameters: np.ndarray,
+    differentiable_plane_parameters: np.ndarray,
+    non_differentiable_parameters: np.ndarray,
+) -> list[str]:
+    """Take tesseract inputs and place into a temp .scscript that will be used to run Spaceclaim.
+
+    Return the Path location of this script and the output .stl
+    """
+    # Define output file name and location
+    # TODO: Same as before: can we output grid_fin.stl in the tesseract
+    # unique run directory instead of temp dir to keep history?
+    output_file = os.path.join(temp_dir, "grid_fin.stl")
+    prepped_script_path = os.path.join(temp_dir, os.path.basename(spaceclaim_script))
+    shutil.copy(spaceclaim_script, prepped_script_path)
+
+    # Define dict used to input params to .scscript
+    keyvalues = {}
+    keyvalues["__output__"] = output_file
+    keyvalues["__params__.z2"] = str(differentiable_plane_parameters[0])
+    keyvalues["__params__.z3"] = str(differentiable_plane_parameters[1])
+    keyvalues["__params__.height"] = non_differentiable_parameters[0]
+    keyvalues["__params__.thickness"] = non_differentiable_parameters[1]
+
+    num_of_bars = len(differentiable_bar_parameters)
+
+    for i in range(num_of_bars):
+        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_bar_parameters[i][0])
+        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_bar_parameters[i][1])
+
+    _find_and_replace_keys_in_archive(prepped_script_path, keyvalues)
+
+    return [prepped_script_path, output_file]
 
 
 def _safereplace(filedata: str, key: str, value: str) -> str:
@@ -131,13 +220,19 @@ def _find_and_replace_keys_in_archive(file: Path, keyvalues: dict) -> None:
                     )
 
 
-def run_spaceclaim(spaceclaim_exe: Path, spaceclaim_script: Path):
+def run_spaceclaim(spaceclaim_exe: Path, spaceclaim_script: Path) -> None:
+    """Runs Spaceclaim subprocess with .exe and script Path locations.
+
+    Returns the subprocess return code as a placeholder.
+    """
     env = os.environ.copy()
     cmd = str(
         f'"{spaceclaim_exe}" /UseLicenseMode=True /Welcome=False /Splash=False '
         + f'/RunScript="{spaceclaim_script}" /ExitAfterScript=True /Headless=True'
     )
 
+    # TODO: Not very robust, should probably try use some error handling
+    # or timeout logic to prevent stalling if Spaceclaim fails.
     result = subprocess.run(
         cmd,
         shell=True,
@@ -156,31 +251,20 @@ def run_spaceclaim(spaceclaim_exe: Path, spaceclaim_script: Path):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Create a Spaceclaim geometry based on input parameters and export as a .stl."""
-    cwd = os.getcwd()
-    output_file = os.path.join(cwd, "grid_fin.stl")
+    """Create a Spaceclaim geometry based on input parameters.
 
-    # TODO:  lets make sure the parameters are transformed into a correct dict to be used in the script
-    keyvalues = inputs.grid_parameters.copy()
-    keyvalues["__output__"] = output_file
+    Returns TraingularMesh obj and exports a .stl.
+    """
+    mesh = build_geometry(
+        differentiable_bar_parameters=inputs.differentiable_bar_parameters,
+        differentiable_plane_parameters=inputs.differentiable_plane_parameters,
+        non_differentiable_parameters=inputs.non_differentiable_parameters,
+        string_parameters=inputs.string_parameters,
+    )
 
-    with TemporaryDirectory() as temp_dir:
-        # Copy spaceclaim template script to temp dir
-        copied_file_path = os.path.join(temp_dir, os.path.basename(spaceclaim_script))
-        shutil.copy(spaceclaim_script, copied_file_path)
-
-        # Update temp spaceclaim script and use to generate .stl
-        # update_script = _find_and_replace_keys_in_archive(copied_file_path, keyvalues)
-        # spaceclaim_result = run_spaceclaim(spaceclaim_exe, copied_file_path)
-
-    # TODO: lets read the .stl file using trimesh
-    mesh = trimesh.load(output_file)
     return OutputSchema(
         mesh=TriangularMesh(
-            points=Array(mesh.vertices.astype("float32")),
-            faces=Array(mesh.faces.astype("float32")),
+            points=mesh.vertices.astype(np.float32),
+            faces=mesh.faces.astype(np.int32),
         )
     )
-    # return OutputSchema(
-    #     placeholder_output=f"Subprocess return code: {spaceclaim_result}"
-    # )

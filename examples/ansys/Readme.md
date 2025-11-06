@@ -33,32 +33,22 @@ Clone this repository, navigate to the `examples/ansys/spaceclaim_tess` director
 ```bash
 tesseract-runtime serve --port <port_number_1>
 ```
-Note that we dont build a Tesseract image for SpaceClaim in this example. This is because SpaceClaim cannot be installed in a containerized environment. You can test it using:
+Note that we dont build a Tesseract image for SpaceClaim in this example. This is because SpaceClaim cannot be installed in a containerized environment. You can test it using git bash and your specific Spaceclaim.exe Path:
+
+```bash
+curl -d '{"inputs":{"differentiable_bar_parameters": [[0, 3.14], [0.39, 3.53], [0.79, 3.93], [1.18, 4.32], [1.57, 4.71], [1.96, 5.11], [2.36, 5.50], [2.75, 5.89]], "differentiable_plane_parameters": [200, 600], "non_differentiable_parameters": [800, 100], "string_parameters":["F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe", "geometry_generation.scscript"]}}' -H "Content-Type: application/json" http://127.0.0.1:8000/apply
+```
+
+or the equivalent on powershell:
 
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:8000/apply" -Method Post -Body (
     @{
         inputs = @{
-            grid_parameters = @{
-                "__params__.z2"  = "200"
-                "__params__.z3"  = "600"
-                "__params__.s1"  = "0"
-                "__params__.s2"  = "1 * (math.pi / 8)"
-                "__params__.s3"  = "2 * (math.pi / 8)"
-                "__params__.s4"  = "3 * (math.pi / 8)"
-                "__params__.s5"  = "4 * (math.pi / 8)"
-                "__params__.s6"  = "5 * (math.pi / 8)"
-                "__params__.s7"  = "6 * (math.pi / 8)"
-                "__params__.s8"  = "7 * (math.pi / 8)"
-                "__params__.e1"  = "(0) + math.pi"
-                "__params__.e2"  = "(1 * (math.pi / 8)) + math.pi"
-                "__params__.e3"  = "(2 * (math.pi / 8)) + math.pi"
-                "__params__.e4"  = "(3 * (math.pi / 8)) + math.pi"
-                "__params__.e5"  = "(4 * (math.pi / 8)) + math.pi"
-                "__params__.e6"  = "(5 * (math.pi / 8)) + math.pi"
-                "__params__.e7"  = "(6 * (math.pi / 8)) + math.pi"
-                "__params__.e8"  = "(7 * (math.pi / 8)) + math.pi"
-            }
+            differentiable_bar_parameters = [[0, 3.14], [0.39, 3.53], [0.79, 3.93], [1.18, 4.32], [1.57, 4.71], [1.96, 5.11], [2.36, 5.50], [2.75, 5.89]]
+            differentiable_plane_parameters = [200, 600]
+            non_differentiable_parameters = [800, 100]
+            string_parameters = ["F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe", "geometry_generation.scscript"]
         }
     } | ConvertTo-Json -Depth 10
 ) -ContentType "application/json"
