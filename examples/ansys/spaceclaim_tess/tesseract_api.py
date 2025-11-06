@@ -109,8 +109,7 @@ def build_geometry(
     non_differentiable_parameters: np.ndarray,
     string_parameters: list[str],
 ) -> list[trimesh.Trimesh]:
-    """Build a Spaceclaim geometry from the parameters by modifying template
-    .scscript.
+    """Build a Spaceclaim geometry from the parameters by modifying template .scscript.
 
     Return a TriangularMesh object.
     """
@@ -142,8 +141,7 @@ def _prep_scscript(
     differentiable_plane_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
 ) -> list[str]:
-    """Take tesseract inputs and place into a temp .scscript that will
-    be used to run Spaceclaim.
+    """Take tesseract inputs and place into a temp .scscript that will be used to run Spaceclaim.
 
     Return the Path location of this script and the output .stl
     """
@@ -255,8 +253,9 @@ def run_spaceclaim(spaceclaim_exe: Path, spaceclaim_script: Path) -> None:
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Create a Spaceclaim geometry based on input parameters and export
-    as a .stl.
+    """Create a Spaceclaim geometry based on input parameters.
+
+    Returns TraingularMesh obj and exports a .stl.
     """
     mesh = build_geometry(
         differentiable_bar_parameters=inputs.differentiable_bar_parameters,
