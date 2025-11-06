@@ -132,22 +132,19 @@ def vectorized_subdivide_hex_mesh(
 
     Hexahedron is constructed as follows:
 
-          3 -------- 2
+          7 -------- 6
          /|         /|
-        7 -------- 6 |
+        4 -------- 5 |
         | |        | |
-        | 0 -------|-1
+        | 3 -------|-2
         |/         |/
-        4 -------- 5
+        0 -------- 1
 
     Axis orientation:
 
-           y
-           |
-           |____ x
-          /
-         /
-        z
+        z  y
+        | /
+        |/____ x
 
     """
     n_hex_new = mask.sum()
@@ -182,7 +179,7 @@ def vectorized_subdivide_hex_mesh(
         for corner in range(8):
             new_pts_coords = new_pts_coords.at[
                 jnp.arange(n_hex_new) * 64 + cell * 8 + corner
-            ].set(center - offsets[:, corner])
+            ].set(center + offsets[:, corner])
 
             new_hex_cells = new_hex_cells.at[
                 jnp.arange(n_hex_new) * 8 + cell, corner
