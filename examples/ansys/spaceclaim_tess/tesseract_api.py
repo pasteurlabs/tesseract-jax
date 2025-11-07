@@ -154,11 +154,13 @@ def _prep_scscript(
     keyvalues["__params__.height"] = non_differentiable_parameters[0]
     keyvalues["__params__.thickness"] = non_differentiable_parameters[1]
 
-    num_of_bars = len(differentiable_parameters) - 2
+    num_of_bars = (len(differentiable_parameters) - 2) // 2
+
+    assert num_of_bars == 8
 
     for i in range(num_of_bars):
-        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_parameters[i * 2 + 0])
-        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_parameters[i * 2 + 1])
+        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_parameters[i * 2 + 2])
+        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_parameters[i * 2 + 3])
 
     _find_and_replace_keys_in_archive(prepped_script_path, keyvalues)
 
