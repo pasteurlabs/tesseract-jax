@@ -250,7 +250,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     Returns TraingularMesh obj and exports a .stl.
     """
     mesh = build_geometry(
-        differentiable_plane_parameters=inputs.differentiable_parameters,
+        differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         string_parameters=inputs.string_parameters,
     )

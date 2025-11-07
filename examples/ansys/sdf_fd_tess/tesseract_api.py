@@ -104,6 +104,14 @@ def get_geometry(
 
     The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
     """
+    print(
+        {
+            "differentiable_parameters": differentiable_parameters,
+            "non_differentiable_parameters": non_differentiable_parameters,
+            "static_parameters": static_parameters,
+            "string_parameters": string_parameters,
+        }
+    )
     mesh = target.apply(
         {
             "differentiable_parameters": differentiable_parameters,
