@@ -25,9 +25,9 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 class InputSchema(BaseModel):
     """Input schema for bar geometry design and SDF generation."""
 
-    differentiable_bar_parameters: Differentiable[
+    differentiable_parameters: Differentiable[
         Array[
-            (None, None),
+            (None,),
             Float32,
         ]
     ] = Field(
@@ -40,19 +40,19 @@ class InputSchema(BaseModel):
         )
     )
 
-    differentiable_plane_parameters: Differentiable[
-        Array[
-            (None,),
-            Float32,
-        ]
-    ] = Field(
-        description=(
-            "Two cutting plane z point heights which combine with a fixed third point "
-            "centered on the grid at z = grid_height / 2. "
-            "The shape is (2) "
-            "The two points are orthognal at the maximum extemts of the grid (+X and +Y)."
-        )
-    )
+    # differentiable_plane_parameters: Differentiable[
+    #     Array[
+    #         (None,),
+    #         Float32,
+    #     ]
+    # ] = Field(
+    #     description=(
+    #         "Two cutting plane z point heights which combine with a fixed third point "
+    #         "centered on the grid at z = grid_height / 2. "
+    #         "The shape is (2) "
+    #         "The two points are orthognal at the maximum extemts of the grid (+X and +Y)."
+    #     )
+    # )
 
     non_differentiable_parameters: Array[
         (None,),
@@ -65,12 +65,9 @@ class InputSchema(BaseModel):
         )
     )
 
-    """static_parameters: list[int] = Field(
-        description=(
-            "List of integers used to construct the geometry. "
-            "The first integer is the number of bars."
-        )
-    )"""
+    static_parameters: list[int] = Field(
+        description=("List of integers used to construct the geometry. ")
+    )
 
     string_parameters: list[str] = Field(
         description=(
@@ -104,8 +101,7 @@ class OutputSchema(BaseModel):
 
 
 def build_geometry(
-    differentiable_bar_parameters: np.ndarray,
-    differentiable_plane_parameters: np.ndarray,
+    differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
     string_parameters: list[str],
 ) -> list[trimesh.Trimesh]:
@@ -123,8 +119,7 @@ def build_geometry(
         prepped_script_path, output_file = _prep_scscript(
             temp_dir,
             spaceclaim_script,
-            differentiable_bar_parameters,
-            differentiable_plane_parameters,
+            differentiable_parameters,
             non_differentiable_parameters,
         )
         run_spaceclaim(spaceclaim_exe, prepped_script_path)
@@ -137,8 +132,7 @@ def build_geometry(
 def _prep_scscript(
     temp_dir: TemporaryDirectory,
     spaceclaim_script: Path,
-    differentiable_bar_parameters: np.ndarray,
-    differentiable_plane_parameters: np.ndarray,
+    differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
 ) -> list[str]:
     """Take tesseract inputs and place into a temp .scscript that will be used to run Spaceclaim.
@@ -155,16 +149,16 @@ def _prep_scscript(
     # Define dict used to input params to .scscript
     keyvalues = {}
     keyvalues["__output__"] = output_file
-    keyvalues["__params__.z2"] = str(differentiable_plane_parameters[0])
-    keyvalues["__params__.z3"] = str(differentiable_plane_parameters[1])
+    keyvalues["__params__.z2"] = str(differentiable_parameters[0])
+    keyvalues["__params__.z3"] = str(differentiable_parameters[1])
     keyvalues["__params__.height"] = non_differentiable_parameters[0]
     keyvalues["__params__.thickness"] = non_differentiable_parameters[1]
 
-    num_of_bars = len(differentiable_bar_parameters)
+    num_of_bars = len(differentiable_parameters) - 2
 
     for i in range(num_of_bars):
-        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_bar_parameters[i][0])
-        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_bar_parameters[i][1])
+        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_parameters[i * 2 + 0])
+        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_parameters[i * 2 + 1])
 
     _find_and_replace_keys_in_archive(prepped_script_path, keyvalues)
 
@@ -256,8 +250,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     Returns TraingularMesh obj and exports a .stl.
     """
     mesh = build_geometry(
-        differentiable_bar_parameters=inputs.differentiable_bar_parameters,
-        differentiable_plane_parameters=inputs.differentiable_plane_parameters,
+        differentiable_plane_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         string_parameters=inputs.string_parameters,
     )
