@@ -47,6 +47,10 @@ class InputSchema(BaseModel):
         description="Number of elements in the bounding box in x, y, z directions."
     )
 
+    grid_center: list[float] = Field(
+        description="Center of the bounding box in x, y, z directions."
+    )
+
     epsilon: float = Field(
         default=1e-5,
         description=(
@@ -131,6 +135,7 @@ def get_geometry(
 
 def compute_sdf(
     geometry: trimesh.Trimesh,
+    grid_center: list[float],
     Lx: float,
     Ly: float,
     Lz: float,
@@ -143,9 +148,9 @@ def compute_sdf(
     The SDF field is computed based on the geometry defined by the parameters.
     """
     x, y, z = np.meshgrid(
-        np.linspace(-Lx / 2, Lx / 2, Nx),
-        np.linspace(-Ly / 2, Ly / 2, Ny),
-        np.linspace(-Lz / 2, Lz / 2, Nz),
+        np.linspace(-Lx / 2, Lx / 2, Nx) + grid_center[0],
+        np.linspace(-Ly / 2, Ly / 2, Ny) + grid_center[1],
+        np.linspace(-Lz / 2, Lz / 2, Nz) + grid_center[2],
         indexing="ij",
     )
 
@@ -169,6 +174,7 @@ def apply_fn(
     string_parameters: list[str],
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
+    grid_center: np.ndarray,
 ) -> tuple[np.ndarray, trimesh.Trimesh]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
     geo = get_geometry(
@@ -181,6 +187,7 @@ def apply_fn(
 
     sd_field = compute_sdf(
         geo,
+        grid_center=grid_center,
         Lx=grid_size[0],
         Ly=grid_size[1],
         Lz=grid_size[2],
@@ -200,6 +207,7 @@ def jac_sdf_wrt_params(
     string_parameters: list[str],
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
+    grid_center: np.ndarray,
     epsilon: float,
 ) -> np.ndarray:
     """Compute the Jacobian of the SDF values with respect to the parameters.
@@ -224,6 +232,7 @@ def jac_sdf_wrt_params(
         string_parameters=string_parameters,
         grid_elements=grid_elements,
         grid_size=grid_size,
+        grid_center=grid_center,
     )
 
     for i in range(differentiable_parameters.size):
@@ -240,6 +249,7 @@ def jac_sdf_wrt_params(
             string_parameters=string_parameters,
             grid_elements=grid_elements,
             grid_size=grid_size,
+            grid_center=grid_center,
         )
         jac[i] = (sdf_epsilon - sd_field_base) / epsilon
 
@@ -271,6 +281,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
         static_parameters=inputs.static_parameters,
         string_parameters=inputs.string_parameters,
         grid_elements=inputs.grid_elements,
+        grid_center=inputs.grid_center,
     )
 
     points = np.zeros((N_POINTS, 3), dtype=np.float32)
@@ -319,6 +330,7 @@ def vector_jacobian_product(
         grid_size=inputs.grid_size,
         grid_elements=inputs.grid_elements,
         epsilon=inputs.epsilon,
+        grid_center=inputs.grid_center,
     )
     if inputs.normalize_jacobian:
         n_elements = (
