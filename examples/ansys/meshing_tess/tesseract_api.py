@@ -141,23 +141,25 @@ def vectorized_subdivide_hex_mesh(
         |/____ x
 
     """
-    n_hex_subd = mask.sum()
-    n_hex_each = (split_x + 1) * (split_y + 1) * (split_z + 1)
-    n_new_pts = (
-        8 * n_hex_each
-    ) * n_hex_subd  # 8 corners per new hex, 8 new hexes per old hex
-    n_new_cells = n_hex_each * n_hex_subd
+    # compute sizes
+    n_hex_to_subdiv = mask.sum()
+    n_hex_each_hex = (split_x + 1) * (split_y + 1) * (split_z + 1)
+    n_points_per_hex = 8
+    # 8 corners per new hex, 8 new hexes per old hex
+    n_new_pts = n_points_per_hex * n_hex_each_hex * n_hex_to_subdiv
+    n_new_cells = n_hex_each_hex * n_hex_to_subdiv
 
     new_pts_coords = jnp.zeros((n_new_pts, 3), dtype=pts_coords.dtype)
     new_hex_cells = jnp.zeros((n_new_cells, 8), dtype=hex_cells.dtype)
 
-    voxel_sizes = jnp.abs(
-        pts_coords[hex_cells[mask, 6]] - pts_coords[hex_cells[mask, 0]]
-    )
+    # get sizes of hexes to subdivide
+    hex_sizes = jnp.abs(pts_coords[hex_cells[mask, 6]] - pts_coords[hex_cells[mask, 0]])
+    # Ceneter points of shape (n_hex_to_subdiv, 3)
+    center_points = jnp.mean(pts_coords[hex_cells[mask]], axis=1)
 
-    center_points = jnp.mean(pts_coords[hex_cells[mask]], axis=1)  # (n_hex, 3)
-
-    cell_offsets = jnp.zeros((1, n_hex_each, 3), dtype=jnp.float32)
+    # Build cell offset tensor
+    # that is the offset of a hex center to each of the new hex centers
+    cell_offsets = jnp.zeros((1, n_hex_each_hex, 3), dtype=jnp.float32)
     index = 0
     for ix in range(split_x + 1):
         for iy in range(split_y + 1):
@@ -165,71 +167,69 @@ def vectorized_subdivide_hex_mesh(
                 cell_offsets = cell_offsets.at[0, index].set(
                     jnp.array(
                         [
-                            (ix * 0.5 - 0.5) if split_x else 0.0,
-                            (iy * 0.5 - 0.5) if split_y else 0.0,
-                            (iz * 0.5 - 0.5) if split_z else 0.0,
+                            (0.25 - ix * 0.5) if split_x else 0.0,
+                            (0.25 - iy * 0.5) if split_y else 0.0,
+                            (0.25 - iz * 0.5) if split_z else 0.0,
                         ]
                     ).T
                 )
                 index += 1
 
-    cell_offsets = cell_offsets.repeat(
-        voxel_sizes.shape[0], axis=0
-    ) * voxel_sizes.reshape((n_hex_subd, 1, 3)).repeat(n_hex_each, axis=1)
+    # We now repeat the cell offsets and scale them by the corresponding hex sizes
+    # Hence we have a cell_offset tensor of shape (n_hex_to_subdiv, n_hex_each_hex, 3)
+    cell_offsets = cell_offsets.repeat(n_hex_to_subdiv, axis=0) * hex_sizes.reshape(
+        (n_hex_to_subdiv, 1, 3)
+    ).repeat(n_hex_each_hex, axis=1)
 
-    offsets = jnp.array(
+    # Build point offset tensor
+    # that is the offset of a hex center to each of the new hex points
+    offset_x = 0.25 if split_x else 0.5
+    offset_y = 0.25 if split_y else 0.5
+    offset_z = 0.25 if split_z else 0.5
+    point_offsets = jnp.array(
         [
-            [-0.25, -0.25, -0.25],
-            [0.25, -0.25, -0.25],
-            [0.25, 0.25, -0.25],
-            [-0.25, 0.25, -0.25],
-            [-0.25, -0.25, 0.25],
-            [0.25, -0.25, 0.25],
-            [0.25, 0.25, 0.25],
-            [-0.25, 0.25, 0.25],
+            [-offset_x, -offset_y, -offset_z],
+            [offset_x, -offset_y, -offset_z],
+            [offset_x, offset_y, -offset_z],
+            [-offset_x, offset_y, -offset_z],
+            [-offset_x, -offset_y, offset_z],
+            [offset_x, -offset_y, offset_z],
+            [offset_x, offset_y, offset_z],
+            [-offset_x, offset_y, offset_z],
         ]
-    ).reshape((1, 8, 3)).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.reshape(
-        (n_hex_subd, 1, 3)
-    ).repeat(8, axis=1)
+    )
 
-    for cell in range(n_hex_each):
-        center = center_points + cell_offsets[:, cell]
+    # Repeat the point offsets and scale them by the corresponding hex sizes
+    # -> point_offset tensor of shape (n_hex_to_subdiv, n_points_per_hex, 3)
+    point_offsets = point_offsets.reshape((1, n_points_per_hex, 3)).repeat(
+        hex_sizes.shape[0], axis=0
+    ) * hex_sizes.reshape((n_hex_to_subdiv, 1, 3)).repeat(n_points_per_hex, axis=1)
 
-        for corner in range(8):
-            new_pts_coords = new_pts_coords.at[
-                jnp.arange(n_hex_subd) * 8 * n_hex_each + cell * n_hex_each + corner
-            ].set(center + offsets[:, corner])
+    # Repeat the two offsets at an additional axis to get all combinations
+    cell_offsets = cell_offsets.reshape((n_hex_to_subdiv, n_hex_each_hex, 1, 3)).repeat(
+        n_points_per_hex, axis=2
+    )
+    point_offsets = point_offsets.reshape(
+        (n_hex_to_subdiv, 1, n_points_per_hex, 3)
+    ).repeat(n_hex_each_hex, axis=1)
 
-            new_hex_cells = new_hex_cells.at[
-                jnp.arange(n_hex_subd) * n_hex_each + cell, corner
-            ].set(jnp.arange(n_hex_subd) * 8 * n_hex_each + cell * n_hex_each + corner)
+    # Compute total offset relative to old hex center
+    # -> (n_hex_to_subdiv, n_hex_each_hex, n_points_per_hex, 3)
+    total_offsets = cell_offsets + point_offsets
 
-    # offsets = jnp.array(
-    #     [
-    #         [-0.25, -0.25, -0.25],
-    #         [0.25, -0.25, -0.25],
-    #         [0.25, 0.25, -0.25],
-    #         [-0.25, 0.25, -0.25],
-    #         [-0.25, -0.25, 0.25],
-    #         [0.25, -0.25, 0.25],
-    #         [0.25, 0.25, 0.25],
-    #         [-0.25, 0.25, 0.25],
-    #     ]
-    # ).reshape((1, 8, 3)).repeat(voxel_sizes.shape[0], axis=0) * voxel_sizes.reshape(
-    #     (n_hex_new, 1, 3)
-    # ).repeat(8, axis=1)
+    # lets reshape the center points to broadcast
+    center_points = (
+        center_points.reshape((n_hex_to_subdiv, 1, 1, 3))
+        .repeat(n_hex_each_hex, axis=1)
+        .repeat(n_points_per_hex, axis=2)
+    )
 
-    # for cell in range(8):
-    #     center = center_points + offsets[:, cell]
-
-    #     for corner in range(8):
-    #         new_pts_coords = new_pts_coords.at[
-    #             jnp.arange(n_hex_new) * 64 + cell * 8 + corner
-    #         ].set(center + offsets[:, corner])
-
-    #         new_hex_cells = new_hex_cells.at[
-    #             jnp.arange(n_hex_new) * 8 + cell, corner
-    #         ].set(jnp.arange(n_hex_new) * 64 + cell * 8 + corner)
+    # Directly compute new point coordinates and reshape
+    new_pts_coords = (center_points + total_offsets).reshape((n_new_pts, 3))
+    # Compute new hex cell indices
+    new_hex_cells = jnp.linspace(0, n_new_pts - 1, n_new_pts, dtype=jnp.int32).reshape(
+        (n_new_cells, n_points_per_hex)
+    )
 
     def reindex_and_mask(
         coords: jnp.ndarray, cells: jnp.ndarray, keep_mask: jnp.ndarray
@@ -249,9 +249,6 @@ def vectorized_subdivide_hex_mesh(
 
         return coords, cells
 
-    # new_pts_coords, new_hex_cells = reindex_and_mask(
-    #     new_pts_coords, new_hex_cells, mask.repeat(8)
-    # )
     old_pts_coords, old_hex_cells = reindex_and_mask(
         pts_coords, hex_cells, jnp.logical_not(mask)
     )
@@ -297,21 +294,22 @@ def recursive_subdivide_hex_mesh(
     Returns:
         Subdivided points and hex cells.
     """
-    # lets build the kd-tree for fast nearest neighbor search
     xs = jnp.linspace(-Lx / 2, Lx / 2, sizing_field.shape[0])
     ys = jnp.linspace(-Ly / 2, Ly / 2, sizing_field.shape[1])
     zs = jnp.linspace(-Lz / 2, Lz / 2, sizing_field.shape[2])
 
     interpolator = RegularGridInterpolator(
-        (xs, ys, zs), sizing_field, method="linear", bounds_error=False, fill_value=-1
+        (xs, ys, zs), sizing_field, method="nearest", bounds_error=False, fill_value=-1
     )
 
     for i in range(levels):
         voxel_sizes = jnp.abs(pts_coords[hex_cells[:, 6]] - pts_coords[hex_cells[:, 0]])
 
-        voxel_center_points = jnp.mean(pts_coords[hex_cells], axis=1)
-        sizing_values = interpolator(voxel_center_points)
-        subdivision_mask = jnp.max(voxel_sizes, axis=-1) > sizing_values
+        # voxel_center_points = jnp.mean(pts_coords[hex_cells], axis=1)
+        sizing_values_pts = interpolator(pts_coords)
+        voxel_sizing_min = jnp.min(sizing_values_pts[hex_cells], axis=1)
+
+        subdivision_mask = jnp.max(voxel_sizes, axis=-1) > voxel_sizing_min
 
         if not jnp.any(subdivision_mask):
             print(f"No more subdivisions needed at level {i}.")
@@ -421,6 +419,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     )
 
     cell_centers = jnp.mean(pts[cells], axis=1)
+
     cell_values = interpolator(cell_centers)
 
     cell_values_padded = jnp.zeros((inputs.max_cells,), dtype=cell_values.dtype)
