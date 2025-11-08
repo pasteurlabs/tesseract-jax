@@ -39,6 +39,11 @@ class InputSchema(BaseModel):
 
     mesh_tesseract: TesseractReference = Field(description="Tesseract to call.")
 
+    scale_mesh: float = Field(
+        default=1.0,
+        description="Scaling factor applied to the generated mesh.",
+    )
+
     grid_size: list[float] = Field(
         description="Size of the bounding box in x, y, z directions."
     )
@@ -164,6 +169,7 @@ def apply_fn(
     non_differentiable_parameters: np.ndarray,
     static_parameters: list[int],
     string_parameters: list[str],
+    scale_mesh: float,
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
     grid_center: np.ndarray,
@@ -176,6 +182,8 @@ def apply_fn(
         static_parameters=static_parameters,
         string_parameters=string_parameters,
     )
+    # scale the mesh
+    geo = geo.apply_scale(scale_mesh)
 
     sd_field = compute_sdf(
         geo,
@@ -197,6 +205,7 @@ def jac_sdf_wrt_params(
     non_differentiable_parameters: np.ndarray,
     static_parameters: list[int],
     string_parameters: list[str],
+    scale_mesh: float,
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
     grid_center: np.ndarray,
@@ -222,6 +231,7 @@ def jac_sdf_wrt_params(
         non_differentiable_parameters=non_differentiable_parameters,
         static_parameters=static_parameters,
         string_parameters=string_parameters,
+        scale_mesh=scale_mesh,
         grid_elements=grid_elements,
         grid_size=grid_size,
         grid_center=grid_center,
@@ -239,6 +249,7 @@ def jac_sdf_wrt_params(
             non_differentiable_parameters=non_differentiable_parameters,
             static_parameters=static_parameters,
             string_parameters=string_parameters,
+            scale_mesh=scale_mesh,
             grid_elements=grid_elements,
             grid_size=grid_size,
             grid_center=grid_center,
@@ -272,6 +283,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
         grid_size=inputs.grid_size,
         static_parameters=inputs.static_parameters,
         string_parameters=inputs.string_parameters,
+        scale_mesh=inputs.scale_mesh,
         grid_elements=inputs.grid_elements,
         grid_center=inputs.grid_center,
     )
@@ -319,6 +331,7 @@ def vector_jacobian_product(
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         static_parameters=inputs.static_parameters,
         string_parameters=inputs.string_parameters,
+        scale_mesh=inputs.scale_mesh,
         grid_size=inputs.grid_size,
         grid_elements=inputs.grid_elements,
         epsilon=inputs.epsilon,

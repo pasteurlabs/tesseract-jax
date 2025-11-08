@@ -1,6 +1,8 @@
 from typing import Any
 
 import jax.numpy as jnp
+
+# import numpy as jnp
 from jax.scipy.interpolate import RegularGridInterpolator
 from pydantic import BaseModel, Field
 from scipy.interpolate import griddata

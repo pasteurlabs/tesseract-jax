@@ -2,6 +2,9 @@
 
 This directory contains an example Tesseract configuration and scripts demonstrating how to use Tesseract-JAX with ANSYS spaceclaim and PyMAPDL.
 
+![Mesh over optimization](mesh_optim.gif)
+![Rho over optimization](rho_optim_x.gif)
+
 ## Get Started
 
 ### PL internal instructions:

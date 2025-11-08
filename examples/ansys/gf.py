@@ -2,7 +2,7 @@ import imageio
 
 images = []
 
-for i in range(20):
+for i in range(40):
     filename = f"tmp_img/mesh_optim_{i:03d}.png"
     images.append(imageio.imread(filename))
     print(f"Added {filename} to gif.")
