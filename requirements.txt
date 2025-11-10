@@ -61,7 +61,7 @@ scipy==1.15.3 ; python_full_version < '3.11'
     # via
     #   jax
     #   jaxlib
-scipy==1.16.2 ; python_full_version >= '3.11'
+scipy==1.16.3 ; python_full_version >= '3.11'
     # via
     #   jax
     #   jaxlib
