@@ -11,7 +11,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import trimesh
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime import Array, Float32
 
 # Example spaceclaim .exe and script file Paths
 # spaceclaim_exe = "F:\\Ansys installations\\ANSYS Inc\\v241\\scdm\\SpaceClaim.exe"
@@ -25,7 +25,7 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 class InputSchema(BaseModel):
     """Input schema for bar geometry design and SDF generation."""
 
-    differentiable_parameters: Differentiable[
+    differentiable_parameters: list[
         Array[
             (None,),
             Float32,
@@ -33,9 +33,9 @@ class InputSchema(BaseModel):
     ] = Field(
         description=(
             "Angular positions around the unit circle for the bar geometry. "
-            "The shape is (num_bars, 2), where num_bars is the number of bars "
+            "The shape is (num_bars+1, 2), where num_bars is the number of bars "
             "and the second dimension has the start then end location of each bar."
-            "The final +1 entry represents the two z height coordinates for the cutting plane which combine with "
+            "The first (+1) entry represents the two z height coordinates for the cutting plane which combine with "
             "a third fixed coordinate centered on the grid with z = grid_height / 2"
         )
     )
@@ -64,10 +64,10 @@ class InputSchema(BaseModel):
             "grid (pre z-plane cutting). The second is the beam thickness (mm)."
         )
     )
-
-    static_parameters: list[int] = Field(
-        description=("List of integers used to construct the geometry. ")
-    )
+    """
+    static_parameters: list[list[int]] = Field(
+        description=("List of integers used to construct the geometry.")
+    )"""
 
     string_parameters: list[str] = Field(
         description=(
@@ -90,8 +90,8 @@ class TriangularMesh(BaseModel):
 class OutputSchema(BaseModel):
     """Output schema for generated geometry and SDF field."""
 
-    mesh: TriangularMesh = Field(
-        description="Triangular mesh representation of the geometry"
+    meshes: list[TriangularMesh] = Field(
+        description="Triangular meshes representing the geometries"
     )
 
 
@@ -100,14 +100,14 @@ class OutputSchema(BaseModel):
 #
 
 
-def build_geometry(
+def build_geometries(
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
     string_parameters: list[str],
 ) -> list[trimesh.Trimesh]:
     """Build a Spaceclaim geometry from the parameters by modifying template .scscript.
 
-    Return a TriangularMesh object.
+    Return a trimesh object.
     """
     spaceclaim_exe = Path(string_parameters[0])
     spaceclaim_script = Path(string_parameters[1])
@@ -116,7 +116,7 @@ def build_geometry(
     # and instead use the unique run directory created everytime the
     # tesseract is run (so there is history).
     with TemporaryDirectory() as temp_dir:
-        prepped_script_path, output_file = _prep_scscript(
+        prepped_script_path = _prep_scscript(
             temp_dir,
             spaceclaim_script,
             differentiable_parameters,
@@ -124,9 +124,12 @@ def build_geometry(
         )
         run_spaceclaim(spaceclaim_exe, prepped_script_path)
 
-        mesh = trimesh.load(output_file)
+        meshes = []
+        for output_stl in sorted(Path(temp_dir).glob("*.stl")):
+            mesh = trimesh.load(output_stl)
+            meshes.append(mesh)
 
-    return mesh
+    return meshes
 
 
 def _prep_scscript(
@@ -142,29 +145,50 @@ def _prep_scscript(
     # Define output file name and location
     # TODO: Same as before: can we output grid_fin.stl in the tesseract
     # unique run directory instead of temp dir to keep history?
-    output_file = os.path.join(temp_dir, "grid_fin.stl")
+    output_file = os.path.join(
+        temp_dir, "grid_fin"
+    )  # .stl ending is included in .scscript
     prepped_script_path = os.path.join(temp_dir, os.path.basename(spaceclaim_script))
     shutil.copy(spaceclaim_script, prepped_script_path)
 
     # Define dict used to input params to .scscript
+    # Converts np.float32 to python floats so string substitution is clean
     keyvalues = {}
     keyvalues["__output__"] = output_file
-    keyvalues["__params__.z2"] = str(differentiable_parameters[0])
-    keyvalues["__params__.z3"] = str(differentiable_parameters[1])
+    keyvalues["__params__.zeds"] = [
+        [float(geom_params[0]), float(geom_params[1])]
+        for geom_params in differentiable_parameters
+    ]
     keyvalues["__params__.height"] = non_differentiable_parameters[0]
     keyvalues["__params__.thickness"] = non_differentiable_parameters[1]
 
-    num_of_bars = (len(differentiable_parameters) - 2) // 2
+    num_of_batches = len(differentiable_parameters)  # number of geometries requested
+    num_of_bars = (
+        len(differentiable_parameters[0]) - 2
+    ) // 2  # Use firt geometry in batch to test number of beams
 
     assert num_of_bars == 8
 
-    for i in range(num_of_bars):
-        keyvalues[f"__params__.s{i + 1}"] = str(differentiable_parameters[i * 2 + 2])
-        keyvalues[f"__params__.e{i + 1}"] = str(differentiable_parameters[i * 2 + 3])
+    batch_starts = []
+    batch_ends = []
+    for i in range(num_of_batches):
+        geom_starts = []
+        geom_ends = []
+        for j in range(num_of_bars):
+            geom_starts.append(float(differentiable_parameters[i][j * 2 + 2]))
+            geom_ends.append(float(differentiable_parameters[i][j * 2 + 3]))
+
+        batch_starts.append(geom_starts)
+        batch_ends.append(geom_ends)
+
+    keyvalues["__params__.starts"] = (
+        batch_starts  # convert to string to ease injection into file text
+    )
+    keyvalues["__params__.ends"] = batch_ends
 
     _find_and_replace_keys_in_archive(prepped_script_path, keyvalues)
 
-    return [prepped_script_path, output_file]
+    return prepped_script_path
 
 
 def _safereplace(filedata: str, key: str, value: str) -> str:
@@ -249,17 +273,20 @@ def run_spaceclaim(spaceclaim_exe: Path, spaceclaim_script: Path) -> None:
 def apply(inputs: InputSchema) -> OutputSchema:
     """Create a Spaceclaim geometry based on input parameters.
 
-    Returns TraingularMesh obj and exports a .stl.
+    Returns TraingularMesh objects.
     """
-    mesh = build_geometry(
+    trimeshes = build_geometries(
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         string_parameters=inputs.string_parameters,
     )
 
     return OutputSchema(
-        mesh=TriangularMesh(
-            points=mesh.vertices.astype(np.float32),
-            faces=mesh.faces.astype(np.int32),
-        )
+        meshes=[
+            TriangularMesh(
+                points=mesh.vertices.astype(np.float32),
+                faces=mesh.faces.astype(np.int32),
+            )
+            for mesh in trimeshes
+        ]
     )
