@@ -268,6 +268,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
     trimeshes = build_geometries(
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
+        static_parameters=inputs.static_parameters,
         string_parameters=inputs.string_parameters,
     )
 
