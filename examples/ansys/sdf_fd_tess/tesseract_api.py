@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from typing import Any
 
@@ -67,6 +68,10 @@ class InputSchema(BaseModel):
         default=False,
         description=("Whether to normalize the Jacobian by the number of elements"),
     )
+    precompute_jacobian: bool = Field(
+        default=False,
+        description=("Whether to precompute the Jacobian for faster VJP computation."),
+    )
     max_points: int = Field(
         default=1000,
         description=("Maximum number of points in the output mesh."),
@@ -81,7 +86,7 @@ class TriangularMesh(BaseModel):
     """Triangular mesh representation with fixed-size arrays."""
 
     points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
-    faces: Array[(None, 3), Float32] = Field(
+    faces: Array[(None, 3), Int32] = Field(
         description="Array of triangular faces defined by indices into the points array."
     )
     n_points: Int32 = Field(
@@ -237,6 +242,8 @@ def geometries_and_sdf(
 #
 # Tesseract endpoints
 #
+jacobian_future = None
+executor = None
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
@@ -264,13 +271,34 @@ def apply(inputs: InputSchema) -> OutputSchema:
     mesh = mesh[0]
 
     points = np.zeros((inputs.max_points, 3), dtype=np.float32)
-    faces = np.zeros((inputs.max_faces, 3), dtype=np.float32)
+    faces = np.zeros((inputs.max_faces, 3), dtype=np.int32)
 
     points[: mesh.vertices.shape[0], :] = mesh.vertices.astype(np.float32)
     faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.int32)
 
+    # start a new thread to precompute the jacobian if requested
+    if inputs.precompute_jacobian:
+        print("Starting Jacobian precomputation thread...")
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            jac_sdf_wrt_params,
+            target=inputs.mesh_tesseract,
+            differentiable_parameters=inputs.differentiable_parameters,
+            non_differentiable_parameters=inputs.non_differentiable_parameters,
+            static_parameters=inputs.static_parameters,
+            string_parameters=inputs.string_parameters,
+            scale_mesh=inputs.scale_mesh,
+            grid_size=inputs.grid_size,
+            grid_elements=inputs.grid_elements,
+            grid_center=inputs.grid_center,
+            epsilon=inputs.epsilon,
+        )
+
+        global jacobian_future
+        jacobian_future = future
+
     return OutputSchema(
-        sdf=sdf,
+        sdf=sdf.astype(np.float32),
         mesh=TriangularMesh(
             points=points,
             faces=faces,
@@ -332,7 +360,7 @@ def jac_sdf_wrt_params(
     for i in range(n_params):
         jac[i] = (sdf_fields[i + 1] - sdf_fields[0]) / epsilon
 
-    return jac
+    return jac.astype(np.float32)
 
 
 def vector_jacobian_product(
@@ -355,25 +383,36 @@ def vector_jacobian_product(
     assert vjp_inputs == {"differentiable_parameters"}
     assert vjp_outputs == {"sdf"}
 
-    jac = jac_sdf_wrt_params(
-        target=inputs.mesh_tesseract,
-        differentiable_parameters=inputs.differentiable_parameters,
-        non_differentiable_parameters=inputs.non_differentiable_parameters,
-        static_parameters=inputs.static_parameters,
-        string_parameters=inputs.string_parameters,
-        scale_mesh=inputs.scale_mesh,
-        grid_size=inputs.grid_size,
-        grid_elements=inputs.grid_elements,
-        epsilon=inputs.epsilon,
-        grid_center=inputs.grid_center,
-    )
+    # lets also check if the thread is still running
+    if jacobian_future is not None:
+        print("Using precomputed Jacobian...")
+        if not jacobian_future.done():
+            print("Waiting for Jacobian precomputation to finish...")
+        jac = jacobian_future.result()
+
+        print("Jacobian precomputation finished.")
+        print(f"Jacobian shape: {jac.shape} and type: {jac.dtype}")
+    else:
+        print("Computing Jacobian...")
+        jac = jac_sdf_wrt_params(
+            target=inputs.mesh_tesseract,
+            differentiable_parameters=inputs.differentiable_parameters,
+            non_differentiable_parameters=inputs.non_differentiable_parameters,
+            static_parameters=inputs.static_parameters,
+            string_parameters=inputs.string_parameters,
+            scale_mesh=inputs.scale_mesh,
+            grid_size=inputs.grid_size,
+            grid_elements=inputs.grid_elements,
+            epsilon=inputs.epsilon,
+            grid_center=inputs.grid_center,
+        )
     if inputs.normalize_jacobian:
         n_elements = (
             inputs.grid_elements[0] * inputs.grid_elements[1] * inputs.grid_elements[2]
         )
         jac = jac / n_elements
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
-    vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"]).astype(np.float32)
+    vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"])
 
     return {"differentiable_parameters": vjp}
 
@@ -400,8 +439,12 @@ def abstract_eval(abstract_inputs: InputSchema) -> dict:
             "points": ShapeDType(
                 shape=(abstract_inputs.max_points, 3), dtype="float32"
             ),
-            "faces": ShapeDType(shape=(abstract_inputs.max_faces, 3), dtype="float32"),
+            "faces": ShapeDType(shape=(abstract_inputs.max_faces, 3), dtype="int32"),
             "n_points": ShapeDType(shape=(), dtype="int32"),
             "n_faces": ShapeDType(shape=(), dtype="int32"),
         },
     }
+
+
+if executor is not None:
+    executor.shutdown()
