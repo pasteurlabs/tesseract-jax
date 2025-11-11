@@ -90,8 +90,9 @@ class OutputSchema(BaseModel):
 
 
 def build_geometries(
-    differentiable_parameters: np.ndarray,
-    non_differentiable_parameters: np.ndarray,
+    differentiable_parameters: list[np.ndarray],
+    non_differentiable_parameters: list[np.ndarray],
+    static_parameters: list[list[int]],
     string_parameters: list[str],
 ) -> list[trimesh.Trimesh]:
     """Build a Spaceclaim geometry from the parameters by modifying template .scscript.
@@ -124,8 +125,8 @@ def build_geometries(
 def _prep_scscript(
     temp_dir: TemporaryDirectory,
     spaceclaim_script: Path,
-    differentiable_parameters: np.ndarray,
-    non_differentiable_parameters: np.ndarray,
+    differentiable_parameters: list[np.ndarray],
+    non_differentiable_parameters: list[np.ndarray],
 ) -> list[str]:
     """Take tesseract inputs and place into a temp .scscript that will be used to run Spaceclaim.
 
@@ -148,8 +149,8 @@ def _prep_scscript(
         [float(geom_params[0]), float(geom_params[1])]
         for geom_params in differentiable_parameters
     ]
-    keyvalues["__params__.height"] = non_differentiable_parameters[0]
-    keyvalues["__params__.thickness"] = non_differentiable_parameters[1]
+    keyvalues["__params__.height"] = non_differentiable_parameters[0][0]
+    keyvalues["__params__.thickness"] = non_differentiable_parameters[0][1]
 
     num_of_batches = len(differentiable_parameters)  # number of geometries requested
     num_of_bars = (
