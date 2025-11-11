@@ -40,23 +40,11 @@ class InputSchema(BaseModel):
         )
     )
 
-    # differentiable_plane_parameters: Differentiable[
-    #     Array[
-    #         (None,),
-    #         Float32,
-    #     ]
-    # ] = Field(
-    #     description=(
-    #         "Two cutting plane z point heights which combine with a fixed third point "
-    #         "centered on the grid at z = grid_height / 2. "
-    #         "The shape is (2) "
-    #         "The two points are orthognal at the maximum extemts of the grid (+X and +Y)."
-    #     )
-    # )
-
-    non_differentiable_parameters: Array[
-        (None,),
-        Float32,
+    non_differentiable_parameters: list[
+        Array[
+            (None,),
+            Float32,
+        ]
     ] = Field(
         description=(
             "Flattened array of non-differentiable geometry parameters. "
@@ -64,10 +52,11 @@ class InputSchema(BaseModel):
             "grid (pre z-plane cutting). The second is the beam thickness (mm)."
         )
     )
-    """
+
     static_parameters: list[list[int]] = Field(
-        description=("List of integers used to construct the geometry.")
-    )"""
+        description=("List of integers used to construct the geometry."),
+        default=[],
+    )
 
     string_parameters: list[str] = Field(
         description=(
@@ -88,7 +77,7 @@ class TriangularMesh(BaseModel):
 
 
 class OutputSchema(BaseModel):
-    """Output schema for generated geometry and SDF field."""
+    """Output schema for generated geometry."""
 
     meshes: list[TriangularMesh] = Field(
         description="Triangular meshes representing the geometries"

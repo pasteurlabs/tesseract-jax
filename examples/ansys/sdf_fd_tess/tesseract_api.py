@@ -1,3 +1,4 @@
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
@@ -66,6 +67,14 @@ class InputSchema(BaseModel):
         default=False,
         description=("Whether to normalize the Jacobian by the number of elements"),
     )
+    max_points: int = Field(
+        default=1000,
+        description=("Maximum number of points in the output mesh."),
+    )
+    max_faces: int = Field(
+        default=2000,
+        description=("Maximum number of faces in the output mesh."),
+    )
 
 
 class TriangularMesh(BaseModel):
@@ -102,32 +111,53 @@ class OutputSchema(BaseModel):
 #
 
 
-def get_geometry(
+def get_geometries(
     target: TesseractReference,
-    differentiable_parameters: np.ndarray,
-    non_differentiable_parameters: np.ndarray,
-    static_parameters: list[int],
+    differentiable_parameters: list[np.ndarray],
+    non_differentiable_parameters: list[np.ndarray],
+    static_parameters: list[list[int]],
     string_parameters: list[str],
-) -> trimesh.Trimesh:
-    """Build a pyvista geometry from the parameters.
-
-    The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
-    """
-    mesh = target.apply(
+) -> list[trimesh.Trimesh]:
+    """Call the tesseract reference to get the geometries."""
+    meshes = target.apply(
         {
             "differentiable_parameters": differentiable_parameters,
             "non_differentiable_parameters": non_differentiable_parameters,
             "static_parameters": static_parameters,
             "string_parameters": string_parameters,
         }
-    )["mesh"]
+    )["meshes"]
 
-    mesh = trimesh.Trimesh(
-        vertices=mesh["points"],
-        faces=mesh["faces"],
+    meshes = [
+        trimesh.Trimesh(
+            vertices=mesh["points"],
+            faces=mesh["faces"],
+        )
+        for mesh in meshes
+    ]
+
+    return meshes
+
+
+@lru_cache(maxsize=1)
+def grid_points(
+    Lx: float,
+    Ly: float,
+    Lz: float,
+    Nx: int,
+    Ny: int,
+    Nz: int,
+    grid_center: tuple[float, float, float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Create a regular grid in 3D space."""
+    x, y, z = np.meshgrid(
+        np.linspace(-Lx / 2, Lx / 2, Nx) + grid_center[0],
+        np.linspace(-Ly / 2, Ly / 2, Ny) + grid_center[1],
+        np.linspace(-Lz / 2, Lz / 2, Nz) + grid_center[2],
+        indexing="ij",
     )
 
-    return mesh
+    return np.vstack((x.ravel(), y.ravel(), z.ravel())).T
 
 
 def compute_sdf(
@@ -144,38 +174,40 @@ def compute_sdf(
 
     The SDF field is computed based on the geometry defined by the parameters.
     """
-    x, y, z = np.meshgrid(
-        np.linspace(-Lx / 2, Lx / 2, Nx) + grid_center[0],
-        np.linspace(-Ly / 2, Ly / 2, Ny) + grid_center[1],
-        np.linspace(-Lz / 2, Lz / 2, Nz) + grid_center[2],
-        indexing="ij",
-    )
-
     points, faces = geometry.vertices, geometry.faces
 
     sdf_function = SDF(points, faces)
 
-    grid_points = np.vstack((x.ravel(), y.ravel(), z.ravel())).T
-    sdf_values = sdf_function(grid_points).astype(np.float32)
+    points = grid_points(
+        Lx=Lx,
+        Ly=Ly,
+        Lz=Lz,
+        Nx=Nx,
+        Ny=Ny,
+        Nz=Nz,
+        grid_center=tuple(grid_center),
+    )
+
+    sdf_values = sdf_function(points).astype(np.float32)
 
     sd_field = sdf_values.reshape((Nx, Ny, Nz))
 
     return -sd_field
 
 
-def apply_fn(
+def geometries_and_sdf(
     target: TesseractReference,
-    differentiable_parameters: np.ndarray,
-    non_differentiable_parameters: np.ndarray,
-    static_parameters: list[int],
+    differentiable_parameters: list[np.ndarray],
+    non_differentiable_parameters: list[np.ndarray],
+    static_parameters: list[list[int]],
     string_parameters: list[str],
     scale_mesh: float,
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
     grid_center: np.ndarray,
-) -> tuple[np.ndarray, trimesh.Trimesh]:
+) -> tuple[list[np.ndarray], list[trimesh.Trimesh]]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
-    geo = get_geometry(
+    geos = get_geometries(
         target=target,
         differentiable_parameters=differentiable_parameters,
         non_differentiable_parameters=non_differentiable_parameters,
@@ -183,20 +215,69 @@ def apply_fn(
         string_parameters=string_parameters,
     )
     # scale the mesh
-    geo = geo.apply_scale(scale_mesh)
+    geos = [geo.apply_scale(scale_mesh) for geo in geos]
 
-    sd_field = compute_sdf(
-        geo,
-        grid_center=grid_center,
-        Lx=grid_size[0],
-        Ly=grid_size[1],
-        Lz=grid_size[2],
-        Nx=grid_elements[0],
-        Ny=grid_elements[1],
-        Nz=grid_elements[2],
+    sd_fields = [
+        compute_sdf(
+            geo,
+            grid_center=grid_center,
+            Lx=grid_size[0],
+            Ly=grid_size[1],
+            Lz=grid_size[2],
+            Nx=grid_elements[0],
+            Ny=grid_elements[1],
+            Nz=grid_elements[2],
+        )
+        for geo in geos
+    ]
+
+    return sd_fields, geos
+
+
+#
+# Tesseract endpoints
+#
+
+
+def apply(inputs: InputSchema) -> OutputSchema:
+    """Generate mesh and SDF from bar geometry parameters.
+
+    Args:
+        inputs: Input schema containing bar geometry parameters.
+
+    Returns:
+        Output schema with generated mesh and SDF field.
+    """
+    sdf, mesh = geometries_and_sdf(
+        target=inputs.mesh_tesseract,
+        differentiable_parameters=[inputs.differentiable_parameters],
+        non_differentiable_parameters=[inputs.non_differentiable_parameters],
+        static_parameters=[inputs.static_parameters],
+        string_parameters=inputs.string_parameters,
+        grid_size=inputs.grid_size,
+        scale_mesh=inputs.scale_mesh,
+        grid_elements=inputs.grid_elements,
+        grid_center=inputs.grid_center,
     )
 
-    return sd_field, geo
+    sdf = sdf[0]  # only one geometry
+    mesh = mesh[0]
+
+    points = np.zeros((inputs.max_points, 3), dtype=np.float32)
+    faces = np.zeros((inputs.max_faces, 3), dtype=np.float32)
+
+    points[: mesh.vertices.shape[0], :] = mesh.vertices.astype(np.float32)
+    faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.int32)
+
+    return OutputSchema(
+        sdf=sdf,
+        mesh=TriangularMesh(
+            points=points,
+            faces=faces,
+            n_points=mesh.vertices.shape[0],
+            n_faces=mesh.faces.shape[0],
+        ),
+    )
 
 
 def jac_sdf_wrt_params(
@@ -225,11 +306,22 @@ def jac_sdf_wrt_params(
         )
     )
 
-    sd_field_base, _ = apply_fn(
+    params = []
+    params.append(differentiable_parameters.copy())
+
+    n_params = differentiable_parameters.size
+
+    for i in range(n_params):
+        # we only care about the y and z coordinate
+        params_eps = differentiable_parameters.copy()
+        params_eps[i] += epsilon
+        params.append(params_eps)
+
+    sdf_fields, _ = geometries_and_sdf(
         target=target,
-        differentiable_parameters=differentiable_parameters,
-        non_differentiable_parameters=non_differentiable_parameters,
-        static_parameters=static_parameters,
+        differentiable_parameters=params,
+        non_differentiable_parameters=[non_differentiable_parameters] * (n_params + 1),
+        static_parameters=[static_parameters] * (n_params + 1),
         string_parameters=string_parameters,
         scale_mesh=scale_mesh,
         grid_elements=grid_elements,
@@ -237,72 +329,10 @@ def jac_sdf_wrt_params(
         grid_center=grid_center,
     )
 
-    for i in range(differentiable_parameters.size):
-        # we only care about the y and z coordinate
-
-        params_eps = differentiable_parameters.copy()
-        params_eps[i] += epsilon
-
-        sdf_epsilon, _ = apply_fn(
-            target=target,
-            differentiable_parameters=params_eps,
-            non_differentiable_parameters=non_differentiable_parameters,
-            static_parameters=static_parameters,
-            string_parameters=string_parameters,
-            scale_mesh=scale_mesh,
-            grid_elements=grid_elements,
-            grid_size=grid_size,
-            grid_center=grid_center,
-        )
-        jac[i] = (sdf_epsilon - sd_field_base) / epsilon
+    for i in range(n_params):
+        jac[i] = (sdf_fields[i + 1] - sdf_fields[0]) / epsilon
 
     return jac
-
-
-#
-# Tesseract endpoints
-#
-
-N_POINTS = 1000
-N_FACES = 2000
-
-
-def apply(inputs: InputSchema) -> OutputSchema:
-    """Generate mesh and SDF from bar geometry parameters.
-
-    Args:
-        inputs: Input schema containing bar geometry parameters.
-
-    Returns:
-        Output schema with generated mesh and SDF field.
-    """
-    sdf, mesh = apply_fn(
-        target=inputs.mesh_tesseract,
-        differentiable_parameters=inputs.differentiable_parameters,
-        non_differentiable_parameters=inputs.non_differentiable_parameters,
-        grid_size=inputs.grid_size,
-        static_parameters=inputs.static_parameters,
-        string_parameters=inputs.string_parameters,
-        scale_mesh=inputs.scale_mesh,
-        grid_elements=inputs.grid_elements,
-        grid_center=inputs.grid_center,
-    )
-
-    points = np.zeros((N_POINTS, 3), dtype=np.float32)
-    faces = np.zeros((N_FACES, 3), dtype=np.float32)
-
-    points[: mesh.vertices.shape[0], :] = mesh.vertices.astype(np.float32)
-    faces[: mesh.faces.shape[0], :] = mesh.faces.astype(np.int32)
-
-    return OutputSchema(
-        sdf=sdf,
-        mesh=TriangularMesh(
-            points=points,
-            faces=faces,
-            n_points=mesh.vertices.shape[0],
-            n_faces=mesh.faces.shape[0],
-        ),
-    )
 
 
 def vector_jacobian_product(
@@ -367,8 +397,10 @@ def abstract_eval(abstract_inputs: InputSchema) -> dict:
             dtype="float32",
         ),
         "mesh": {
-            "points": ShapeDType(shape=(N_POINTS, 3), dtype="float32"),
-            "faces": ShapeDType(shape=(N_FACES, 3), dtype="float32"),
+            "points": ShapeDType(
+                shape=(abstract_inputs.max_points, 3), dtype="float32"
+            ),
+            "faces": ShapeDType(shape=(abstract_inputs.max_faces, 3), dtype="float32"),
             "n_points": ShapeDType(shape=(), dtype="int32"),
             "n_faces": ShapeDType(shape=(), dtype="int32"),
         },

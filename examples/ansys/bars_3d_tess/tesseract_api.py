@@ -2,7 +2,7 @@ import numpy as np
 import pyvista as pv
 import trimesh
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime import Array, Float32
 
 #
 # Schemata
@@ -12,7 +12,7 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 class InputSchema(BaseModel):
     """Input schema for bar geometry design and SDF generation."""
 
-    differentiable_parameters: Differentiable[
+    differentiable_parameters: list[
         Array[
             (None,),
             Float32,
@@ -26,12 +26,14 @@ class InputSchema(BaseModel):
         )
     )
 
-    non_differentiable_parameters: Array[
-        (None,),
-        Float32,
+    non_differentiable_parameters: list[
+        Array[
+            (None,),
+            Float32,
+        ]
     ] = Field(description="Flattened array of non-differentiable geometry parameters.")
 
-    static_parameters: list[int] = Field(
+    static_parameters: list[list[int]] = Field(
         description=(
             "List of integers used to construct the geometry."
             " The first integer is the number of bars, and the second integer is the number of vertices per bar."
@@ -53,49 +55,11 @@ class TriangularMesh(BaseModel):
 
 
 class OutputSchema(BaseModel):
-    """Output schema for generated geometry and SDF field."""
+    """Output schema for generated geometry."""
 
-    mesh: TriangularMesh = Field(
-        description="Triangular mesh representation of the geometry"
+    meshes: list[TriangularMesh] = Field(
+        description="Triangular meshes representing the geometries"
     )
-
-
-#
-# Helper functions
-#
-
-
-def build_geometry(
-    differentiable_parameters: np.ndarray,
-    non_differentiable_parameters: np.ndarray,
-    static_parameters: list[int],
-) -> list[trimesh.Trimesh]:
-    """Build a pyvista geometry from the parameters.
-
-    The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
-    """
-    n_chains = static_parameters[0]
-    n_vertices_per_chain = static_parameters[1]
-    geometry = []
-
-    params = differentiable_parameters.reshape((n_chains, n_vertices_per_chain, 3))
-    radius = non_differentiable_parameters[0]
-
-    for chain in range(n_chains):
-        tube = pv.Spline(points=params[chain]).tube(
-            radius=radius, capping=True, n_sides=30
-        )
-        tube = tube.triangulate()
-        tube = pyvista_to_trimesh(tube)
-        geometry.append(tube)
-
-    # convert each geometry in a trimesh style mesh and combine them
-    mesh = geometry[0]
-
-    for geom in geometry[1:]:
-        mesh = mesh.union(geom)
-
-    return mesh
 
 
 def pyvista_to_trimesh(mesh: pv.PolyData) -> trimesh.Trimesh:
@@ -107,6 +71,47 @@ def pyvista_to_trimesh(mesh: pv.PolyData) -> trimesh.Trimesh:
     faces = mesh.faces.reshape(n_faces, (points_per_face + 1))[:, 1:]
 
     return trimesh.Trimesh(vertices=points, faces=faces)
+
+
+def build_geometries(
+    differentiable_parameters: list[np.ndarray],
+    non_differentiable_parameters: list[np.ndarray],
+    static_parameters: list[list[int]],
+    string_parameters: list[str],
+) -> list[trimesh.Trimesh]:
+    """Build a pyvista geometry from the parameters.
+
+    The parameters are expected to be of shape (n_chains, n_edges_per_chain + 1, 3),
+    """
+    n_geometrics = len(differentiable_parameters)
+    geometries = []
+    for i in range(n_geometrics):
+        n_chains = static_parameters[i][0]
+        n_vertices_per_chain = static_parameters[i][1]
+        geometry = []
+
+        params = differentiable_parameters[i].reshape(
+            (n_chains, n_vertices_per_chain, 3)
+        )
+        radius = non_differentiable_parameters[i][0]
+
+        for chain in range(n_chains):
+            tube = pv.Spline(points=params[chain]).tube(
+                radius=radius, capping=True, n_sides=30
+            )
+            tube = tube.triangulate()
+            tube = pyvista_to_trimesh(tube)
+            geometry.append(tube)
+
+        # convert each geometry in a trimesh style mesh and combine them
+        mesh = geometry[0]
+
+        for geom in geometry[1:]:
+            mesh = mesh.union(geom)
+
+        geometries.append(mesh)
+
+    return geometries
 
 
 #
@@ -123,15 +128,19 @@ def apply(inputs: InputSchema) -> OutputSchema:
     Returns:
         Output schema with generated mesh and SDF field.
     """
-    mesh = build_geometry(
+    meshes = build_geometries(
         differentiable_parameters=inputs.differentiable_parameters,
         non_differentiable_parameters=inputs.non_differentiable_parameters,
         static_parameters=inputs.static_parameters,
+        string_parameters=inputs.string_parameters,
     )
 
     return OutputSchema(
-        mesh=TriangularMesh(
-            points=mesh.vertices.astype(np.float32),
-            faces=mesh.faces.astype(np.int32),
-        ),
+        meshes=[
+            TriangularMesh(
+                points=mesh.vertices.astype(np.float32),
+                faces=mesh.faces.astype(np.int32),
+            )
+            for mesh in meshes
+        ],
     )
