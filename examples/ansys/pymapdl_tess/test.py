@@ -1,25 +1,35 @@
+"""
+/usr/ansys_inc/v241/ansys/bin/ansys241 -port 50005  -grpc
+"""
 import os
 
 import numpy as np
-from dotenv import load_dotenv
 from tesseract_core import Tesseract
 
-load_dotenv()
 
+# load the MAPDL server's address from your environment
 host = os.getenv("MAPDL_HOST")
 if host is None:
-    raise ValueError("Unable to read $MAPDL_HOST from the environment.")
+    raise ValueError("Unable to read $MAPDL_HOST from the environment. " + \
+        "Use 'export MAPDL_HOST=X.X.X.X' for local IP address of your MAPDL Instance.")
 port = os.getenv("MAPDL_PORT")
 if port is None:
-    raise ValueError("Unable to read $MAPDL_PORT from the environment.")
+    raise ValueError("Unable to read $MAPDL_PORT from the environment. " + \
+        "Use 'export MAPDL_PORT=X' for the port of your MAPDL Instance.")
 
 
-tess_simp_compliance = Tesseract.from_tesseract_api(
-    "tesseract_pymapdl/tess_simp_compiance/tesseract_api.py"
-)
+# Initialize Tesseract from api (for testing)
+try:
+    tess_simp_compliance = Tesseract.from_tesseract_api(
+        "./tesseract_api.py"
+    )
+except RuntimeError as e:
+    raise RuntimeError("Unable to load tesseract from api. " \
+        "Ensure that you have installed the build requirements using 'pip install -r tesseract_requirements.txt'")
+    
 Lx, Ly, Lz = 3, 2, 1
-Nx, Ny, Nz = 60, 40, 20
-# Nx, Ny, Nz = 6, 4, 2
+# Nx, Ny, Nz = 60, 40, 20
+Nx, Ny, Nz = 6, 4, 2
 
 n_elem = Nx * Ny * Nz
 # Create a test density field varying from 0 to 1
