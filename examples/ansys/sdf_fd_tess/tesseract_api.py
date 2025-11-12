@@ -138,7 +138,9 @@ def denormalize_parameters(
     """Denormalize the differentiable parameters."""
     denormalized_params = []
     for params in differentiable_parameters:
-        denormalized_params.append(params / normalization_factors + normalization_bias)
+        denormalized_params.append(
+            (params - normalization_bias) / normalization_factors
+        )
     return denormalized_params
 
 
