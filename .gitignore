@@ -141,3 +141,5 @@ dmypy.json
 # Ignore UV dev environments
 uv.lock
 uv.lock.bak
+
+tmp_img/
