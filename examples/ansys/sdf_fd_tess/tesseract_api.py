@@ -26,6 +26,20 @@ class InputSchema(BaseModel):
         description="Flattened array of geometry parameters that are passed to the mesh_tesseract."
     )
 
+    normalization_factors: Array[
+        (None,),
+        Float32,
+    ] = Field(
+        description="Normalization factors for the differentiable geometry parameters."
+    )
+
+    normalization_bias: Array[
+        (None,),
+        Float32,
+    ] = Field(
+        description="Normalization bias for the differentiable geometry parameters."
+    )
+
     non_differentiable_parameters: Array[
         (None,),
         Float32,
@@ -116,14 +130,32 @@ class OutputSchema(BaseModel):
 #
 
 
+def denormalize_parameters(
+    differentiable_parameters: list[np.ndarray],
+    normalization_factors: np.ndarray,
+    normalization_bias: np.ndarray,
+) -> list[np.ndarray]:
+    """Denormalize the differentiable parameters."""
+    denormalized_params = []
+    for params in differentiable_parameters:
+        denormalized_params.append(params / normalization_factors + normalization_bias)
+    return denormalized_params
+
+
 def get_geometries(
     target: TesseractReference,
     differentiable_parameters: list[np.ndarray],
+    normalization_factors: np.ndarray,
+    normalization_bias: np.ndarray,
     non_differentiable_parameters: list[np.ndarray],
     static_parameters: list[list[int]],
     string_parameters: list[str],
 ) -> list[trimesh.Trimesh]:
     """Call the tesseract reference to get the geometries."""
+    differentiable_parameters = denormalize_parameters(
+        differentiable_parameters, normalization_factors, normalization_bias
+    )
+
     meshes = target.apply(
         {
             "differentiable_parameters": differentiable_parameters,
@@ -175,10 +207,7 @@ def compute_sdf(
     Ny: int,
     Nz: int,
 ) -> np.ndarray:
-    """Create a pyvista plane that has the SDF values stored as a vertex attribute.
-
-    The SDF field is computed based on the geometry defined by the parameters.
-    """
+    """Compute the signed distance field of a geometry on a regular grid."""
     points, faces = geometry.vertices, geometry.faces
 
     sdf_function = SDF(points, faces)
@@ -204,6 +233,8 @@ def geometries_and_sdf(
     target: TesseractReference,
     differentiable_parameters: list[np.ndarray],
     non_differentiable_parameters: list[np.ndarray],
+    normalization_factors: np.ndarray,
+    normalization_bias: np.ndarray,
     static_parameters: list[list[int]],
     string_parameters: list[str],
     scale_mesh: float,
@@ -216,6 +247,8 @@ def geometries_and_sdf(
         target=target,
         differentiable_parameters=differentiable_parameters,
         non_differentiable_parameters=non_differentiable_parameters,
+        normalization_factors=normalization_factors,
+        normalization_bias=normalization_bias,
         static_parameters=static_parameters,
         string_parameters=string_parameters,
     )
@@ -255,20 +288,22 @@ def apply(inputs: InputSchema) -> OutputSchema:
     Returns:
         Output schema with generated mesh and SDF field.
     """
-    sdf, mesh = geometries_and_sdf(
+    sdfs, meshes = geometries_and_sdf(
         target=inputs.mesh_tesseract,
         differentiable_parameters=[inputs.differentiable_parameters],
         non_differentiable_parameters=[inputs.non_differentiable_parameters],
         static_parameters=[inputs.static_parameters],
         string_parameters=inputs.string_parameters,
+        normalization_factors=inputs.normalization_factors,
+        normalization_bias=inputs.normalization_bias,
         grid_size=inputs.grid_size,
         scale_mesh=inputs.scale_mesh,
         grid_elements=inputs.grid_elements,
         grid_center=inputs.grid_center,
     )
 
-    sdf = sdf[0]  # only one geometry
-    mesh = mesh[0]
+    sdf = sdfs[0]  # only one geometry
+    mesh = meshes[0]
 
     points = np.zeros((inputs.max_points, 3), dtype=np.float32)
     faces = np.zeros((inputs.max_faces, 3), dtype=np.int32)
@@ -287,6 +322,8 @@ def apply(inputs: InputSchema) -> OutputSchema:
             non_differentiable_parameters=inputs.non_differentiable_parameters,
             static_parameters=inputs.static_parameters,
             string_parameters=inputs.string_parameters,
+            normalization_factors=inputs.normalization_factors,
+            normalization_bias=inputs.normalization_bias,
             scale_mesh=inputs.scale_mesh,
             grid_size=inputs.grid_size,
             grid_elements=inputs.grid_elements,
@@ -312,6 +349,8 @@ def jac_sdf_wrt_params(
     target: TesseractReference,
     differentiable_parameters: np.ndarray,
     non_differentiable_parameters: np.ndarray,
+    normalization_factors: np.ndarray,
+    normalization_bias: np.ndarray,
     static_parameters: list[int],
     string_parameters: list[str],
     scale_mesh: float,
@@ -349,6 +388,8 @@ def jac_sdf_wrt_params(
         target=target,
         differentiable_parameters=params,
         non_differentiable_parameters=[non_differentiable_parameters] * (n_params + 1),
+        normalization_factors=normalization_factors,
+        normalization_bias=normalization_bias,
         static_parameters=[static_parameters] * (n_params + 1),
         string_parameters=string_parameters,
         scale_mesh=scale_mesh,
@@ -398,6 +439,8 @@ def vector_jacobian_product(
             target=inputs.mesh_tesseract,
             differentiable_parameters=inputs.differentiable_parameters,
             non_differentiable_parameters=inputs.non_differentiable_parameters,
+            normalization_factors=inputs.normalization_factors,
+            normalization_bias=inputs.normalization_bias,
             static_parameters=inputs.static_parameters,
             string_parameters=inputs.string_parameters,
             scale_mesh=inputs.scale_mesh,
