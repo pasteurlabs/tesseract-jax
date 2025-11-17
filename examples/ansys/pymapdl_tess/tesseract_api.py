@@ -13,13 +13,13 @@ import logging
 import time
 from collections.abc import Callable
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar
 
 import numpy as np
 import pyvista as pv
 from ansys.mapdl.core import Mapdl
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32, Int32
+from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
 
 # Set up module logger
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class InputSchema(BaseModel):
     )
 
     log_level: str = Field(
-        default="INFO",
+        default="WARNING",
         description="Logging level for output messages (DEBUG, INFO, WARNING, ERROR).",
     )
 
@@ -522,9 +522,11 @@ class SIMPElasticity:
         inverse_rho = np.nan_to_num(1 / self.rho.flatten(), nan=0.0)
         self.sensitivity = -2.0 * self.p * inverse_rho * self.strain_energy.flatten()
 
-        # TODO improve this cache?
-        # stash the sensitivity s.t. it may be loaded in the vjp
-        np.save("sensitivity.npy", self.sensitivity)
+        # Cache sensitivity in temporary directory for use in VJP
+        import tempfile
+
+        sensitivity_path = os.path.join(tempfile.gettempdir(), "sensitivity.npy")
+        np.save(sensitivity_path, self.sensitivity)
 
     @log_timing
     def _create_pvmesh(self) -> None:
@@ -616,16 +618,55 @@ def apply(inputs: InputSchema) -> OutputSchema:
     return solver.solve()
 
 
-# TODO
-# def vector_jacobian_product(
-#     inputs: InputSchema,
-#     vjp_inputs: set[str],
-#     vjp_outputs: set[str],
-#     cotangent_vector: dict[str, Any],
-# ):
-#     pass
-#
-#
-# def abstract_eval(abstract_inputs):
-#     """Calculate output shape of apply from the shape of its inputs."""
-#     return {"compliance": ShapeDType(shape=(), dtype="float32")}
+def vector_jacobian_product(
+    inputs: InputSchema,
+    vjp_inputs: set[str],
+    vjp_outputs: set[str],
+    cotangent_vector: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute vector-Jacobian product for backpropagation through ANSYS solve.
+
+    The sensitivity (dcompliance/drho) is already computed and cached during
+    the forward pass in _calculate_sensitivity(), so we just need to load it
+    and multiply by the upstream gradient.
+
+    Args:
+        inputs: Original inputs to the forward pass (InputSchema)
+        vjp_inputs: Set of input names we need gradients for (e.g., {"rho"})
+        vjp_outputs: Set of output names being differentiated (e.g., {"compliance"})
+        cotangent_vector: Upstream gradients from the loss function
+                         (e.g., {"compliance": dloss/dcompliance})
+
+    Returns:
+        Dictionary mapping input names to their gradients
+        (e.g., {"rho": dloss/∂rho})
+
+    """
+    gradients = {}
+    assert vjp_inputs == {"rho"}
+    assert vjp_outputs == {"compliance"}
+
+    # Load the cached sensitivity (∂compliance/∂rho) from temporary directory
+    # This was computed and saved in _calculate_sensitivity()
+    import tempfile
+
+    sensitivity_path = os.path.join(tempfile.gettempdir(), "sensitivity.npy")
+    sensitivity = np.load(sensitivity_path)
+
+    # Clean up the temporary file after loading
+    try:
+        os.unlink(sensitivity_path)
+    except FileNotFoundError:
+        pass  # Already deleted, no problem
+
+    grad_rho_flat = cotangent_vector["compliance"] * sensitivity
+
+    # Reshape to match input rho shape
+    gradients["rho"] = grad_rho_flat.reshape(inputs.rho.shape)
+
+    return gradients
+
+
+def abstract_eval(abstract_inputs):
+    """Calculate output shape of apply from the shape of its inputs."""
+    return {"compliance": ShapeDType(shape=(), dtype="float32")}
