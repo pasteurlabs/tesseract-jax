@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 
 # TODO delete me once debugging is over
 Lx, Ly, Lz = 3, 2, 1
+#Nx, Ny, Nz = 60, 40, 20
 Nx, Ny, Nz = 6, 4, 2
-# Nx, Ny, Nz = 60, 40, 20
 force_val = 0.1
-debug = True
+use_ansys = False
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -209,18 +209,13 @@ class SIMPElasticity:
         """
         logger.info("Starting SIMP elasticity analysis...")
 
-        if False:
-            self._create_geometry()
-        else:
-            self._create_geometry2()
-        self._define_element()
-        if False:
+        if use_ansys:
             self._create_mesh()
         else:
             self._create_mesh2()
         self._define_simp_materials()
         self._assign_materials_to_elements()
-        if debug:
+        if use_ansys:
             self._apply_boundary_conditions()
         else:
             self._apply_boundary_conditions_2()
@@ -238,26 +233,6 @@ class SIMPElasticity:
         logger.debug(f"MAPDL status: {self.mapdl}")
 
         return self._build_output_schema()
-
-    @log_timing
-    def _create_geometry2(self) -> None:
-        """Create a rectangular block geometry.
-
-        Creates 8 keypoints at the corners of a rectangular box and defines
-        a volume from these keypoints.
-        """
-        # start pre-processor
-        self.mapdl.prep7()
-
-        # create a pyvista mesh from self.hex_mesh
-        cells = np.concatenate([np.array([[8]] * self.hex_mesh.n_faces), self.hex_mesh.faces], 1)
-        cell_type = np.array([pv.CellType.HEXAHEDRON] * self.hex_mesh.n_faces)
-        mesh = pv.UnstructuredGrid(cells, cell_type, self.hex_mesh.points)
-
-        # save the pyvista mesh, then reload it in mapdl
-        archive_filename = os.path.join(tempfile.gettempdir(), "tmp.cdb")
-        save_as_archive(archive_filename, mesh)
-        response = self.mapdl.cdread("db", archive_filename)
 
     @log_timing
     def _create_geometry(self) -> None:
@@ -294,7 +269,7 @@ class SIMPElasticity:
         if len(rho_flat) != self.n_elements:
             raise ValueError(
                 f"Density field size {len(rho_flat)} does not match "
-                f"number of elements {self.n_elements} (Nx={self.Nx}, Ny={self.Ny}, Nz={self.Nz})"
+                f"number of elements {self.n_elements}"
             )
 
         # Apply minimum density constraint to avoid singular stiffness matrix
@@ -350,46 +325,75 @@ class SIMPElasticity:
 
     @log_timing
     def _create_mesh2(self) -> None:
-        """Create structured hexahedral mesh with specified divisions.
+        """Create hexahedral mesh directly using MAPDL commands.
 
-        Sets line divisions for each direction and generates a swept mesh using
-        VSWEEP. The resulting mesh will have Nx * Ny * Nz elements with uniform
-        element sizes in each direction.
+        Creates nodes and elements from hex_mesh using direct MAPDL commands (N and E).
+        This ensures perfect 1:1 correspondence: node i+1 = points[i], element i+1 = faces[i].
         """
-        # Store element numbers in the order they were created
-        # This is crucial for maintaining consistent indexing between
-        # density input and strain energy output
+        self.mapdl.prep7()
+        self._define_element()
+
+        logger.info(f"Creating {self.hex_mesh.n_points} nodes...")
+
+        # Create nodes using batch commands for efficiency
+        node_commands = []
+        for i in range(self.hex_mesh.n_points):
+            x, y, z = self.hex_mesh.points[i]
+            # Node number i+1 corresponds to point index i
+            node_commands.append(f"N,{i+1},{x},{y},{z}")
+
+        self.mapdl.input_strings(node_commands)
+
+        logger.info(f"Creating {self.hex_mesh.n_faces} hexahedral elements...")
+
+        # Create elements using batch commands
+        element_commands = []
+        for i in range(self.hex_mesh.n_faces):
+            # Get node indices for this element (0-based)
+            node_indices = self.hex_mesh.faces[i]
+            # Convert to node numbers (1-based)
+            node_nums = [int(idx + 1) for idx in node_indices]
+            # Element number i+1 corresponds to face index i
+            element_commands.append(f"E,{','.join(map(str, node_nums))}")
+
+        self.mapdl.input_strings(element_commands)
+
+        # Verify the mesh was created correctly
         self.element_numbers = self.mapdl.mesh.enum
-
-        # Validate and log element numbering
-        n_elements = self.hex_mesh.n_faces
-        if len(self.element_numbers) != n_elements:
-            raise ValueError(
-                f"Number of created elements {len(self.element_numbers)} does not match "
-                f"expected {n_elements} (Nx={self.Nx}, Ny={self.Ny}, Nz={self.Nz})"
-            )
-        self.n_elements = n_elements
-
-        # Repeat validation for nodes
         self.node_numbers = self.mapdl.mesh.nnum
+        self.n_elements = len(self.element_numbers)
         self.n_nodes = len(self.node_numbers)
 
-        logger.debug(
-            f"Element numbers: min={self.element_numbers.min()}, "
-            f"max={self.element_numbers.max()}, "
-            f"first 5={self.element_numbers[:5]}"
+        logger.info(
+            f"Mesh created: {self.n_nodes} nodes, {self.n_elements} elements"
         )
 
-        # Check if element numbering is sequential starting from 1
-        is_sequential = np.array_equal(
-            self.element_numbers, np.arange(1, n_elements + 1)
-        )
-        if is_sequential:
-            logger.info("Element numbering is sequential (1, 2, 3, ...)")
-        else:
-            logger.warning(
-                "Element numbering is NOT sequential - reordering will be applied"
+        # Validate counts
+        if self.n_nodes != self.hex_mesh.n_points:
+            raise ValueError(
+                f"Node count mismatch: created {self.n_nodes}, expected {self.hex_mesh.n_points}"
             )
+
+        if self.n_elements != self.hex_mesh.n_faces:
+            raise ValueError(
+                f"Element count mismatch: created {self.n_elements}, expected {self.hex_mesh.n_faces}"
+            )
+
+        # Verify sequential numbering (should always be true with direct creation)
+        is_sequential_nodes = np.array_equal(
+            self.node_numbers, np.arange(1, self.n_nodes + 1)
+        )
+        is_sequential_elements = np.array_equal(
+            self.element_numbers, np.arange(1, self.n_elements + 1)
+        )
+
+        if not is_sequential_nodes or not is_sequential_elements:
+            logger.warning(
+                f"Non-sequential numbering detected: nodes={is_sequential_nodes}, elements={is_sequential_elements}"
+            )
+        else:
+            logger.info("Verified: Node and element numbering is sequential (1, 2, 3, ...)")
+
     @log_timing
     def _create_mesh(self) -> None:
         """Create structured hexahedral mesh with specified divisions.
@@ -398,6 +402,12 @@ class SIMPElasticity:
         VSWEEP. The resulting mesh will have Nx * Ny * Nz elements with uniform
         element sizes in each direction.
         """
+        # create the cube geometry 
+        self._create_geometry()
+
+        # assign element
+        self._define_element()
+
         # Set element divisions for lines in each direction using ndiv parameter
         # Lines parallel to X-axis (select by 2 constant coordinates)
         self.mapdl.lsel("s", "loc", "y", 0)
@@ -466,7 +476,7 @@ class SIMPElasticity:
         if len(self.element_numbers) != n_elements:
             raise ValueError(
                 f"Number of created elements {len(self.element_numbers)} does not match "
-                f"expected {n_elements} (Nx={self.Nx}, Ny={self.Ny}, Nz={self.Nz})"
+                f"expected {n_elements}"
             )
         self.n_elements = n_elements
 
@@ -491,37 +501,46 @@ class SIMPElasticity:
                 "Element numbering is NOT sequential - reordering will be applied"
             )
 
+
     @log_timing
     def _apply_boundary_conditions_2(self) -> None:
-        """Apply boundary conditions, forces, and visualize.
+        """Apply boundary conditions and forces using batch commands for efficiency.
 
-        Fixes all nodes on the x=0 plane by constraining all translational
-        degrees of freedom (UX, UY, UZ). Then applies a concentrated force
-        in the negative z-direction to nodes at x=Lx, y=Ly, and z between
-        0.4*Lz and 0.6*Lz.
+        Since nodes are created with direct correspondence (node i+1 = points[i]),
+        we can directly reference node numbers in D and F commands. All commands
+        are batched using input_strings for optimal performance.
         """
+        commands = []
+
+        # Build Dirichlet boundary condition commands
+        n_dirichlet = len(self.dirichlet_mask)
+        logger.info(f"Applying Dirichlet BCs to {n_dirichlet} nodes")
+
         for i, x in zip(self.dirichlet_mask, self.dirichlet_values):
-            # Select node
-            self.mapdl.nsel("s", "NODE", "", i + 1)
+            # Point index i corresponds to node number i+1
+            node = i + 1
+            # D,NODE,ALL,VALUE constrains all DOFs to value x
+            commands.append(f"D,{node},ALL,{x}")
 
-            # set dirichlet conditions
-            self.mapdl.d("all", "all", x)
-
-            # Reselect all nodes
-            self.mapdl.allsel()
-
+        # Build von Neumann boundary condition (force) commands
+        n_von_neumann = len(self.van_neumann_mask)
+        logger.info(f"Applying von Neumann BCs to {n_von_neumann} nodes")
 
         for i, f in zip(self.van_neumann_mask, self.van_neumann_values):
-            # Select node
-            self.mapdl.nsel("s", "NODE", "", i + 1)
+            # Point index i corresponds to node number i+1
+            node = i + 1
+            # F,NODE,Lab,VALUE applies force component
+            # Only add commands for non-zero force components
+            if f[0] != 0:
+                commands.append(f"F,{node},FX,{f[0]}")
+            if f[1] != 0:
+                commands.append(f"F,{node},FY,{f[1]}")
+            if f[2] != 0:
+                commands.append(f"F,{node},FZ,{f[2]}")
 
-            # Apply force in negative z-direction to all selected nodes
-            self.mapdl.f("all", "fx", f[0])
-            self.mapdl.f("all", "fy", f[1])
-            self.mapdl.f("all", "fz", f[2])
-
-            # Reselect all nodes
-            self.mapdl.allsel()
+        # Execute all boundary condition commands at once
+        logger.debug(f"Executing {len(commands)} boundary condition commands")
+        self.mapdl.input_strings(commands)
 
     @log_timing
     def _apply_boundary_conditions(self) -> None:
