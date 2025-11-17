@@ -93,6 +93,7 @@ def build_geometries(
         params = differentiable_parameters[i].reshape(
             (n_chains, n_vertices_per_chain, 3)
         )
+
         radius = non_differentiable_parameters[i][0]
 
         for chain in range(n_chains):
