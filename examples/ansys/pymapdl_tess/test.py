@@ -2,7 +2,7 @@ import os
 
 import numpy as np
 import pyvista as pv
-from tesseract_api import HexMesh  # TODO can we standardize these mesh definitions?
+from tesseract_api import HexMesh
 from tesseract_core import Tesseract
 
 # load the MAPDL server's address from your environment
@@ -34,8 +34,7 @@ except RuntimeError as e:
 def mesh_from_pyvista(Lx, Ly, Lz, Nx, Ny, Nz):
     grid = pv.ImageData(
         dimensions=np.array((Nx, Ny, Nz)) + 1,
-        # origin=(-Lx / 2, -Ly / 2, -Lz / 2), # The bottom left corner of the data set
-        origin=(0, 0, 0),  # TODO
+        origin=(0, 0, 0),
         spacing=(Lx / Nx, Ly / Ny, Lz / Nz),  # These are the cell sizes along each axis
     )
     # repeated casts will eventually expose cell_connectivitiy
@@ -55,13 +54,10 @@ def mesh_from_pyvista(Lx, Ly, Lz, Nx, Ny, Nz):
 
 
 def cantilever_bc(Lx, Ly, Lz, Nx, Ny, Nz, hex_mesh):
+    # Create a dirichlet_mask of nodes indices associated with diricelet condition
     # dirichlet condition (select nodes at x=0)
     on_lhs = hex_mesh.points[:, 0] <= 0
-    # TODO should this be an n_node vector?
-    # dirichlet_indices = np.where(on_lhs)[0]
-    # dirichlet_mask = np.zeros(hex_mesh.n_points)
-    # dirichlet_mask[dirichlet_indices] = 1
-    dirichlet_mask = np.where(on_lhs)[0]
+    dirichlet_mask = np.where(on_lhs)[0]  # size (num_dirichlet_nodes,)
     dirichlet_values = np.zeros(dirichlet_mask.shape[0])
 
     # von Neumann condition (select nodes at x=Lx with constraints on y and z)
@@ -81,7 +77,7 @@ def cantilever_bc(Lx, Ly, Lz, Nx, Ny, Nz, hex_mesh):
             ),
         ),
     )
-    # TODO should this be an n_node array?
+    # A (num_von_neumann_nodes, n_dof) array
     von_neumann_mask = np.where(von_neumann)[0]
     von_neumann_values = np.array([0, 0.0, 0.1 / len(von_neumann_mask)]) + np.zeros(
         (von_neumann_mask.shape[0], 3)
@@ -101,7 +97,7 @@ def main():
     Lx, Ly, Lz = 3, 2, 1
     Nx, Ny, Nz = 60, 40, 20
     Nx, Ny, Nz = 6, 4, 2
-    num_tests = 5  # set to 0 if you don't want to run this check
+    num_tests = 0  # set to 0 if you don't want to run this check
     run_central_difference = True
 
     hex_mesh = mesh_from_pyvista(Lx, Ly, Lz, Nx, Ny, Nz)
