@@ -82,36 +82,39 @@ class OutputSchema(BaseModel):
 #
 # Helper functions
 #
-def create_single_hex(
-    Lx: float,
-    Ly: float,
-    Lz: float,
+
+
+def hex_grid(
+    Lx: float, Ly: float, Lz: float, Nx: int, Ny: int, Nz: int
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
-    """Create a single HEX8 mesh of a cuboid domain."""
-    # Define the 8 corner points of the hexahedron
-    points = jnp.array(
-        [
-            [-Lx / 2, -Ly / 2, -Lz / 2],  # Point 0
-            [Lx / 2, -Ly / 2, -Lz / 2],  # Point 1
-            [Lx / 2, Ly / 2, -Lz / 2],  # Point 2
-            [-Lx / 2, Ly / 2, -Lz / 2],  # Point 3
-            [-Lx / 2, -Ly / 2, Lz / 2],  # Point 4
-            [Lx / 2, -Ly / 2, Lz / 2],  # Point 5
-            [Lx / 2, Ly / 2, Lz / 2],  # Point 6
-            [-Lx / 2, Ly / 2, Lz / 2],  # Point 7
-        ],
-        dtype=jnp.float32,
-    )
+    """Creates a hex mesh with Nx * Ny * Nz points.
 
-    # Define the hexahedron cell using the point indices
-    hex_cells = jnp.array(
-        [
-            [0, 1, 2, 3, 4, 5, 6, 7]  # Single HEX8 element
-        ],
-        dtype=jnp.int32,
-    )
+    This is (Nx-1) * (Ny-1) * (Nz-1) cells
+    """
+    xs = jnp.linspace(-Lx / 2, Lx / 2, Nx)
+    ys = jnp.linspace(-Ly / 2, Ly / 2, Ny)
+    zs = jnp.linspace(-Lz / 2, Lz / 2, Nz)
 
-    return points, hex_cells
+    xs, ys, zs = jnp.meshgrid(xs, ys, zs, indexing="ij")
+
+    pts = jnp.stack((xs, ys, zs), -1)
+
+    points_inds = jnp.arange(Nx * Ny * Nz)
+    points_inds_xyz = points_inds.reshape(Nx, Ny, Nz)
+    inds1 = points_inds_xyz[:-1, :-1, :-1]
+    inds2 = points_inds_xyz[1:, :-1, :-1]
+    inds3 = points_inds_xyz[1:, 1:, :-1]
+    inds4 = points_inds_xyz[:-1, 1:, :-1]
+    inds5 = points_inds_xyz[:-1, :-1, 1:]
+    inds6 = points_inds_xyz[1:, :-1, 1:]
+    inds7 = points_inds_xyz[1:, 1:, 1:]
+    inds8 = points_inds_xyz[:-1, 1:, 1:]
+
+    cells = jnp.stack(
+        (inds1, inds2, inds3, inds4, inds5, inds6, inds7, inds8), axis=-1
+    ).reshape(-1, 8)
+
+    return pts.reshape(-1, 3), cells
 
 
 def vectorized_subdivide_hex_mesh(
@@ -169,9 +172,9 @@ def vectorized_subdivide_hex_mesh(
                 cell_offsets = cell_offsets.at[0, index].set(
                     jnp.array(
                         [
-                            (0.25 - ix * 0.5) if split_x else 0.0,
-                            (0.25 - iy * 0.5) if split_y else 0.0,
-                            (0.25 - iz * 0.5) if split_z else 0.0,
+                            (-0.25 + ix * 0.5) if split_x else 0.0,
+                            (-0.25 + iy * 0.5) if split_y else 0.0,
+                            (-0.25 + iz * 0.5) if split_z else 0.0,
                         ]
                     ).T
                 )
@@ -204,7 +207,7 @@ def vectorized_subdivide_hex_mesh(
     # Repeat the point offsets and scale them by the corresponding hex sizes
     # -> point_offset tensor of shape (n_hex_to_subdiv, n_points_per_hex, 3)
     point_offsets = point_offsets.reshape((1, n_points_per_hex, 3)).repeat(
-        hex_sizes.shape[0], axis=0
+        n_hex_to_subdiv, axis=0
     ) * hex_sizes.reshape((n_hex_to_subdiv, 1, 3)).repeat(n_points_per_hex, axis=1)
 
     # Repeat the two offsets at an additional axis to get all combinations
@@ -229,7 +232,7 @@ def vectorized_subdivide_hex_mesh(
     # Directly compute new point coordinates and reshape
     new_pts_coords = (center_points + total_offsets).reshape((n_new_pts, 3))
     # Compute new hex cell indices
-    new_hex_cells = jnp.linspace(0, n_new_pts - 1, n_new_pts, dtype=jnp.int32).reshape(
+    new_hex_cells = jnp.arange(n_new_pts, dtype=jnp.int32).reshape(
         (n_new_cells, n_points_per_hex)
     )
 
@@ -267,10 +270,17 @@ def remove_duplicate_points(
     pts_coords: jnp.ndarray, hex_cells: jnp.ndarray
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Remove duplicate points from the mesh and update hex cell indices."""
-    unique_pts, inverse_indices = jnp.unique(pts_coords, axis=0, return_inverse=True)
-    updated_hex_cells = inverse_indices[hex_cells]
+    # TODO: remove rounding after removing duplicate points
+    pts_coords = jnp.round(pts_coords, decimals=5)
+    _, indices, inverse_indices = jnp.unique(
+        pts_coords, axis=0, return_index=True, return_inverse=True
+    )
 
-    return unique_pts, updated_hex_cells
+    pts_coords = pts_coords[indices]
+
+    hex_cells = inverse_indices[hex_cells]
+
+    return pts_coords, hex_cells
 
 
 def recursive_subdivide_hex_mesh(
@@ -368,7 +378,14 @@ def generate_mesh(
         points: (n_points, 3) array of vertex positions.
         hex_cells: (n_hex, 8) array of hexahedron cell indices.
     """
-    initial_pts, initial_hex_cells = create_single_hex(Lx, Ly, Lz)
+    # get largest cell size
+    max_size = jnp.max(sizing_field)
+
+    Nx = int(Lx / max_size)
+    Ny = int(Ly / max_size)
+    Nz = int(Lz / max_size)
+
+    initial_pts, initial_hex_cells = hex_grid(Lx, Ly, Lz, Nx, Ny, Nz)
 
     pts, cells = recursive_subdivide_hex_mesh(
         initial_hex_cells,
