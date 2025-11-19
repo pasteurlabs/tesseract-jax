@@ -13,18 +13,17 @@ import logging
 import time
 from collections.abc import Callable
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar
 
 import numpy as np
 import pyvista as pv
 from ansys.mapdl.core import Mapdl
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
 
 # Set up module logger
 logger = logging.getLogger(__name__)
 
-# Type variables for decorator
 P = ParamSpec("P")
 T = TypeVar("T")
 
@@ -46,6 +45,21 @@ def log_timing(func: Callable[P, T]) -> Callable[P, T]:
     return wrapper
 
 
+class HexMesh(BaseModel):
+    """Hexahedral mesh representation."""
+
+    points: Array[(None, 3), Float32] = Field(description="Array of vertex positions.")
+    faces: Array[(None, 8), Int32] = Field(
+        description="Array of hexahedral faces defined by indices into the points array."
+    )
+    n_points: Int32 = Field(
+        default=0, description="Number of valid points in the points array."
+    )
+    n_faces: Int32 = Field(
+        default=0, description="Number of valid faces in the faces array."
+    )
+
+
 class InputSchema(BaseModel):
     """Inputs for the tess_simp_compliance Tesseract.
 
@@ -64,29 +78,20 @@ class InputSchema(BaseModel):
             Float32,
         ]
     ] = Field(description="2D density field for topology optimization")
-
-    Lx: float = Field(
-        default=60.0, description="Length of the simulation box in the x direction."
+    van_neumann_mask: Array[(None,), Int32] = Field(
+        description="Mask for van Neumann boundary conditions",
     )
-    Ly: float = Field(
-        default=30.0,
-        description=("Length of the simulation box in the y direction."),
+    van_neumann_values: Array[(None, None), Float32] = Field(
+        description="Values for van Neumann boundary conditions",
     )
-    Lz: float = Field(
-        default=30.0, description="Length of the simulation box in the z direction."
+    dirichlet_mask: Array[(None,), Int32] = Field(
+        description="Mask for Dirichlet boundary conditions",
     )
-
-    Nx: int = Field(
-        default=60,
-        description=("Number of elements in the x direction."),
+    dirichlet_values: Array[(None,), Float32] = Field(
+        description="Values for Dirichlet boundary conditions",
     )
-    Ny: int = Field(
-        default=30,
-        description=("Number of elements in the y direction."),
-    )
-    Nz: int = Field(
-        default=30,
-        description=("Number of elements in the z direction."),
+    hex_mesh: HexMesh = Field(
+        description="Hexahedral mesh representation of the geometry",
     )
 
     E0: float = Field(
@@ -99,18 +104,13 @@ class InputSchema(BaseModel):
         description="Minimum density value to avoid singular stiffness matrix in SIMP.",
     )
 
-    total_force: float = Field(
-        default=5.0,
-        description="Total force magnitude in Newtons applied to the structure.",
-    )
-
     p: float = Field(
         default=3.0,
         description="SIMP penalty parameter for material interpolation (default: 3.0).",
     )
 
     log_level: str = Field(
-        default="INFO",
+        default="WARNING",
         description="Logging level for output messages (DEBUG, INFO, WARNING, ERROR).",
     )
 
@@ -158,15 +158,14 @@ class SIMPElasticity:
 
         # Extract input parameters
         self.rho = inputs.rho
-        self.Lx = inputs.Lx
-        self.Ly = inputs.Ly
-        self.Lz = inputs.Lz
-        self.Nx = inputs.Nx
-        self.Ny = inputs.Ny
-        self.Nz = inputs.Nz
+        self.hex_mesh = inputs.hex_mesh
+        self.dirichlet_mask = inputs.dirichlet_mask
+        self.dirichlet_values = inputs.dirichlet_values
+        self.van_neumann_mask = inputs.van_neumann_mask
+        self.van_neumann_values = inputs.van_neumann_values
+        self.hex_mesh = inputs.hex_mesh
         self.E0 = inputs.E0
         self.rho_min = inputs.rho_min
-        self.total_force = inputs.total_force
         self.p = inputs.p
         self.log_level = inputs.log_level
         self.vtk_output = inputs.vtk_output
@@ -205,8 +204,6 @@ class SIMPElasticity:
         """
         logger.info("Starting SIMP elasticity analysis...")
 
-        self._create_geometry()
-        self._define_element()
         self._create_mesh()
         self._define_simp_materials()
         self._assign_materials_to_elements()
@@ -227,27 +224,6 @@ class SIMPElasticity:
         return self._build_output_schema()
 
     @log_timing
-    def _create_geometry(self) -> None:
-        """Create a rectangular block geometry.
-
-        Creates 8 keypoints at the corners of a rectangular box and defines
-        a volume from these keypoints.
-        """
-        # start pre-processor
-        self.mapdl.prep7()
-
-        k0 = self.mapdl.k("", 0, 0, 0)
-        k1 = self.mapdl.k("", self.Lx, 0, 0)
-        k2 = self.mapdl.k("", self.Lx, self.Ly, 0)
-        k3 = self.mapdl.k("", 0, self.Ly, 0)
-        k4 = self.mapdl.k("", 0, 0, self.Lz)
-        k5 = self.mapdl.k("", self.Lx, 0, self.Lz)
-        k6 = self.mapdl.k("", self.Lx, self.Ly, self.Lz)
-        k7 = self.mapdl.k("", 0, self.Ly, self.Lz)
-
-        self.mapdl.v(k0, k1, k2, k3, k4, k5, k6, k7)
-
-    @log_timing
     def _define_simp_materials(self) -> None:
         """Define materials using SIMP approach with batch commands for efficiency.
 
@@ -261,7 +237,7 @@ class SIMPElasticity:
         if len(rho_flat) != self.n_elements:
             raise ValueError(
                 f"Density field size {len(rho_flat)} does not match "
-                f"number of elements {self.n_elements} (Nx={self.Nx}, Ny={self.Ny}, Nz={self.Nz})"
+                f"number of elements {self.n_elements}"
             )
 
         # Apply minimum density constraint to avoid singular stiffness matrix
@@ -285,10 +261,13 @@ class SIMPElasticity:
     def _define_element(self) -> None:
         """Define element type for structural analysis.
 
-        Sets element type 1 to SOLID186, a 20-node 3D structural solid element
-        with quadratic displacement behavior.
+        Sets element type 1 to SOLID185, a 8-node 3D structural solid element
+        with linear displacement behavior.
+
+        Note: SOLID186, a 20-node 3D structural solid element
+        with quadratic displacement behavior, would be an improvement.
         """
-        self.mapdl.et(1, "SOLID186")
+        self.mapdl.et(1, "SOLID185")
 
     @log_timing
     def _assign_materials_to_elements(self) -> None:
@@ -314,151 +293,114 @@ class SIMPElasticity:
 
     @log_timing
     def _create_mesh(self) -> None:
-        """Create structured hexahedral mesh with specified divisions.
+        """Create hexahedral mesh directly using MAPDL commands.
 
-        Sets line divisions for each direction and generates a swept mesh using
-        VSWEEP. The resulting mesh will have Nx * Ny * Nz elements with uniform
-        element sizes in each direction.
+        Creates nodes and elements from hex_mesh using direct MAPDL commands (N and E).
+        This ensures perfect 1:1 correspondence: node i+1 = points[i], element i+1 = faces[i].
         """
-        # Set element divisions for lines in each direction using ndiv parameter
-        # Lines parallel to X-axis (select by 2 constant coordinates)
-        self.mapdl.lsel("s", "loc", "y", 0)
-        self.mapdl.lsel("r", "loc", "z", 0)
-        self.mapdl.lesize("all", ndiv=self.Nx, kforc=1)
+        self.mapdl.prep7()
+        self._define_element()
 
-        self.mapdl.lsel("s", "loc", "y", self.Ly)
-        self.mapdl.lsel("r", "loc", "z", 0)
-        self.mapdl.lesize("all", ndiv=self.Nx, kforc=1)
+        logger.info(f"Creating {self.hex_mesh.n_points} nodes...")
 
-        self.mapdl.lsel("s", "loc", "y", 0)
-        self.mapdl.lsel("r", "loc", "z", self.Lz)
-        self.mapdl.lesize("all", ndiv=self.Nx, kforc=1)
+        # Create nodes using batch commands for efficiency
+        node_commands = []
+        for i in range(self.hex_mesh.n_points):
+            x, y, z = self.hex_mesh.points[i]
+            # Node number i+1 corresponds to point index i
+            node_commands.append(f"N,{i + 1},{x},{y},{z}")
 
-        self.mapdl.lsel("s", "loc", "y", self.Ly)
-        self.mapdl.lsel("r", "loc", "z", self.Lz)
-        self.mapdl.lesize("all", ndiv=self.Nx, kforc=1)
+        self.mapdl.input_strings(node_commands)
 
-        # Lines parallel to Y-axis (select by 2 constant coordinates)
-        self.mapdl.lsel("s", "loc", "x", 0)
-        self.mapdl.lsel("r", "loc", "z", 0)
-        self.mapdl.lesize("all", ndiv=self.Ny, kforc=1)
+        logger.info(f"Creating {self.hex_mesh.n_faces} hexahedral elements...")
 
-        self.mapdl.lsel("s", "loc", "x", self.Lx)
-        self.mapdl.lsel("r", "loc", "z", 0)
-        self.mapdl.lesize("all", ndiv=self.Ny, kforc=1)
+        # Create elements using batch commands
+        element_commands = []
+        for i in range(self.hex_mesh.n_faces):
+            # Get node indices for this element (0-based)
+            node_indices = self.hex_mesh.faces[i]
+            # Convert to node numbers (1-based)
+            node_nums = [int(idx + 1) for idx in node_indices]
+            # Element number i+1 corresponds to face index i
+            element_commands.append(f"E,{','.join(map(str, node_nums))}")
 
-        self.mapdl.lsel("s", "loc", "x", 0)
-        self.mapdl.lsel("r", "loc", "z", self.Lz)
-        self.mapdl.lesize("all", ndiv=self.Ny, kforc=1)
+        self.mapdl.input_strings(element_commands)
 
-        self.mapdl.lsel("s", "loc", "x", self.Lx)
-        self.mapdl.lsel("r", "loc", "z", self.Lz)
-        self.mapdl.lesize("all", ndiv=self.Ny, kforc=1)
-
-        # Lines parallel to Z-axis (select by 2 constant coordinates)
-        self.mapdl.lsel("s", "loc", "x", 0)
-        self.mapdl.lsel("r", "loc", "y", 0)
-        self.mapdl.lesize("all", ndiv=self.Nz, kforc=1)
-
-        self.mapdl.lsel("s", "loc", "x", self.Lx)
-        self.mapdl.lsel("r", "loc", "y", 0)
-        self.mapdl.lesize("all", ndiv=self.Nz, kforc=1)
-
-        self.mapdl.lsel("s", "loc", "x", 0)
-        self.mapdl.lsel("r", "loc", "y", self.Ly)
-        self.mapdl.lesize("all", ndiv=self.Nz, kforc=1)
-
-        self.mapdl.lsel("s", "loc", "x", self.Lx)
-        self.mapdl.lsel("r", "loc", "y", self.Ly)
-        self.mapdl.lesize("all", ndiv=self.Nz, kforc=1)
-
-        # Restore full selection of entities
-        self.mapdl.allsel()
-
-        # Mesh the volume using the swept mesh command
-        self.mapdl.vsweep("all")
-
-        # Store element numbers in the order they were created
-        # This is crucial for maintaining consistent indexing between
-        # density input and strain energy output
+        # Verify the mesh was created correctly
         self.element_numbers = self.mapdl.mesh.enum
-
-        # Validate and log element numbering
-        n_elements = self.Nx * self.Ny * self.Nz
-        if len(self.element_numbers) != n_elements:
-            raise ValueError(
-                f"Number of created elements {len(self.element_numbers)} does not match "
-                f"expected {n_elements} (Nx={self.Nx}, Ny={self.Ny}, Nz={self.Nz})"
-            )
-        self.n_elements = n_elements
-
-        # Repeat validation for nodes
         self.node_numbers = self.mapdl.mesh.nnum
+        self.n_elements = len(self.element_numbers)
         self.n_nodes = len(self.node_numbers)
 
-        logger.debug(
-            f"Element numbers: min={self.element_numbers.min()}, "
-            f"max={self.element_numbers.max()}, "
-            f"first 5={self.element_numbers[:5]}"
+        logger.info(f"Mesh created: {self.n_nodes} nodes, {self.n_elements} elements")
+
+        # Validate counts
+        if self.n_nodes != self.hex_mesh.n_points:
+            raise ValueError(
+                f"Node count mismatch: created {self.n_nodes}, expected {self.hex_mesh.n_points}"
+            )
+
+        if self.n_elements != self.hex_mesh.n_faces:
+            raise ValueError(
+                f"Element count mismatch: created {self.n_elements}, expected {self.hex_mesh.n_faces}"
+            )
+
+        # Verify sequential numbering (should always be true with direct creation)
+        is_sequential_nodes = np.array_equal(
+            self.node_numbers, np.arange(1, self.n_nodes + 1)
+        )
+        is_sequential_elements = np.array_equal(
+            self.element_numbers, np.arange(1, self.n_elements + 1)
         )
 
-        # Check if element numbering is sequential starting from 1
-        is_sequential = np.array_equal(
-            self.element_numbers, np.arange(1, n_elements + 1)
-        )
-        if is_sequential:
-            logger.info("Element numbering is sequential (1, 2, 3, ...)")
-        else:
+        if not is_sequential_nodes or not is_sequential_elements:
             logger.warning(
-                "Element numbering is NOT sequential - reordering will be applied"
+                f"Non-sequential numbering detected: nodes={is_sequential_nodes}, elements={is_sequential_elements}"
+            )
+        else:
+            logger.info(
+                "Verified: Node and element numbering is sequential (1, 2, 3, ...)"
             )
 
     @log_timing
     def _apply_boundary_conditions(self) -> None:
-        """Apply boundary conditions, forces, and visualize.
+        """Apply boundary conditions and forces using batch commands for efficiency.
 
-        Fixes all nodes on the x=0 plane by constraining all translational
-        degrees of freedom (UX, UY, UZ). Then applies a concentrated force
-        in the negative z-direction to nodes at x=Lx, y=Ly, and z between
-        0.4*Lz and 0.6*Lz.
+        Since nodes are created with direct correspondence (node i+1 = points[i]),
+        we can directly reference node numbers in D and F commands. All commands
+        are batched using input_strings for optimal performance.
         """
-        # Select all nodes on the x=0 plane
-        self.mapdl.nsel("s", "loc", "x", 0)
+        commands = []
 
-        # Apply displacement constraints (fix all DOFs: UX, UY, UZ)
-        self.mapdl.d("all", "all", 0)
+        # Build Dirichlet boundary condition commands
+        n_dirichlet = len(self.dirichlet_mask)
+        logger.info(f"Applying Dirichlet BCs to {n_dirichlet} nodes")
 
-        # Reselect all nodes
-        self.mapdl.allsel()
+        for i, x in zip(self.dirichlet_mask, self.dirichlet_values, strict=True):
+            # Point index i corresponds to node number i+1
+            node = i + 1
+            # D,NODE,ALL,VALUE constrains all DOFs to value x
+            commands.append(f"D,{node},ALL,{x}")
 
-        # Apply force to nodes at x=Lx, y=0, z between 0.4*Lz and 0.6*Lz
-        # Select nodes at x=Lx
-        self.mapdl.nsel("s", "loc", "x", self.Lx)
+        # Build von Neumann boundary condition (force) commands
+        n_von_neumann = len(self.van_neumann_mask)
+        logger.info(f"Applying von Neumann BCs to {n_von_neumann} nodes")
 
-        # Refine selection between y=0 and y=0.2 Ly
-        y_max = 0.2 * self.Ly
-        self.mapdl.nsel("r", "loc", "y", 0, y_max)
+        for i, f in zip(self.van_neumann_mask, self.van_neumann_values, strict=True):
+            # Point index i corresponds to node number i+1
+            node = i + 1
+            # F,NODE,Lab,VALUE applies force component
+            # Only add commands for non-zero force components
+            if f[0] != 0:
+                commands.append(f"F,{node},FX,{f[0]}")
+            if f[1] != 0:
+                commands.append(f"F,{node},FY,{f[1]}")
+            if f[2] != 0:
+                commands.append(f"F,{node},FZ,{f[2]}")
 
-        # Refine selection to z between 0.4*Lz and 0.6*Lz
-        z_min = 0.4 * self.Lz
-        z_max = 0.6 * self.Lz
-        self.mapdl.nsel("r", "loc", "z", z_min, z_max)
-
-        # Get number of selected nodes
-        num_nodes = self.mapdl.mesh.n_node
-
-        # Calculate force per node (negative for downward direction)
-        force_per_node = -self.total_force / num_nodes
-
-        # Apply force in negative z-direction to all selected nodes
-        self.mapdl.f("all", "fz", force_per_node)
-
-        # Reselect all nodes
-        self.mapdl.allsel()
-
-        logger.info(
-            f"Applied total force of {self.total_force} N distributed over {num_nodes} nodes"
-        )
+        # Execute all boundary condition commands at once
+        logger.debug(f"Executing {len(commands)} boundary condition commands")
+        self.mapdl.input_strings(commands)
 
     @log_timing
     def _run_analysis(self) -> None:
@@ -533,7 +475,7 @@ class SIMPElasticity:
         nodal_displacement = np.zeros((self.n_nodes, 3))
         nnum, disp = self.mapdl.result.nodal_displacement(0)  # 0 for first result set
         # populate nodal_displacement using vectorized NumPy indexing
-        nodal_displacement[nnum - 1] = disp
+        nodal_displacement[nnum - 1] = disp[:, 0:3]
         self.nodal_displacement = nodal_displacement
 
     @log_timing
@@ -580,9 +522,11 @@ class SIMPElasticity:
         inverse_rho = np.nan_to_num(1 / self.rho.flatten(), nan=0.0)
         self.sensitivity = -2.0 * self.p * inverse_rho * self.strain_energy.flatten()
 
-        # TODO improve this cache?
-        # stash the sensitivity s.t. it may be loaded in the vjp
-        np.save("sensitivity.npy", self.sensitivity)
+        # Cache sensitivity in temporary directory for use in VJP
+        import tempfile
+
+        sensitivity_path = os.path.join(tempfile.gettempdir(), "sensitivity.npy")
+        np.save(sensitivity_path, self.sensitivity)
 
     @log_timing
     def _create_pvmesh(self) -> None:
@@ -674,16 +618,55 @@ def apply(inputs: InputSchema) -> OutputSchema:
     return solver.solve()
 
 
-# TODO
-# def vector_jacobian_product(
-#     inputs: InputSchema,
-#     vjp_inputs: set[str],
-#     vjp_outputs: set[str],
-#     cotangent_vector: dict[str, Any],
-# ):
-#     pass
-#
-#
-# def abstract_eval(abstract_inputs):
-#     """Calculate output shape of apply from the shape of its inputs."""
-#     return {"compliance": ShapeDType(shape=(), dtype="float32")}
+def vector_jacobian_product(
+    inputs: InputSchema,
+    vjp_inputs: set[str],
+    vjp_outputs: set[str],
+    cotangent_vector: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute vector-Jacobian product for backpropagation through ANSYS solve.
+
+    The sensitivity (dcompliance/drho) is already computed and cached during
+    the forward pass in _calculate_sensitivity(), so we just need to load it
+    and multiply by the upstream gradient.
+
+    Args:
+        inputs: Original inputs to the forward pass (InputSchema)
+        vjp_inputs: Set of input names we need gradients for (e.g., {"rho"})
+        vjp_outputs: Set of output names being differentiated (e.g., {"compliance"})
+        cotangent_vector: Upstream gradients from the loss function
+                         (e.g., {"compliance": dloss/dcompliance})
+
+    Returns:
+        Dictionary mapping input names to their gradients
+        (e.g., {"rho": dloss/∂rho})
+
+    """
+    gradients = {}
+    assert vjp_inputs == {"rho"}
+    assert vjp_outputs == {"compliance"}
+
+    # Load the cached sensitivity (∂compliance/∂rho) from temporary directory
+    # This was computed and saved in _calculate_sensitivity()
+    import tempfile
+
+    sensitivity_path = os.path.join(tempfile.gettempdir(), "sensitivity.npy")
+    sensitivity = np.load(sensitivity_path)
+
+    # Clean up the temporary file after loading
+    try:
+        os.unlink(sensitivity_path)
+    except FileNotFoundError:
+        pass  # Already deleted, no problem
+
+    grad_rho_flat = cotangent_vector["compliance"] * sensitivity
+
+    # Reshape to match input rho shape
+    gradients["rho"] = grad_rho_flat.reshape(inputs.rho.shape)
+
+    return gradients
+
+
+def abstract_eval(abstract_inputs):
+    """Calculate output shape of apply from the shape of its inputs."""
+    return {"compliance": ShapeDType(shape=(), dtype="float32")}
