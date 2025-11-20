@@ -456,40 +456,48 @@ def apply_fn(inputs: dict) -> dict:
     cells_padded = jnp.zeros((max_cells, 8), dtype=cells.dtype)
     cells_padded = cells_padded.at[: cells.shape[0], :].set(cells)
 
+    # Integral volumes trick for O(N) hex mesh integration
+    # This works ONLY because all hexes are axis aligned
+
+    # helper function to find indices on grid of mesh points
     def discretize(coord):
         coord = coord + jnp.array([Lx / 2, Ly / 2, Lz / 2])
         coord = coord / jnp.array([Lx, Ly, Lz])
         coord = coord * jnp.array([field_values.shape])
         return jnp.floor(coord).astype(jnp.int32)
 
+    # discretized coordinates / indices
     coords_disc = jax.vmap(discretize, in_axes=0)(pts)[:, 0]
 
+    # volume integral
     integral = compute_integral_volume(field_values)
 
+    # obtain integral values at corresponding points
     ind = coords_disc[cells[:, 0]]
-    cell_000 = integral[ind[0], ind[1], ind[2]]
+    cell_000 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 1]]
-    cell_100 = integral[ind[0], ind[1], ind[2]]
+    cell_100 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 2]]
-    cell_110 = integral[ind[0], ind[1], ind[2]]
+    cell_110 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 3]]
-    cell_010 = integral[ind[0], ind[1], ind[2]]
+    cell_010 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 4]]
-    cell_001 = integral[ind[0], ind[1], ind[2]]
+    cell_001 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 5]]
-    cell_101 = integral[ind[0], ind[1], ind[2]]
+    cell_101 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 6]]
-    cell_111 = integral[ind[0], ind[1], ind[2]]
+    cell_111 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
     ind = coords_disc[cells[:, 7]]
-    cell_011 = integral[ind[0], ind[1], ind[2]]
+    cell_011 = integral[ind[:, 0], ind[:, 1], ind[:, 2]]
 
+    # sum up
     total_sum = (
         cell_111
         - cell_011
@@ -501,11 +509,13 @@ def apply_fn(inputs: dict) -> dict:
         - cell_000
     )
 
+    # Obtain discrete volume (number of grid points assigned to each hex)
     volume = jnp.prod(
         jnp.abs(coords_disc[cells[:, 6]] - coords_disc[cells[:, 0]]), axis=-1
     )
     volume = jnp.maximum(volume, 1.0)
 
+    # Normalize sum by dividing through volume
     cell_values = total_sum / volume
 
     cell_values_padded = jnp.zeros((max_cells,), dtype=jnp.float32)
