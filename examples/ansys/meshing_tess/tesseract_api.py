@@ -271,7 +271,7 @@ def remove_duplicate_points(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Remove duplicate points from the mesh and update hex cell indices."""
     # TODO: remove rounding after removing duplicate points
-    pts_coords = jnp.round(pts_coords, decimals=5)
+    pts_coords = jnp.round(pts_coords, decimals=4)
     _, indices, inverse_indices = jnp.unique(
         pts_coords, axis=0, return_index=True, return_inverse=True
     )
@@ -381,9 +381,9 @@ def generate_mesh(
     # get largest cell size
     max_size = jnp.max(sizing_field)
 
-    Nx = int(Lx / max_size)
-    Ny = int(Ly / max_size)
-    Nz = int(Lz / max_size)
+    Nx = max(int(Lx / max_size), 2)
+    Ny = max(int(Ly / max_size), 2)
+    Nz = max(int(Lz / max_size), 2)
 
     initial_pts, initial_hex_cells = hex_grid(Lx, Ly, Lz, Nx, Ny, Nz)
 
