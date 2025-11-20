@@ -1,12 +1,13 @@
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 
 # import numpy as jnp
 from jax.scipy.interpolate import RegularGridInterpolator
 from pydantic import BaseModel, Field
-from scipy.interpolate import griddata
 from tesseract_core.runtime import Array, Differentiable, Float32, Int32, ShapeDType
+from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
 
 #
 # Schemata
@@ -400,59 +401,135 @@ def generate_mesh(
     return pts, cells
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
-    """Generate hexahedral mesh and interpolate field values onto cell centers.
+def compute_integral_volume(grid):
+    """Computes the integral volume (3D cumulative sum) of the grid.
 
     Args:
-        inputs: InputSchema, inputs to the function.
+        grid: grid values
+    """
+    # We pad with one layer of zeros on the 'left' of every dimension.
+    # This handles the boundary condition where a hex starts at index 0.
+    # Cumulative sum along Depth, Height, and Width
+    integral = jnp.cumsum(grid, axis=-1)
+    integral = jnp.cumsum(integral, axis=-2)
+    integral = jnp.cumsum(integral, axis=-3)
+
+    # Pad with zeros at the beginning of each spatial dimension
+    padding = [(0, 0)] * (grid.ndim - 3) + [(1, 0), (1, 0), (1, 0)]
+    integral_padded = jnp.pad(integral, padding, mode="constant", constant_values=0)
+
+    return integral_padded
+
+
+def apply_fn(inputs: dict) -> dict:
+    """Compute the compliance of the structure given a density field.
+
+    Args:
+        inputs: Dictionary containing input parameters and density field.
 
     Returns:
-        OutputSchema, outputs of the function.
+        Dictionary containing the compliance of the structure.
     """
-    Lx = inputs.domain_size[0]
-    Ly = inputs.domain_size[1]
-    Lz = inputs.domain_size[2]
+    Lx = inputs["domain_size"][0]
+    Ly = inputs["domain_size"][1]
+    Lz = inputs["domain_size"][2]
+
+    field_values = inputs["field_values"]
+    max_points = inputs["max_points"]
+    max_cells = inputs["max_cells"]
+    sizing_field = inputs["sizing_field"]
+    max_levels = inputs["max_subdivision_levels"]
+
+    # no stop grads
     pts, cells = generate_mesh(
         Lx=Lx,
         Ly=Ly,
         Lz=Lz,
-        sizing_field=inputs.sizing_field,
-        max_levels=inputs.max_subdivision_levels,
+        sizing_field=sizing_field,
+        max_levels=max_levels,
     )
 
-    pts_padded = jnp.zeros((inputs.max_points, 3), dtype=pts.dtype)
+    print("Done building mesh")
+
+    pts_padded = jnp.zeros((max_points, 3), dtype=pts.dtype)
     pts_padded = pts_padded.at[: pts.shape[0], :].set(pts)
-    cells_padded = jnp.zeros((inputs.max_cells, 8), dtype=cells.dtype)
+    cells_padded = jnp.zeros((max_cells, 8), dtype=cells.dtype)
     cells_padded = cells_padded.at[: cells.shape[0], :].set(cells)
 
-    xs = jnp.linspace(-Lx / 2, Lx / 2, inputs.field_values.shape[0])
-    ys = jnp.linspace(-Ly / 2, Ly / 2, inputs.field_values.shape[1])
-    zs = jnp.linspace(-Lz / 2, Lz / 2, inputs.field_values.shape[2])
+    def discretize(coord):
+        coord = coord + jnp.array([Lx / 2, Ly / 2, Lz / 2])
+        coord = coord / jnp.array([Lx, Ly, Lz])
+        coord = coord * jnp.array([field_values.shape])
+        return jnp.floor(coord).astype(jnp.int32)
 
-    interpolator = RegularGridInterpolator(
-        (xs, ys, zs),
-        inputs.field_values,
-        method="linear",
-        bounds_error=False,
-        fill_value=-1,
+    coords_disc = jax.vmap(discretize, in_axes=0)(pts)[:, 0]
+
+    integral = compute_integral_volume(field_values)
+
+    ind = coords_disc[cells[:, 0]]
+    cell_000 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 1]]
+    cell_100 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 2]]
+    cell_110 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 3]]
+    cell_010 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 4]]
+    cell_001 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 5]]
+    cell_101 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 6]]
+    cell_111 = integral[ind[0], ind[1], ind[2]]
+
+    ind = coords_disc[cells[:, 7]]
+    cell_011 = integral[ind[0], ind[1], ind[2]]
+
+    total_sum = (
+        cell_111
+        - cell_011
+        - cell_101
+        - cell_110
+        + cell_001
+        + cell_010
+        + cell_100
+        - cell_000
     )
 
-    cell_centers = jnp.mean(pts[cells], axis=1)
+    volume = jnp.prod(
+        jnp.abs(coords_disc[cells[:, 6]] - coords_disc[cells[:, 0]]), axis=-1
+    )
+    volume = jnp.maximum(volume, 1.0)
 
-    cell_values = interpolator(cell_centers)
+    cell_values = total_sum / volume
 
-    cell_values_padded = jnp.zeros((inputs.max_cells,), dtype=cell_values.dtype)
+    cell_values_padded = jnp.zeros((max_cells,), dtype=jnp.float32)
     cell_values_padded = cell_values_padded.at[: cell_values.shape[0]].set(cell_values)
 
-    return OutputSchema(
-        mesh=HexMesh(
-            points=pts_padded.astype(jnp.float32),
-            faces=cells_padded.astype(jnp.int32),
-            n_points=pts.shape[0],
-            n_faces=cells.shape[0],
-        ),
-        mesh_cell_values=cell_values_padded,
-    )
+    return {
+        "mesh": {
+            "points": pts_padded.astype(jnp.float32),
+            "faces": cells_padded.astype(jnp.int32),
+            "n_points": pts.shape[0],
+            "n_faces": cells.shape[0],
+        },
+        "mesh_cell_values": cell_values_padded.astype(jnp.float32),
+    }
+
+
+#
+# Tesseract endpoints
+#
+
+
+def apply(inputs: InputSchema) -> OutputSchema:
+    """Compute the compliance of the structure given a density field."""
+    return apply_fn(inputs.model_dump())
 
 
 def vector_jacobian_product(
@@ -461,55 +538,28 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ) -> dict[str, Any]:
-    """Compute vector-Jacobian product for the apply function.
-
-    Our cotangent gradient is defined on the cells centers
-    we need to backpropagate it to the field values defined on the regular grid
-    this can be done using interpolation
-    We need to have the mesh cell center positions here, so instead of recomputing the mesh,
-    lets use the cached mesh from the last forward pass
-    print(generate_mesh.cache_info())
+    """Compute vector-Jacobian product for specified inputs and outputs.
 
     Args:
-        inputs: InputSchema, inputs to the apply function.
-        vjp_inputs: set of input variable names for which to compute the VJP.
-        vjp_outputs: set of output variable names for which the cotangent vector is provided.
-        cotangent_vector: dict mapping output variable names to their cotangent vectors.
+        inputs: InputSchema instance containing input parameters and density field.
+        vjp_inputs: Set of input variable names for which to compute gradients.
+        vjp_outputs: Set of output variable names with respect to which to compute gradients.
+        cotangent_vector: Dictionary containing cotangent vectors for the specified outputs.
 
     Returns:
-        dict mapping input variable names to their VJP results.
+        Dictionary containing the vector-Jacobian product for the specified inputs.
     """
     assert vjp_inputs == {"field_values"}
     assert vjp_outputs == {"mesh_cell_values"}
 
-    Lx = inputs.domain_size[0]
-    Ly = inputs.domain_size[1]
-    Lz = inputs.domain_size[2]
+    inputs = inputs.model_dump()
 
-    pts, cells = generate_mesh(
-        Lx=Lx,
-        Ly=Ly,
-        Lz=Lz,
-        sizing_field=inputs.sizing_field,
-        max_levels=inputs.max_subdivision_levels,
+    filtered_apply = filter_func(apply_fn, inputs, vjp_outputs)
+    _, vjp_func = jax.vjp(
+        filtered_apply, flatten_with_paths(inputs, include_paths=vjp_inputs)
     )
-
-    cell_centers = jnp.mean(pts[cells], axis=1)
-
-    xs = jnp.linspace(-Lx / 2, Lx / 2, inputs.field_values.shape[0])
-    ys = jnp.linspace(-Ly / 2, Ly / 2, inputs.field_values.shape[1])
-    zs = jnp.linspace(-Lz / 2, Lz / 2, inputs.field_values.shape[2])
-    xs, ys, zs = jnp.meshgrid(xs, ys, zs, indexing="ij")
-
-    field_cotangent_vector = griddata(
-        cell_centers,
-        cotangent_vector["mesh_cell_values"][: cells.shape[0]],
-        (xs, ys, zs),
-        method="nearest",
-        # fill_value=0.0,
-    )
-
-    return {"field_values": jnp.array(field_cotangent_vector).astype(jnp.float32)}
+    out = vjp_func(cotangent_vector)[0]
+    return out
 
 
 def abstract_eval(abstract_inputs: InputSchema) -> dict[str, ShapeDType]:
