@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Any
 
 import numpy as np
+import pyvista as pv
 import trimesh
 from pydantic import BaseModel, Field
 from pysdf import SDF
@@ -93,6 +94,10 @@ class InputSchema(BaseModel):
     max_faces: int = Field(
         default=2000,
         description=("Maximum number of faces in the output mesh."),
+    )
+    sdf_backend: str = Field(
+        default="pysdf",
+        description=("Backend used to compute the SDF. Can be either pysdf or pyvista"),
     )
 
 
@@ -199,7 +204,33 @@ def grid_points(
     return np.vstack((x.ravel(), y.ravel(), z.ravel())).T
 
 
-def compute_sdf(
+def compute_sdf_pyvista(
+    geometry: trimesh.Trimesh,
+    grid_center: list[float],
+    Lx: float,
+    Ly: float,
+    Lz: float,
+    Nx: int,
+    Ny: int,
+    Nz: int,
+) -> np.ndarray:
+    pv_mesh = pv.wrap(geometry)
+    grid = pv.ImageData(
+        dimensions=(Nx, Ny, Nz),
+        spacing=(Lx / Nx, Ly / Ny, Lz / Nz),
+        origin=(
+            grid_center[0] - Lx / 2,
+            grid_center[1] - Ly / 2,
+            grid_center[2] - Lz / 2,
+        ),
+    )
+
+    sdf = grid.compute_implicit_distance(pv_mesh)
+
+    return sdf["implicit_distance"].reshape(Nx, Ny, Nz, order="F")
+
+
+def compute_sdf_pysdf(
     geometry: trimesh.Trimesh,
     grid_center: list[float],
     Lx: float,
@@ -243,6 +274,7 @@ def geometries_and_sdf(
     grid_size: np.ndarray,
     grid_elements: np.ndarray,
     grid_center: np.ndarray,
+    sdf_backend: str,
 ) -> tuple[list[np.ndarray], list[trimesh.Trimesh]]:
     """Get the sdf values of a the geometry defined by the parameters as a 2D array."""
     geos = get_geometries(
@@ -258,7 +290,18 @@ def geometries_and_sdf(
     geos = [geo.apply_scale(scale_mesh) for geo in geos]
 
     sd_fields = [
-        compute_sdf(
+        compute_sdf_pysdf(
+            geo,
+            grid_center=grid_center,
+            Lx=grid_size[0],
+            Ly=grid_size[1],
+            Lz=grid_size[2],
+            Nx=grid_elements[0],
+            Ny=grid_elements[1],
+            Nz=grid_elements[2],
+        )
+        if sdf_backend == "pysdf"
+        else compute_sdf_pyvista(
             geo,
             grid_center=grid_center,
             Lx=grid_size[0],
@@ -302,6 +345,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
         scale_mesh=inputs.scale_mesh,
         grid_elements=inputs.grid_elements,
         grid_center=inputs.grid_center,
+        sdf_backend=inputs.sdf_backend,
     )
 
     sdf = sdfs[0]  # only one geometry
@@ -331,6 +375,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
             grid_elements=inputs.grid_elements,
             grid_center=inputs.grid_center,
             epsilon=inputs.epsilon,
+            sdf_backend=inputs.sdf_backend,
         )
 
         global jacobian_future
@@ -360,6 +405,7 @@ def jac_sdf_wrt_params(
     grid_elements: np.ndarray,
     grid_center: np.ndarray,
     epsilon: float,
+    sdf_backend: str,
 ) -> np.ndarray:
     """Compute the Jacobian of the SDF values with respect to the parameters.
 
@@ -398,6 +444,7 @@ def jac_sdf_wrt_params(
         grid_elements=grid_elements,
         grid_size=grid_size,
         grid_center=grid_center,
+        sdf_backend=sdf_backend,
     )
 
     for i in range(n_params):
@@ -406,25 +453,13 @@ def jac_sdf_wrt_params(
     return jac.astype(np.float32)
 
 
-def vector_jacobian_product(
+def jacobian(
     inputs: InputSchema,
-    vjp_inputs: set[str],
-    vjp_outputs: set[str],
-    cotangent_vector: dict[str, Any],
-) -> dict[str, Any]:
-    """Compute vector-Jacobian product for backpropagation.
-
-    Args:
-        inputs: Input schema containing bar geometry parameters.
-        vjp_inputs: Set of input variable names for gradient computation.
-        vjp_outputs: Set of output variable names for gradient computation.
-        cotangent_vector: Cotangent vectors for the specified outputs.
-
-    Returns:
-        Dictionary containing VJP for the specified inputs.
-    """
-    assert vjp_inputs == {"differentiable_parameters"}
-    assert vjp_outputs == {"sdf"}
+    jac_inputs: set[str],
+    jac_outputs: set[str],
+):
+    assert jac_inputs == {"differentiable_parameters"}
+    assert jac_outputs == {"sdf"}
 
     # lets also check if the thread is still running
     if jacobian_future is not None:
@@ -450,12 +485,40 @@ def vector_jacobian_product(
             grid_elements=inputs.grid_elements,
             epsilon=inputs.epsilon,
             grid_center=inputs.grid_center,
+            sdf_backend=inputs.sdf_backend,
         )
     if inputs.normalize_jacobian:
         n_elements = (
             inputs.grid_elements[0] * inputs.grid_elements[1] * inputs.grid_elements[2]
         )
         jac = jac / n_elements
+
+    jacobian = {"sdf": {"differentiable_parameters": jac}}
+
+    return jacobian
+
+
+def vector_jacobian_product(
+    inputs: InputSchema,
+    vjp_inputs: set[str],
+    vjp_outputs: set[str],
+    cotangent_vector: dict[str, Any],
+) -> dict[str, Any]:
+    """Compute vector-Jacobian product for backpropagation.
+
+    Args:
+        inputs: Input schema containing bar geometry parameters.
+        vjp_inputs: Set of input variable names for gradient computation.
+        vjp_outputs: Set of output variable names for gradient computation.
+        cotangent_vector: Cotangent vectors for the specified outputs.
+
+    Returns:
+        Dictionary containing VJP for the specified inputs.
+    """
+    assert vjp_inputs == {"differentiable_parameters"}
+    assert vjp_outputs == {"sdf"}
+
+    jac = jacobian(inputs, vjp_inputs, vjp_outputs)["sdf"]["differentiable_parameters"]
     # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
     vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"])
 
