@@ -1,15 +1,14 @@
 # ANSYS Tesseract Integration
 
-This directory contains an example Tesseract configuration and scripts demonstrating how to use Tesseract-JAX with ANSYS spaceclaim and PyMAPDL.
+This directory contains an example Tesseract configuration and scripts demonstrating how to use Tesseract-JAX with ANSYS spaceclaim and PyMAPDL. The overall worklflow is illustrated below:
 
-![Mesh over optimization](mesh_optim.gif)
-![Rho over optimization](rho_optim_x.gif)
+![Workflow](workflow.png)
 
 ## Get Started
 
 ### PL internal instructions:
 
-- Our open ports are: 443 and 50052.
+- Our open ports are: 443, 8000 and 50052.
 - Make sure to be connected to the PL VPN.
 
 ### Prerequisites

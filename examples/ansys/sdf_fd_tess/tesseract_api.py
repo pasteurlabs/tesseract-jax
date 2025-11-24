@@ -519,8 +519,7 @@ def vector_jacobian_product(
     assert vjp_outputs == {"sdf"}
 
     jac = jacobian(inputs, vjp_inputs, vjp_outputs)["sdf"]["differentiable_parameters"]
-    # Reduce the cotangent vector to the shape of the Jacobian, to compute VJP by hand
-    vjp = np.einsum("klmn,lmn->k", jac, cotangent_vector["sdf"])
+    vjp = np.einsum("lmn,klmn->k", cotangent_vector["sdf"], jac)
 
     return {"differentiable_parameters": vjp}
 
