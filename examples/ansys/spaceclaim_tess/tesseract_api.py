@@ -119,8 +119,6 @@ def build_geometries(
             mesh = trimesh.load(output_stl)
             meshes.append(mesh)
 
-    meshes.reverse()
-
     return meshes
 
 
