@@ -119,7 +119,7 @@ def build_geometries(
             mesh = trimesh.load(output_stl)
             meshes.append(mesh)
 
-    return meshes
+    return meshes.reverse()
 
 
 def _prep_scscript(
