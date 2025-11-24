@@ -217,7 +217,7 @@ def compute_sdf_pyvista(
     pv_mesh = pv.wrap(geometry)
     grid = pv.ImageData(
         dimensions=(Nx, Ny, Nz),
-        spacing=(Lx / Nx, Ly / Ny, Lz / Nz),
+        spacing=(Lx / (Nx - 1), Ly / (Ny - 1), Lz / (Nz - 1)),
         origin=(
             grid_center[0] - Lx / 2,
             grid_center[1] - Ly / 2,
