@@ -14,11 +14,11 @@ idna==3.11
     # via requests
 jax==0.6.2 ; python_full_version < '3.11'
     # via tesseract-jax
-jax==0.8.0 ; python_full_version >= '3.11'
+jax==0.8.1 ; python_full_version >= '3.11'
     # via tesseract-jax
 jaxlib==0.6.2 ; python_full_version < '3.11'
     # via jax
-jaxlib==0.8.0 ; python_full_version >= '3.11'
+jaxlib==0.8.1 ; python_full_version >= '3.11'
     # via jax
 jinja2==3.1.6
     # via tesseract-core
@@ -28,7 +28,7 @@ markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
-ml-dtypes==0.5.3
+ml-dtypes==0.5.4
     # via
     #   jax
     #   jaxlib
