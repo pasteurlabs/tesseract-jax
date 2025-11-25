@@ -143,3 +143,4 @@ uv.lock
 uv.lock.bak
 
 tmp_img/
+tmp_vtks/

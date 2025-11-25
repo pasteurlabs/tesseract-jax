@@ -116,7 +116,6 @@ def build_geometries(
 
         meshes = []
         for output_stl in sorted(Path(temp_dir).glob("*.stl")):
-            print(output_stl)
             mesh = trimesh.load(output_stl)
             meshes.append(mesh)
 
