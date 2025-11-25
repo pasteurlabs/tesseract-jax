@@ -2,7 +2,9 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
+import mmapy
 import numpy as np
 import pyvista as pv
 from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -159,3 +161,186 @@ def hex_to_pyvista(
         mesh.cell_data[name] = data
 
     return mesh
+
+
+def hex_grid(
+    Lx: float, Ly: float, Lz: float, Nx: int, Ny: int, Nz: int
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Creates a hex mesh with Nx * Ny * Nz points.
+
+    This is (Nx-1) * (Ny-1) * (Nz-1) cells
+    """
+    xs = jnp.linspace(-Lx / 2, Lx / 2, Nx)
+    ys = jnp.linspace(-Ly / 2, Ly / 2, Ny)
+    zs = jnp.linspace(-Lz / 2, Lz / 2, Nz)
+
+    xs, ys, zs = jnp.meshgrid(xs, ys, zs, indexing="ij")
+
+    pts = jnp.stack((xs, ys, zs), -1)
+
+    points_inds = jnp.arange(Nx * Ny * Nz)
+    points_inds_xyz = points_inds.reshape(Nx, Ny, Nz)
+    inds1 = points_inds_xyz[:-1, :-1, :-1]
+    inds2 = points_inds_xyz[1:, :-1, :-1]
+    inds3 = points_inds_xyz[1:, 1:, :-1]
+    inds4 = points_inds_xyz[:-1, 1:, :-1]
+    inds5 = points_inds_xyz[:-1, :-1, 1:]
+    inds6 = points_inds_xyz[1:, :-1, 1:]
+    inds7 = points_inds_xyz[1:, 1:, 1:]
+    inds8 = points_inds_xyz[:-1, 1:, 1:]
+
+    cells = jnp.stack(
+        (inds1, inds2, inds3, inds4, inds5, inds6, inds7, inds8), axis=-1
+    ).reshape(-1, 8)
+
+    return pts.reshape(-1, 3), cells
+
+
+class MMAOptimizer:
+    """A wrapper for the MMA optimizer from mmapy.
+
+    Source is github.com/arjendeetman/GCMMA-MMA-Python.
+    mmapy is a pretty barebones implementation of MMA in python. It should work for now.
+    Alternatives to consider:
+    - github.com/LLNL/pyMMAopt
+    - pyopt.org/reference/optimizers.mma.html.
+
+    """
+
+    def __init__(
+        self,
+        x_init: jax.typing.ArrayLike,
+        x_min: jax.typing.ArrayLike,
+        x_max: jax.typing.ArrayLike,
+        num_constraints: jax.typing.ArrayLike,
+        constraint_scale: jax.typing.ArrayLike = 1000.0,
+        x_update_limit: jax.typing.ArrayLike = 0.1,
+    ) -> None:
+        self.n = x_init.shape[0]
+        self.m = num_constraints
+        self.__check_input_sizes(x_init, x_min, x_max)
+
+        # follow the original MMA variable names...
+        self.asyinit = 0.5
+        self.asyincr = 1.2
+        self.asydecr = 0.7
+        self.objective_scale: float = 100.0
+        self.objective_scale_factor: float = 1.0
+
+        self.eeen = np.ones((self.n, 1))
+        self.eeem = np.ones((self.m, 1))
+        self.zeron = np.zeros((self.n, 1))
+        self.zerom = np.zeros((self.m, 1))
+
+        self.xval = x_init
+        self.xold1 = self.xval.copy()
+        self.xold2 = self.xval.copy()
+        self.x_min = x_min
+        self.x_max = x_max
+        self.low = self.x_min.copy()
+        self.upp = self.x_max.copy()
+        self.c = constraint_scale + self.zerom.copy()
+        self.d = self.zerom.copy()
+        self.a0 = 1
+        self.a = self.zerom.copy()
+        self.move = x_update_limit
+
+    def calculate_next_x(
+        self,
+        objective_value: jax.typing.ArrayLike,
+        objective_gradient: jax.typing.ArrayLike,
+        constraint_values: jax.typing.ArrayLike,
+        constraint_gradients: jax.typing.ArrayLike,
+        iteration: int,
+        x: jax.typing.ArrayLike,
+        x_min: jax.typing.ArrayLike = None,
+        x_max: jax.typing.ArrayLike = None,
+    ) -> jax.typing.ArrayLike:
+        if iteration < 1:
+            raise Exception("The MMA problem expects an iteration count >= 1.")
+
+        # The MMA problem works best with an objective scaled around [1, 100]
+        if iteration == 1:
+            self.objective_scale_factor = np.abs(self.objective_scale / objective_value)
+        objective_value *= self.objective_scale_factor
+        objective_gradient = (
+            np.asarray(objective_gradient) * self.objective_scale_factor
+        )
+
+        # the bounds dont necessarily change every iteration
+        if x_min is None:
+            x_min = self.x_min
+        if x_max is None:
+            x_max = self.x_max
+
+        self.__check_input_sizes(
+            x,
+            x_min,
+            x_max,
+            objective_gradient=objective_gradient,
+            constraint_values=constraint_values,
+            constraint_gradients=constraint_gradients,
+        )
+
+        # calculate the next iteration of x
+        xmma, _ymma, _zmma, _lam, _xsi, _eta, _mu, _zet, _s, low, upp = mmapy.mmasub(
+            self.m,
+            self.n,
+            iteration,
+            x,
+            x_min,
+            x_max,
+            self.xold1,
+            self.xold2,
+            objective_value,
+            objective_gradient,
+            constraint_values,
+            constraint_gradients,
+            self.low,
+            self.upp,
+            self.a0,
+            self.a,
+            self.c,
+            self.d,
+            move=self.move,
+            asyinit=self.asyinit,
+            asyincr=self.asyincr,
+            asydecr=self.asydecr,
+        )
+        # update internal copies for mma
+        self.xold2 = self.xold1.copy()
+        self.xold1 = self.xval.copy()
+        self.xval = xmma.copy()
+        self.low = low
+        self.upp = upp
+
+        return xmma
+
+    def __check_input_sizes(
+        self,
+        x: jax.typing.ArrayLike,
+        x_min: jax.typing.ArrayLike,
+        x_max: jax.typing.ArrayLike,
+        objective_gradient: jax.typing.ArrayLike = None,
+        constraint_values: jax.typing.ArrayLike = None,
+        constraint_gradients: jax.typing.ArrayLike = None,
+    ) -> None:
+        def check_shape(shape: tuple, expected_shape: tuple, name: str) -> None:
+            if (len(shape) == 1) or (
+                shape[0] != expected_shape[0] or shape[1] != expected_shape[1]
+            ):
+                raise TypeError(
+                    f"MMAError: The '{name}' was expected to have shape {expected_shape} but has shape {shape}."
+                )
+
+        check_shape(x.shape, (self.n, 1), "parameter vector")
+        check_shape(x_min.shape, (self.n, 1), "parameter minimum bound vector")
+        check_shape(x_max.shape, (self.n, 1), "parameter maximum bound vector")
+        if objective_gradient is not None:
+            check_shape(objective_gradient.shape, (self.n, 1), "objective gradient")
+        if constraint_values is not None:
+            check_shape(constraint_values.shape, (self.m, 1), "constraint values")
+        if constraint_gradients is not None:
+            check_shape(
+                constraint_gradients.shape, (self.m, self.n), "constraint gradients"
+            )
