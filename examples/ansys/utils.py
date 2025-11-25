@@ -273,6 +273,12 @@ class MMAOptimizer:
         if x_max is None:
             x_max = self.x_max
 
+        # verify indputs
+        x = self.__preprocess_jnp_array(x)
+        x_min = self.__preprocess_jnp_array(x_min)
+        x_max = self.__preprocess_jnp_array(x_max)
+        constraint_values = self.__preprocess_jnp_array(constraint_values)
+        objective_gradient = self.__preprocess_jnp_array(objective_gradient)
         self.__check_input_sizes(
             x,
             x_min,
@@ -315,6 +321,15 @@ class MMAOptimizer:
         self.upp = upp
 
         return xmma
+
+    def __preprocess_jnp_array(
+        self,
+        x: jax.typing.ArrayLike,
+    ) -> np.array:
+        np_x = np.array(x)
+        if len(np_x.shape) == 1:
+            np_x = np_x[:, None]
+        return np_x
 
     def __check_input_sizes(
         self,
