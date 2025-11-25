@@ -53,10 +53,10 @@ class HexMesh(BaseModel):
         description="Array of hexahedral faces defined by indices into the points array."
     )
     n_points: Int32 = Field(
-        default=0, description="Number of valid points in the points array."
+        default = 0, description="Number of valid points in the points array."
     )
     n_faces: Int32 = Field(
-        default=0, description="Number of valid faces in the faces array."
+        default = 0, description="Number of valid faces in the faces array."
     )
 
 
@@ -158,12 +158,15 @@ class SIMPElasticity:
 
         # Extract input parameters
         self.rho = inputs.rho
-        self.hex_mesh = inputs.hex_mesh
         self.dirichlet_mask = inputs.dirichlet_mask
         self.dirichlet_values = inputs.dirichlet_values
         self.van_neumann_mask = inputs.van_neumann_mask
         self.van_neumann_values = inputs.van_neumann_values
         self.hex_mesh = inputs.hex_mesh
+        if self.hex_mesh.n_faces == 0:
+            self.hex_mesh.n_faces = self.hex_mesh.faces.shape[0]
+        if self.hex_mesh.n_points == 0:
+            self.hex_mesh.n_points = self.hex_mesh.points.shape[0]
         self.E0 = inputs.E0
         self.rho_min = inputs.rho_min
         self.p = inputs.p
@@ -669,4 +672,9 @@ def vector_jacobian_product(
 
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
-    return {"compliance": ShapeDType(shape=(), dtype="float32")}
+    n_faces = abstract_inputs.hex_mesh.faces.shape[0]
+    return {
+        "compliance": ShapeDType(shape=(), dtype="float32"),
+        "strain_energy": ShapeDType(shape=(n_faces,), dtype="float32"),
+        "sensitivity": ShapeDType(shape=(n_faces,), dtype="float32"),
+    }
