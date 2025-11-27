@@ -11,7 +11,10 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 def plot_mesh(
-    mesh: dict, bounds: Sequence[float], save_path: str | None = None
+    mesh: dict,
+    bounds: Sequence[float],
+    save_path: str | None = None,
+    figsize: tuple = (10, 6),
 ) -> None:
     """Plot a 3D triangular mesh with boundary conditions visualization.
 
@@ -19,12 +22,13 @@ def plot_mesh(
         mesh: Dictionary containing 'points' and 'faces' arrays.
         save_path: Optional path to save the plot as an image file.
         bounds: bounds of the 3D space.
+        figsize: size of the matplotlib figure.
     """
     Lx = bounds[0]
     Ly = bounds[1]
     Lz = bounds[2]
 
-    fig = plt.figure(figsize=(10, 8))
+    fig = plt.figure(figsize=figsize)
     ax = fig.add_subplot(111, projection="3d")
     ax.plot_trisurf(
         mesh["points"][:, 0],
@@ -50,10 +54,22 @@ def plot_mesh(
         )
     )
 
+    ax.set_zticks([])
+
     # x axis label
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
+
+    # Tighten layout to reduce whitespace
+    plt.subplots_adjust(
+        left=0.05,
+        right=0.95,  # Adjust as needed
+        bottom=0.05,
+        top=0.95,  # Adjust as needed
+        wspace=0.1,
+        hspace=0.1,
+    )
 
     if save_path:
         # avoid showing the plot in notebook

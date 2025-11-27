@@ -1,6 +1,13 @@
 # Grid fin optimization with ANSYS SpaceClaim and PyANSYS
 
-We want to perform a parameter optimization on a SpaceX-style grid fin geometry to maximize stiffness while maintaining a strict mass limit. This ensures the fin remains rigid during re-entry Max-Q (maximum dynamic pressure) for robust aerodynamic control. To demonstrate a realistic engineering workflow, we demonstrate a gradient based end to optimization that plugs into ANSYS Spaceclaim as a design software and uses PyANSYS to setup a differentiable finite element simulation. The workflow involves three Tesseracts:
+We want to perform a parameter optimization on a SpaceX-style grid fin geometry to maximize stiffness while maintaining a strict mass limit. This ensures the fin remains rigid during re-entry Max-Q (maximum dynamic pressure) for robust aerodynamic control. The 3D mesh looks as follows:
+
+![Workflow](imgs/grid_mesh.png)
+
+
+![Workflow](imgs/boundary_conditions.png)
+
+To demonstrate a realistic engineering workflow, we demonstrate a gradient based end to optimization that plugs into ANSYS Spaceclaim as a design software and uses PyANSYS to setup a differentiable finite element simulation. The workflow involves three Tesseracts:
 
 
 - **Ansys SpaceClaim Tesseract** takes a set of differentiable and non differentiable parameters and injects them into a SpaceClaim script that generates the grid fin geometry. It then returns returns the resulting triangular surface mesh as a list of points and faces. More about this here: ...
@@ -11,7 +18,7 @@ We want to perform a parameter optimization on a SpaceX-style grid fin geometry 
 
 The Tesseracts are then composed into a fully differentiable workflow using Tesseract-JAX.
 
-![Workflow](workflow_1.png)
+![Workflow](imgs/workflow_1.png)
 
 In order to der
 
