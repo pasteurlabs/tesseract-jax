@@ -2,13 +2,15 @@
 
 We want to perform a parameter optimization on a SpaceX-style grid fin geometry to maximize stiffness while maintaining a strict mass limit. This ensures the fin remains rigid during re-entry Max-Q (maximum dynamic pressure) for robust aerodynamic control. For this optimization the starting and ending positions of all the bar segments can be control by setting its angular positions. Hence for 8 segments this results in 16 free parameters. Below there are two images of two selected initial conditions:
 
-| Grid initial conditions | Star initial conditions    |
+| Grid initial conditions | Random initial conditions    |
 | ------------- | ------------- |
-| ![grid](imgs/grid_surface.png) | ![star](imgs/star_surface.png) |
+| ![grid](imgs/grid_surface.png) | ![star](imgs/rnd_surface.png) |
 
 For the boundary conditions, we fix the nuckles as they would be bolted to the rocket by setting the corresponding mesh vertices to Dirichlet. Additionally we add an out of plane load at the very end of the fin geometry. The boundary conditions are illustrated here:
 
 ![BCs](imgs/boundary_conditions.png)
+
+To simulate the grid fin under Max-Q loads, we employ a linear elastic solver, assuming small deformations and Hookean material behavior. Our optimization goal is to maximize stiffness, which is mathematically equivalent to minimizing Compliance. Minimizing Compliance minimizes the total strain energy stored in the body, ensuring the fin remains rigid and aerodynamically effective during re-entry.
 
 
 ## Workflow
@@ -32,4 +34,8 @@ Aditionally there is python code that is responsible for setting the boundary co
 
 ## Optimization
 
-...
+As a very first experiment we compare the compliance of the two initial conditions. The grid arrangement, with a total compliance of 148 is clearly better than the random arrangement that achieves a compliance of 148. Below is a plot of the strain energy and the sensitivies of the compliance field with respect to the density field. A negative sensitivity indicates that the solver suggest adding material in the specified locations. We can observe a tendency to increase the thickness of the bars, indicicated by more negative values that are following the contours of the object. This, however is not possible under the parametrization of the objects.
+
+![Workflow](imgs/sim_comparision.png)
+
+If we apply
