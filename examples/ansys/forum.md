@@ -12,12 +12,11 @@ We are going to use software from the Ansys product collection along with Tesser
 | ------------- | ------------- |
 | ![grid](imgs/grid_surface.png) | ![star](imgs/rnd_surface.png) |
 
-For the Boundary Conditions (BC) we fix the knuckles, as they would be attached to the rocket, by setting the corresponding mesh vertices to Dirichlet. Additionally we add an out of plane load at the very end of the fin geometry. Placing the load here allows us to approximate the aerodynamic forces experience by the whole grid fin whilst de-coupling the load from the bars movement. The boundary conditions are illustrated here:
+For the Boundary Conditions (BC) we fix the knuckles, as they would be attached to the rocket, by setting the corresponding mesh vertices to Dirichlet. Additionally we add an out of plane load at the very end of the fin geometry as a Von Neumann BC. Placing the load here allows us to approximate the aerodynamic forces experience by the whole grid fin whilst de-coupling the load from the bars movement. The boundary conditions are illustrated here:
 
 ![BCs](imgs/boundary_conditions.png)
 
-To simulate the grid fin under Max-Q loads, we employ a linear elastic solver, assuming small deformations and Hookean material behavior. Our optimization goal is to maximize stiffness, which is mathematically equivalent to minimizing Compliance. Minimizing Compliance minimizes the total strain energy stored in the body, ensuring the fin remains rigid and aerodynamically effective during re-entry.
-
+To simulate the grid fin under Max-Q loads, we employ a linear elastic solver, assuming small deformations and Hookean material behavior. Our optimization goal is to maximize stiffness, which is mathematically equivalent to minimizing Compliance.
 
 ## Workflow
 
@@ -44,7 +43,23 @@ As a very first experiment we compare the compliance of the two initial conditio
 
 ![Workflow](imgs/sim_comparision.png)
 
-If we apply
+
+For the optimization we have tried two optimizers, the classical Adam optimizer and Method of Moving Asymptotes (MMA) (Svanberg, 1987). We observed similar performance with the two optimzers, where both were very sensitive to the scale of the gradients and the learning rate.
+
+
+| Adam | MMA    |
+| ------------- | ------------- |
+| ![grid](imgs/rho_grid_adam.gif) | ![star](imgs/rho_grid_mma.gif) |
+| ![grid](imgs/conv_grid_adam.png) | ![star](imgs/conv_grid_mma.png) |
+
+
+When applying the optimization on the random intitial conditions we can a steady decrease in the compliance, where the bars slowly arrange to a more optimal distribution.
+
+| Loss | Surface Mesh    |
+| ------------- | ------------- |
+| ![grid](imgs/conv_rnd_adam.png) | ![star](imgs/rnd_optim_adam_surface.gif) |
+
+
 ...
 
 ## Results
