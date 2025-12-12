@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] - 2025-12-12
+
+### Features
+
+- Selective abstract eval (#85)
+
+### Bug Fixes
+
+- Adapt version of vectoradd_jax to new Tesseract conventions (#86)
+
 ## [0.2.2] - 2025-09-04
 
 ### Features
