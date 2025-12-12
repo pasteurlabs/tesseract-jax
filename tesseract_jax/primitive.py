@@ -332,8 +332,7 @@ def _unpack_hashable(obj: _Hashable) -> Any:
 
 
 def apply_tesseract(
-    tesseract_client: Tesseract,
-    inputs: Any,
+    tesseract_client: Tesseract, inputs: Any, static_arg_names: Sequence[str] = ()
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -367,6 +366,9 @@ def apply_tesseract(
     Args:
         tesseract_client: The Tesseract object to apply.
         inputs: The inputs to apply to the Tesseract object.
+        static_arg_names: Names of input arguments that should be treated as static
+            (i.e., not traced). This is useful for arguments that affect control flow
+            or shape but are not arrays.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -401,7 +403,18 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+    is_static_mask = tuple((_is_static(arg)) for arg in flat_args)
+    paths_and_values, _ = jax.tree.flatten_with_path(inputs)
+    paths_concatenated = [
+        "/".join(key.key for key in path) for path, _ in paths_and_values
+    ]
+    is_static_mask_ = tuple(path in static_arg_names for path in paths_concatenated)
+
+    # or with the previous mask
+    is_static_mask = tuple(
+        a or b for a, b in zip(is_static_mask, is_static_mask_, strict=True)
+    )
+
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
 
