@@ -68,15 +68,15 @@ scipy==1.15.3 ; python_full_version < '3.11'
     # via
     #   jax
     #   jaxlib
-scipy==1.16.3 ; python_full_version >= '3.11'
+scipy==1.17.0 ; python_full_version >= '3.11'
     # via
     #   jax
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==1.2.0
+tesseract-core==1.3.0
     # via tesseract-jax
-typer==0.20.0
+typer==0.21.0
     # via tesseract-core
 typing-extensions==4.15.0
     # via
@@ -86,5 +86,5 @@ typing-extensions==4.15.0
     #   typing-inspection
 typing-inspection==0.4.2
     # via pydantic
-urllib3==2.6.2
+urllib3==2.6.3
     # via requests
