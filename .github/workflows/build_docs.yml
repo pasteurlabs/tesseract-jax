@@ -18,7 +18,7 @@ jobs:
 
     steps:
       - name: Set up Git repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
 
       - name: Install system requirements
         run: |
@@ -33,7 +33,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version-file: "pyproject.toml"
+          python-version: "3.13"
 
       - name: Restore UV environment
         run: cp production.uv.lock uv.lock
@@ -49,7 +49,7 @@ jobs:
           uv run --no-sync make html
 
       - name: Upload HTML files
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         if: ${{ inputs.artifact_name }}
         with:
           name: ${{ inputs.artifact_name }}
