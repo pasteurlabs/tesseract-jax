@@ -85,6 +85,8 @@ def vector_jacobian_product(
     out = {}
     for dx in vjp_inputs:
         out[dx] = sum(jac[dy][dx] * cotangent_vector[dy] for dy in vjp_outputs)
+
+    #
     return out
 
 
