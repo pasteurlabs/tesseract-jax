@@ -22,7 +22,9 @@ jaxlib==0.8.2 ; python_full_version >= '3.11'
     # via jax
 jinja2==3.1.6
     # via tesseract-core
-markdown-it-py==3.0.0
+markdown-it-py==3.0.0 ; python_full_version < '3.11'
+    # via rich
+markdown-it-py==4.0.0 ; python_full_version >= '3.11'
     # via rich
 markupsafe==3.0.3
     # via jinja2
