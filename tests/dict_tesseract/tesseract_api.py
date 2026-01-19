@@ -49,12 +49,12 @@ def jacobian(
 
     jac = {}
 
-    for dx in jac_inputs:
-        jac[dx] = {}
-        for dy in jac_outputs:
-            if dx == "x" and dy == "result":
+    for dy in jac_outputs:
+        jac[dy] = {}
+        for dx in jac_inputs:
+            if dx == "parameters.{x}" and dy == "result":
                 jac[dy][dx] = inputs.parameters["y"]
-            elif dx == "y" and dy == "result":
+            elif dx == "parameters.{y}" and dy == "result":
                 jac[dy][dx] = inputs.parameters["x"]
             else:
                 jac[dy][dx] = jax.numpy.zeros_like(inputs.parameters["x"])

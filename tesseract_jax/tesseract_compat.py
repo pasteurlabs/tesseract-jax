@@ -77,21 +77,105 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _pytree_to_tesseract_flat(pytree: PyTree) -> list[tuple]:
+def _match_path_to_pattern(path_parts: list[str], pattern_parts: list[str]) -> bool:
+    """Check if a concrete path matches a schema pattern.
+
+    Args:
+        path_parts: Concrete path components, e.g., ["outer", "key1", "[0]"]
+        pattern_parts: Schema pattern components, e.g., ["outer", "{}", "[]"]
+
+    Returns:
+        True if path matches pattern
+    """
+    if len(path_parts) != len(pattern_parts):
+        return False
+
+    for path_part, pattern_part in zip(path_parts, pattern_parts, strict=True):
+        if pattern_part == "{}":
+            # Wildcard for dict key - matches any non-bracket identifier
+            if path_part.startswith("["):
+                return False
+        elif pattern_part == "[]":
+            # Wildcard for sequence index - matches [n]
+            if not path_part.startswith("["):
+                return False
+        else:
+            # Literal - must match exactly
+            if path_part != pattern_part:
+                return False
+
+    return True
+
+
+def _format_path_with_pattern(path_parts: list[str], pattern_parts: list[str]) -> str:
+    """Format a path by wrapping dict keys in curly braces based on pattern.
+
+    Args:
+        path_parts: Concrete path components, e.g., ["outer", "key1", "key2"]
+        pattern_parts: Schema pattern components, e.g., ["outer", "{}", "{}"]
+
+    Returns:
+        Formatted path string, e.g., "outer.{key1}.{key2}"
+    """
+    formatted_parts = []
+
+    for path_part, pattern_part in zip(path_parts, pattern_parts, strict=True):
+        if pattern_part == "{}":
+            # Dict key - wrap in curly braces
+            formatted_parts.append(f"{{{path_part}}}")
+        else:
+            # Literal field name or sequence index - use as-is
+            formatted_parts.append(path_part)
+
+    return ".".join(formatted_parts)
+
+
+def _pytree_to_tesseract_flat(
+    pytree: PyTree, schema_paths: dict[str, Any] | None = None
+) -> list[tuple]:
+    """Flatten a pytree to tesseract path format.
+
+    Dict keys are wrapped in curly braces {key} based on schema_paths metadata.
+
+    Args:
+        pytree: The pytree to flatten
+        schema_paths: Optional dict from OpenAPI schema differentiable_arrays.
+                     Used to identify dict fields that need {key} formatting.
+
+    Returns:
+        List of (path_string, value) tuples
+    """
     leaves = jax.tree_util.tree_flatten_with_path(pytree)[0]
+
+    # Parse schema patterns if provided
+    schema_patterns = []
+    if schema_paths:
+        for schema_path in schema_paths.keys():
+            pattern_parts = schema_path.split(".")
+            schema_patterns.append(pattern_parts)
 
     flat_list = []
     for jax_path, val in leaves:
-        tesseract_path = ""
-        first_elem = True
+        # Extract path components
+        path_parts = []
         for elem in jax_path:
             if hasattr(elem, "key"):
-                if not first_elem:
-                    tesseract_path += "."
-                tesseract_path += elem.key
+                path_parts.append(elem.key)
             elif hasattr(elem, "idx"):
-                tesseract_path += f"[{elem.idx}]"
-            first_elem = False
+                path_parts.append(f"[{elem.idx}]")
+
+        # Try to match against schema patterns
+        tesseract_path = None
+        if schema_patterns:
+            for pattern_parts in schema_patterns:
+                if _match_path_to_pattern(path_parts, pattern_parts):
+                    tesseract_path = _format_path_with_pattern(path_parts, pattern_parts)
+                    break
+
+        # Fallback to simple dot-joined path if no pattern matches
+        if tesseract_path is None:
+            tesseract_path = ".".join(path_parts)
+
         flat_list.append((tesseract_path, val))
 
     return flat_list
@@ -210,7 +294,11 @@ class Jaxeract:
             remove_static_args=True,
         )
 
-        flat_tangents = dict(_pytree_to_tesseract_flat(tangent_inputs))
+        flat_tangents = dict(
+            _pytree_to_tesseract_flat(
+                tangent_inputs, schema_paths=self.differentiable_input_paths
+            )
+        )
 
         jvp_inputs = list(flat_tangents.keys())
         jvp_outputs = list(self.differentiable_output_paths.keys())
@@ -225,7 +313,8 @@ class Jaxeract:
         paths = [
             p
             for p, _ in _pytree_to_tesseract_flat(
-                jax.tree.unflatten(output_pytreedef, range(len(output_avals)))
+                jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+                schema_paths=self.differentiable_output_paths,
             )
         ]
 
@@ -256,14 +345,20 @@ class Jaxeract:
             primals, static_args, input_pytreedef, is_static_mask
         )
 
-        in_keys = [k for k, _ in _pytree_to_tesseract_flat(primal_inputs)]
+        in_keys = [
+            k
+            for k, _ in _pytree_to_tesseract_flat(
+                primal_inputs, schema_paths=self.differentiable_input_paths
+            )
+        ]
         vjp_inputs = [o for o, m in zip(in_keys, is_static_mask, strict=True) if not m]
         vjp_outputs = list(self.differentiable_output_paths.keys())
 
         paths = [
             p
             for p, _ in _pytree_to_tesseract_flat(
-                jax.tree.unflatten(output_pytreedef, range(len(output_avals)))
+                jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+                schema_paths=self.differentiable_output_paths,
             )
         ]
 
