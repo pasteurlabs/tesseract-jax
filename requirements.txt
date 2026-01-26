@@ -14,11 +14,11 @@ idna==3.11
     # via requests
 jax==0.6.2 ; python_full_version < '3.11'
     # via tesseract-jax
-jax==0.8.2 ; python_full_version >= '3.11'
+jax==0.9.0 ; python_full_version >= '3.11'
     # via tesseract-jax
 jaxlib==0.6.2 ; python_full_version < '3.11'
     # via jax
-jaxlib==0.8.2 ; python_full_version >= '3.11'
+jaxlib==0.9.0 ; python_full_version >= '3.11'
     # via jax
 jinja2==3.1.6
     # via tesseract-core
@@ -62,7 +62,7 @@ pyyaml==6.0.3
     # via tesseract-core
 requests==2.32.5
     # via tesseract-core
-rich==14.2.0
+rich==14.3.1
     # via
     #   tesseract-core
     #   typer
