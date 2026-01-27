@@ -20,6 +20,8 @@ def get_tesseract_folders():
     tesseract_folders = [
         "univariate_tesseract",
         "nested_tesseract",
+        "non_abstract_tesseract",
+        "dict_tesseract",
         # Add more as needed
     ]
     return tesseract_folders
@@ -86,3 +88,4 @@ def make_tesseract_fixture(folder_name):
 served_univariate_tesseract_raw = make_tesseract_fixture("univariate_tesseract")
 served_nested_tesseract_raw = make_tesseract_fixture("nested_tesseract")
 served_non_abstract_tesseract = make_tesseract_fixture("non_abstract_tesseract")
+served_dict_tesseract = make_tesseract_fixture("dict_tesseract")
