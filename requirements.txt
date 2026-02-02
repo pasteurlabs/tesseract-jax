@@ -50,7 +50,7 @@ numpy==2.3.5 ; python_full_version >= '3.11'
     #   tesseract-core
 opt-einsum==3.4.0
     # via jax
-pip==25.3
+pip==26.0
     # via tesseract-core
 pydantic==2.12.5
     # via tesseract-core
@@ -62,7 +62,7 @@ pyyaml==6.0.3
     # via tesseract-core
 requests==2.32.5
     # via tesseract-core
-rich==14.3.1
+rich==14.3.2
     # via
     #   tesseract-core
     #   typer
