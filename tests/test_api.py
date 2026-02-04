@@ -1,79 +1,70 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests for dict_tesseract API endpoints: primal (apply), vjp, and jacobian."""
-
 import jax
-import numpy as np
 import pytest
-from jax.typing import ArrayLike
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
 
-def _assert_pytree_isequal(a, b, rtol=None, atol=None):
-    """Check if two PyTrees are equal."""
-    a_flat, a_structure = jax.tree.flatten_with_path(a)
-    b_flat, b_structure = jax.tree.flatten_with_path(b)
-
-    if a_structure != b_structure:
-        raise AssertionError(
-            f"PyTree structures are different:\n{a_structure}\n{b_structure}"
-        )
-
-    if rtol is not None or atol is not None:
-        array_compare = lambda x, y: np.testing.assert_allclose(
-            x, y, rtol=rtol, atol=atol
-        )
-    else:
-        array_compare = lambda x, y: np.testing.assert_array_equal(x, y)
-
-    failures = []
-    for (a_path, a_elem), (b_path, b_elem) in zip(a_flat, b_flat, strict=True):
-        assert a_path == b_path, f"Unexpected path mismatch: {a_path} != {b_path}"
-        try:
-            if isinstance(a_elem, ArrayLike) or isinstance(b_elem, ArrayLike):
-                array_compare(a_elem, b_elem)
-            else:
-                assert a_elem == b_elem, f"Values are different: {a_elem} != {b_elem}"
-        except AssertionError as e:
-            failures.append((a_path, str(e)))
-
-    if failures:
-        msg = "\n".join(f"Path: {path}, Error: {error}" for path, error in failures)
-        raise AssertionError(f"PyTree elements are different:\n{msg}")
+def path_to_str(path):
+    """Convert JAX tree path to string like 'alpha.x'."""
+    return ".".join(key.key if hasattr(key, "key") else str(key) for key in path)
 
 
-@pytest.fixture
-def dict_tess() -> Tesseract:
-    """Load dict_tesseract directly from the API file."""
-    return Tesseract.from_tesseract_api("tests/dict_tesseract/tesseract_api.py")
+def filter_by_paths(inputs, paths_to_keep):
+    """Filter pytree keeping only specified paths."""
+    paths_set = set(paths_to_keep)
+
+    def filter_fn(path, x):
+        path_str = path_to_str(path)
+        return x if path_str in paths_set else None
+
+    filtered = jax.tree_util.tree_map_with_path(filter_fn, inputs)
+
+    # Remove None values from the tree
+    def remove_nones(tree):
+        if isinstance(tree, dict):
+            result = {k: remove_nones(v) for k, v in tree.items() if v is not None}
+            return result if result else None
+        return tree
+
+    return remove_nones(filtered) or {}
 
 
-@pytest.fixture
-def dict_tess_inputs() -> dict:
-    """Provide inputs for dict_tesseract tests."""
-    x = np.array([1.0, 2.0, 3.0], dtype="float32")
-    y = np.array([4.0, 5.0, 6.0], dtype="float32")
-    z = np.array([7.0, 8.0, 9.0], dtype="float32")
-    u = np.array([10.0, 11.0, 12.0], dtype="float32")
-    v = np.array([13.0, 14.0, 15.0], dtype="float32")
+def split_by_paths(inputs, diffable_paths):
+    """Split inputs into diffable and non-diffable parts based on path list."""
+    # Get all paths from inputs
+    all_paths = set()
+    jax.tree_util.tree_map_with_path(
+        lambda path, x: all_paths.add(path_to_str(path)), inputs
+    )
 
-    inputs = {
-        "parameters": {
-            "x": x,
-            "y": y,
-        },
-        "nested_parameters": {"z": z, "double_nested_dict": {"u": u, "v": v}},
-    }
+    diffable_paths_set = set(diffable_paths)
+    non_diffable_paths = all_paths - diffable_paths_set
 
-    return inputs
+    diffable = filter_by_paths(inputs, diffable_paths)
+    non_diffable = filter_by_paths(inputs, non_diffable_paths)
+    return diffable, non_diffable
 
 
-# =============================================================================
-# Primal (Apply) Tests
-# =============================================================================
+def merge_dicts(d1, d2):
+    """Merge two dicts recursively. Assumes disjoint leaf keys."""
+    if not isinstance(d1, dict) or not isinstance(d2, dict):
+        return d1 if d1 is not None else d2
+
+    result = {}
+    all_keys = set(d1.keys()) | set(d2.keys())
+
+    for key in all_keys:
+        if key in d1 and key in d2:
+            result[key] = merge_dicts(d1[key], d2[key])
+        elif key in d1:
+            result[key] = d1[key]
+        else:
+            result[key] = d2[key]
+
+    return result
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -89,53 +80,95 @@ def test_dict_tesseract_primal(dict_tess, dict_tess_inputs, use_jit):
     _ = f(dict_tess_inputs)
 
 
-# =============================================================================
-# VJP (Vector-Jacobian Product) Tests
-# =============================================================================
-
-
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit):
-    """Test the VJP endpoint of dict_tesseract."""
+@pytest.mark.parametrize(
+    "diffable_paths",
+    [
+        ["alpha.x"],
+        ["beta.gamma.v"],
+        ["alpha.x", "alpha.y"],
+        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
+    ],
+    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
+)
+def test_dict_tesseract_jvp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
+    """Test the JVP endpoint of dict_tesseract."""
+    diffable_inputs, non_diffable_inputs = split_by_paths(
+        dict_tess_inputs, diffable_paths
+    )
 
-    def f(inputs):
+    def f(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return apply_tesseract(dict_tess, inputs=inputs)["result"]
 
     if use_jit:
         f = jax.jit(f)
 
-    (primal, f_vjp) = jax.vjp(f, dict_tess_inputs)
+    _ = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+@pytest.mark.parametrize(
+    "diffable_paths",
+    [
+        ["alpha.x"],
+        ["beta.gamma.v"],
+        ["alpha.x", "alpha.y"],
+        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
+    ],
+    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
+)
+def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
+    """Test the VJP endpoint of dict_tesseract."""
+    diffable_inputs, non_diffable_inputs = split_by_paths(
+        dict_tess_inputs, diffable_paths
+    )
+
+    def f(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    (primal, f_vjp) = jax.vjp(f, diffable_inputs)
 
     if use_jit:
         f_vjp = jax.jit(f_vjp)
 
-    # test vjp works
     _ = f_vjp(primal)
-
-
-# =============================================================================
-# Jacobian Tests
-# =============================================================================
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
-def test_dict_tesseract_jacobian(dict_tess_inputs, use_jit, jac_direction):
+@pytest.mark.parametrize(
+    "diffable_paths",
+    [
+        ["alpha.x"],
+        ["beta.gamma.v"],
+        ["alpha.x", "alpha.y"],
+        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
+    ],
+    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
+)
+def test_dict_tesseract_jacobian(
+    dict_tess, dict_tess_inputs, use_jit, jac_direction, diffable_paths
+):
     """Test the Jacobian endpoint of dict_tesseract using jacfwd and jacrev."""
-    x = np.array([1.0, 2.0, 3.0], dtype="float32")
-    y = np.array([4.0, 5.0, 6.0], dtype="float32")
+    diffable_inputs, non_diffable_inputs = split_by_paths(
+        dict_tess_inputs, diffable_paths
+    )
 
-    def f(x, y):
-        return apply_tesseract(
-            dict_tess_inputs, inputs={"parameters": {"x": x, "y": y}}
-        )["result"]
+    def f(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        return apply_tesseract(dict_tess, inputs=inputs)["result"]
 
     if jac_direction == "fwd":
-        f_jac = jax.jacfwd(f, argnums=(0, 1))
+        f_jac = jax.jacfwd(f)
     else:
-        f_jac = jax.jacrev(f, argnums=(0, 1))
+        f_jac = jax.jacrev(f)
 
     if use_jit:
         f_jac = jax.jit(f_jac)
 
-    _ = f_jac(x, y)
+    _ = f_jac(diffable_inputs)

@@ -10,19 +10,19 @@ from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 #
 
 
-class NestedParametersSchema(BaseModel):
+class Foo(BaseModel):
     z: Differentiable[Array[(None,), Float32]] = Field(description="Input parameter x.")
-    double_nested_dict: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+    gamma: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
         description="Input parameters u and v as a dictionary.",
     )
 
 
 class InputSchema(BaseModel):
-    parameters: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+    alpha: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
         description="Input parameters x and y as a dictionary.",
     )
 
-    nested_parameters: NestedParametersSchema = Field(
+    beta: Foo = Field(
         description="Nested input parameters.",
     )
 
@@ -40,12 +40,12 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     """Random elements wise operation combining all inputs."""
-    x = inputs.parameters["x"]
-    y = inputs.parameters["y"]
+    x = inputs.alpha["x"]
+    y = inputs.alpha["y"]
 
-    z = inputs.nested_parameters.z
-    u = inputs.nested_parameters.double_nested_dict["u"]
-    v = inputs.nested_parameters.double_nested_dict["v"]
+    z = inputs.beta.z
+    u = inputs.beta.gamma["u"]
+    v = inputs.beta.gamma["v"]
 
     result = x * y + z * v + u
     return OutputSchema(result=result)
@@ -67,26 +67,27 @@ def jacobian(
         return x * y + z * v + u
 
     full_jac = jax.jacfwd(f, argnums=(0, 1, 2, 3, 4))(
-        inputs.parameters["x"],
-        inputs.parameters["y"],
-        inputs.nested_parameters.z,
-        inputs.nested_parameters.double_nested_dict["u"],
-        inputs.nested_parameters.double_nested_dict["v"],
+        inputs.alpha["x"],
+        inputs.alpha["y"],
+        inputs.beta.z,
+        inputs.beta.gamma["u"],
+        inputs.beta.gamma["v"],
     )
 
     # only return requested inputs and outputs
     jac = {}
     input_map = {
-        "x": 0,
-        "y": 1,
-        "z": 2,
-        "u": 3,
-        "v": 4,
+        "alpha.{x}": 0,
+        "alpha.{y}": 1,
+        "beta.z": 2,
+        "beta.gamma.{u}": 3,
+        "beta.gamma.{v}": 4,
     }
     for out in jac_outputs:
         jac[out] = {}
         for inp in jac_inputs:
             jac[out][inp] = full_jac[input_map[inp]]
+
     return jac
 
 
@@ -99,7 +100,12 @@ def jacobian_vector_product(
     jac = jacobian(inputs, jvp_inputs, jvp_outputs)
     out = {}
     for dy in jvp_outputs:
-        out[dy] = sum(jac[dy][dx] * tangent_vector[dx] for dx in jvp_inputs)
+        result_terms = []
+        for dx in jvp_inputs:
+            # only diagonal because of element-wise operations in primal
+            term = tangent_vector[dx] * jax.numpy.diag(jac[dy][dx])
+            result_terms.append(term)
+        out[dy] = sum(result_terms)
     return out
 
 
@@ -112,11 +118,16 @@ def vector_jacobian_product(
     jac = jacobian(inputs, vjp_inputs, vjp_outputs)
     out = {}
     for dx in vjp_inputs:
-        out[dx] = sum(jac[dy][dx] * cotangent_vector[dy] for dy in vjp_outputs)
+        result_terms = []
+        for dy in vjp_outputs:
+            # only diagonal because of element-wise operations in primal
+            term = cotangent_vector[dy] * jax.numpy.diag(jac[dy][dx])
+            result_terms.append(term)
+        out[dx] = sum(result_terms)
     return out
 
 
 def abstract_eval(abstract_inputs):
     """Calculate output shape of apply from the shape of its inputs."""
-    x = abstract_inputs.parameters["x"]
+    x = abstract_inputs.alpha["x"]
     return {"result": ShapeDType(shape=(x.shape[0],), dtype="float32")}
