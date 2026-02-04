@@ -6,6 +6,18 @@ import pytest
 
 from tesseract_jax import apply_tesseract
 
+# Parametrization for testing different subsets of differentiable inputs
+DIFFABLE_PATHS_PARAMS = pytest.mark.parametrize(
+    "diffable_paths",
+    [
+        ["alpha.x"],
+        ["beta.gamma.v"],
+        ["alpha.x", "alpha.y"],
+        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
+    ],
+    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
+)
+
 
 def path_to_str(path):
     """Convert JAX tree path to string like 'alpha.x'."""
@@ -81,16 +93,7 @@ def test_dict_tesseract_primal(dict_tess, dict_tess_inputs, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize(
-    "diffable_paths",
-    [
-        ["alpha.x"],
-        ["beta.gamma.v"],
-        ["alpha.x", "alpha.y"],
-        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
-    ],
-    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
-)
+@DIFFABLE_PATHS_PARAMS
 def test_dict_tesseract_jvp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
     """Test the JVP endpoint of dict_tesseract."""
     diffable_inputs, non_diffable_inputs = split_by_paths(
@@ -108,16 +111,7 @@ def test_dict_tesseract_jvp(dict_tess, dict_tess_inputs, use_jit, diffable_paths
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize(
-    "diffable_paths",
-    [
-        ["alpha.x"],
-        ["beta.gamma.v"],
-        ["alpha.x", "alpha.y"],
-        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
-    ],
-    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
-)
+@DIFFABLE_PATHS_PARAMS
 def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
     """Test the VJP endpoint of dict_tesseract."""
     diffable_inputs, non_diffable_inputs = split_by_paths(
@@ -141,16 +135,7 @@ def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit, diffable_paths
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
-@pytest.mark.parametrize(
-    "diffable_paths",
-    [
-        ["alpha.x"],
-        ["beta.gamma.v"],
-        ["alpha.x", "alpha.y"],
-        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
-    ],
-    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
-)
+@DIFFABLE_PATHS_PARAMS
 def test_dict_tesseract_jacobian(
     dict_tess, dict_tess_inputs, use_jit, jac_direction, diffable_paths
 ):
