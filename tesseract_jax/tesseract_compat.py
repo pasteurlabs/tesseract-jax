@@ -169,7 +169,9 @@ def _pytree_to_tesseract_flat(
         if schema_patterns:
             for pattern_parts in schema_patterns:
                 if _match_path_to_pattern(path_parts, pattern_parts):
-                    tesseract_path = _format_path_with_pattern(path_parts, pattern_parts)
+                    tesseract_path = _format_path_with_pattern(
+                        path_parts, pattern_parts
+                    )
                     break
 
         # Fallback to simple dot-joined path if no pattern matches
