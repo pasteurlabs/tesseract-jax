@@ -10,15 +10,26 @@ from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 #
 
 
+class NestedParametersSchema(BaseModel):
+    z: Differentiable[Array[(None,), Float32]] = Field(description="Input parameter x.")
+    double_nested_dict: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+        description="Input parameters u and v as a dictionary.",
+    )
+
+
 class InputSchema(BaseModel):
     parameters: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
         description="Input parameters x and y as a dictionary.",
     )
 
+    nested_parameters: NestedParametersSchema = Field(
+        description="Nested input parameters.",
+    )
+
 
 class OutputSchema(BaseModel):
     result: Differentiable[Array[(None,), Float32]] = Field(
-        description="Product of input parameters x and y."
+        description="x * y + z * v + u",
     )
 
 
@@ -28,10 +39,15 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Evaluates the Rosenbrock function given input values and parameters."""
+    """Random elements wise operation combining all inputs."""
     x = inputs.parameters["x"]
     y = inputs.parameters["y"]
-    result = x * y
+
+    z = inputs.nested_parameters.z
+    u = inputs.nested_parameters.double_nested_dict["u"]
+    v = inputs.nested_parameters.double_nested_dict["v"]
+
+    result = x * y + z * v + u
     return OutputSchema(result=result)
 
 
@@ -45,20 +61,32 @@ def jacobian(
     jac_inputs: set[str],
     jac_outputs: set[str],
 ):
-    # dummy implementation for testing purposes
+    # compute jacobian using jax
 
+    def f(x, y, z, u, v):
+        return x * y + z * v + u
+
+    full_jac = jax.jacfwd(f, argnums=(0, 1, 2, 3, 4))(
+        inputs.parameters["x"],
+        inputs.parameters["y"],
+        inputs.nested_parameters.z,
+        inputs.nested_parameters.double_nested_dict["u"],
+        inputs.nested_parameters.double_nested_dict["v"],
+    )
+
+    # only return requested inputs and outputs
     jac = {}
-
-    for dy in jac_outputs:
-        jac[dy] = {}
-        for dx in jac_inputs:
-            if dx == "parameters.{x}" and dy == "result":
-                jac[dy][dx] = inputs.parameters["y"]
-            elif dx == "parameters.{y}" and dy == "result":
-                jac[dy][dx] = inputs.parameters["x"]
-            else:
-                jac[dy][dx] = jax.numpy.zeros_like(inputs.parameters["x"])
-
+    input_map = {
+        "x": 0,
+        "y": 1,
+        "z": 2,
+        "u": 3,
+        "v": 4,
+    }
+    for out in jac_outputs:
+        jac[out] = {}
+        for inp in jac_inputs:
+            jac[out][inp] = full_jac[input_map[inp]]
     return jac
 
 
