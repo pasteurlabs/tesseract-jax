@@ -23,7 +23,7 @@ def get_tesseract_folders():
         "univariate_tesseract",
         "nested_tesseract",
         "non_abstract_tesseract",
-        "dict_tesseract",
+        "pytree_tesseract",
         # Add more as needed
     ]
     return tesseract_folders
@@ -90,23 +90,25 @@ def make_tesseract_fixture(folder_name):
 served_univariate_tesseract_raw = make_tesseract_fixture("univariate_tesseract")
 served_nested_tesseract_raw = make_tesseract_fixture("nested_tesseract")
 served_non_abstract_tesseract = make_tesseract_fixture("non_abstract_tesseract")
-served_dict_tesseract = make_tesseract_fixture("dict_tesseract")
+served_pytree_tesseract = make_tesseract_fixture("pytree_tesseract")
 
 
 @pytest.fixture
-def dict_tess() -> Tesseract:
-    """Load dict_tesseract directly from the API file."""
-    return Tesseract.from_tesseract_api("tests/dict_tesseract/tesseract_api.py")
+def pytree_tess() -> Tesseract:
+    """Load pytree_tesseract directly from the API file."""
+    return Tesseract.from_tesseract_api("tests/pytree_tesseract/tesseract_api.py")
 
 
 @pytest.fixture
-def dict_tess_inputs() -> dict:
-    """Provide inputs for dict_tesseract tests."""
+def pytree_tess_inputs() -> dict:
+    """Provide inputs for pytree_tesseract tests."""
     x = np.array([1.0, 2.0, 3.0], dtype="float32")
     y = np.array([4.0, 5.0, 6.0], dtype="float32")
     z = np.array([7.0, 8.0, 9.0], dtype="float32")
     u = np.array([10.0, 11.0, 12.0], dtype="float32")
     v = np.array([13.0, 14.0, 15.0], dtype="float32")
+    d0 = np.array([16.0, 17.0, 18.0], dtype="float32")
+    d1 = np.array([19.0, 20.0, 21.0], dtype="float32")
 
     inputs = {
         "alpha": {
@@ -114,6 +116,7 @@ def dict_tess_inputs() -> dict:
             "y": y,
         },
         "beta": {"z": z, "gamma": {"u": u, "v": v}},
+        "delta": [d0, d1],
     }
 
     return inputs

@@ -12,20 +12,39 @@ DIFFABLE_PATHS_PARAMS = pytest.mark.parametrize(
     [
         ["alpha.x"],
         ["beta.gamma.v"],
+        ["delta.0"],
         ["alpha.x", "alpha.y"],
-        ["alpha.x", "alpha.y", "beta.z", "beta.gamma.u", "beta.gamma.v"],
+        ["delta.0", "delta.1"],
+        [
+            "alpha.x",
+            "alpha.y",
+            "beta.z",
+            "beta.gamma.u",
+            "beta.gamma.v",
+            "delta.0",
+            "delta.1",
+        ],
     ],
-    ids=["single_x", "single_v", "pair_xy", "all_inputs"],
+    ids=["single_x", "single_v", "single_list", "pair_xy", "pair_list", "all_inputs"],
 )
 
 
 def path_to_str(path):
-    """Convert JAX tree path to string like 'alpha.x'."""
-    return ".".join(key.key if hasattr(key, "key") else str(key) for key in path)
+    """Convert JAX tree path to string like 'alpha.x' or 'delta.0'."""
+    parts = []
+    for key in path:
+        if hasattr(key, "key"):
+            parts.append(key.key)
+        elif hasattr(key, "idx"):
+            parts.append(str(key.idx))
+        else:
+            parts.append(str(key))
+    return ".".join(parts)
 
 
 def filter_by_paths(inputs, paths_to_keep):
     """Filter pytree keeping only specified paths."""
+    # mark entries not in paths_to_keep as None
     paths_set = set(paths_to_keep)
 
     def filter_fn(path, x):
@@ -34,11 +53,23 @@ def filter_by_paths(inputs, paths_to_keep):
 
     filtered = jax.tree_util.tree_map_with_path(filter_fn, inputs)
 
-    # Remove None values from the tree
+    # Recursively remove None values from the tree
     def remove_nones(tree):
         if isinstance(tree, dict):
-            result = {k: remove_nones(v) for k, v in tree.items() if v is not None}
+            result = {}
+            for k, v in tree.items():
+                cleaned = remove_nones(v)
+                if cleaned is not None:
+                    result[k] = cleaned
             return result if result else None
+
+        elif isinstance(tree, (list, tuple)):
+            result = []
+            for v in tree:
+                cleaned = remove_nones(v)
+                if cleaned is not None:
+                    result.append(cleaned)
+            return type(tree)(result) if result else None
         return tree
 
     return remove_nones(filtered) or {}
@@ -69,6 +100,13 @@ def merge_dicts(d1, d2):
     all_keys = set(d1.keys()) | set(d2.keys())
 
     for key in all_keys:
+        if (
+            key in d1
+            and key in d2
+            and isinstance(d1[key], list)
+            and isinstance(d2[key], list)
+        ):
+            result[key] = d1[key] + d2[key]
         if key in d1 and key in d2:
             result[key] = merge_dicts(d1[key], d2[key])
         elif key in d1:
@@ -80,29 +118,29 @@ def merge_dicts(d1, d2):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_dict_tesseract_primal(dict_tess, dict_tess_inputs, use_jit):
-    """Test the primal (apply) endpoint of dict_tesseract."""
+def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit):
+    """Test the primal (apply) endpoint of pytree_tesseract."""
 
     def f(inputs):
-        return apply_tesseract(dict_tess, inputs=inputs)
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
 
-    _ = f(dict_tess_inputs)
+    _ = f(pytree_tess_inputs)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @DIFFABLE_PATHS_PARAMS
-def test_dict_tesseract_jvp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
-    """Test the JVP endpoint of dict_tesseract."""
+def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable_paths):
+    """Test the JVP endpoint of pytree_tesseract."""
     diffable_inputs, non_diffable_inputs = split_by_paths(
-        dict_tess_inputs, diffable_paths
+        pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
 
     if use_jit:
         f = jax.jit(f)
@@ -112,15 +150,15 @@ def test_dict_tesseract_jvp(dict_tess, dict_tess_inputs, use_jit, diffable_paths
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @DIFFABLE_PATHS_PARAMS
-def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit, diffable_paths):
-    """Test the VJP endpoint of dict_tesseract."""
+def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable_paths):
+    """Test the VJP endpoint of pytree_tesseract."""
     diffable_inputs, non_diffable_inputs = split_by_paths(
-        dict_tess_inputs, diffable_paths
+        pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
 
     if use_jit:
         f = jax.jit(f)
@@ -136,17 +174,17 @@ def test_dict_tesseract_vjp(dict_tess, dict_tess_inputs, use_jit, diffable_paths
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
 @DIFFABLE_PATHS_PARAMS
-def test_dict_tesseract_jacobian(
-    dict_tess, dict_tess_inputs, use_jit, jac_direction, diffable_paths
+def test_pytree_tesseract_jacobian(
+    pytree_tess, pytree_tess_inputs, use_jit, jac_direction, diffable_paths
 ):
-    """Test the Jacobian endpoint of dict_tesseract using jacfwd and jacrev."""
+    """Test the Jacobian endpoint of pytree_tesseract using jacfwd and jacrev."""
     diffable_inputs, non_diffable_inputs = split_by_paths(
-        dict_tess_inputs, diffable_paths
+        pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
 
     if jac_direction == "fwd":
         f_jac = jax.jacfwd(f)

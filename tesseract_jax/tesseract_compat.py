@@ -157,26 +157,24 @@ def _pytree_to_tesseract_flat(
     flat_list = []
     for jax_path, val in leaves:
         # Extract path components
-        path_parts = []
+        path_keys = []
         for elem in jax_path:
             if hasattr(elem, "key"):
-                path_parts.append(elem.key)
+                path_keys.append(elem.key)
             elif hasattr(elem, "idx"):
-                path_parts.append(f"[{elem.idx}]")
+                path_keys.append(f"[{elem.idx}]")
 
         # Try to match against schema patterns
         tesseract_path = None
         if schema_patterns:
             for pattern_parts in schema_patterns:
-                if _match_path_to_pattern(path_parts, pattern_parts):
-                    tesseract_path = _format_path_with_pattern(
-                        path_parts, pattern_parts
-                    )
+                if _match_path_to_pattern(path_keys, pattern_parts):
+                    tesseract_path = _format_path_with_pattern(path_keys, pattern_parts)
                     break
 
         # Fallback to simple dot-joined path if no pattern matches
         if tesseract_path is None:
-            tesseract_path = ".".join(path_parts)
+            tesseract_path = ".".join(path_keys)
 
         flat_list.append((tesseract_path, val))
 

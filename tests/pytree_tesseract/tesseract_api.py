@@ -26,10 +26,14 @@ class InputSchema(BaseModel):
         description="Nested input parameters.",
     )
 
+    delta: list[Differentiable[Array[(None,), Float32]]] = Field(
+        description="List of input parameters.",
+    )
+
 
 class OutputSchema(BaseModel):
     result: Differentiable[Array[(None,), Float32]] = Field(
-        description="x * y + z * v + u",
+        description="x * y + z * v + u + delta[0] + delta[1]",
     )
 
 
@@ -47,7 +51,10 @@ def apply(inputs: InputSchema) -> OutputSchema:
     u = inputs.beta.gamma["u"]
     v = inputs.beta.gamma["v"]
 
-    result = x * y + z * v + u
+    d0 = inputs.delta[0]
+    d1 = inputs.delta[1]
+
+    result = x * y + z * v + u + d0 + d1
     return OutputSchema(result=result)
 
 
@@ -63,15 +70,17 @@ def jacobian(
 ):
     # compute jacobian using jax
 
-    def f(x, y, z, u, v):
-        return x * y + z * v + u
+    def f(x, y, z, u, v, d0, d1):
+        return x * y + z * v + u + d0 + d1
 
-    full_jac = jax.jacfwd(f, argnums=(0, 1, 2, 3, 4))(
+    full_jac = jax.jacfwd(f, argnums=(0, 1, 2, 3, 4, 5, 6))(
         inputs.alpha["x"],
         inputs.alpha["y"],
         inputs.beta.z,
         inputs.beta.gamma["u"],
         inputs.beta.gamma["v"],
+        inputs.delta[0],
+        inputs.delta[1],
     )
 
     # only return requested inputs and outputs
@@ -82,6 +91,8 @@ def jacobian(
         "beta.z": 2,
         "beta.gamma.{u}": 3,
         "beta.gamma.{v}": 4,
+        "delta[0]": 5,
+        "delta[1]": 6,
     }
     for out in jac_outputs:
         jac[out] = {}
