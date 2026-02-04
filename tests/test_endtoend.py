@@ -584,7 +584,7 @@ def test_dict_tesseract_apply(served_dict_tesseract, dict_tess_inputs, use_jit):
     dict_tess = Tesseract(served_dict_tesseract)
 
     def f(a):
-        return apply_tesseract(dict_tess_inputs, inputs=a)
+        return apply_tesseract(dict_tess, inputs=a)
 
     if use_jit:
         f = jax.jit(f)
