@@ -7,6 +7,8 @@ import pytest
 from tesseract_jax import apply_tesseract
 
 # Parametrization for testing different subsets of differentiable inputs
+# This inlcudes subsets of non pydantic model dicts
+# and lists
 DIFFABLE_PATHS_PARAMS = pytest.mark.parametrize(
     "diffable_paths",
     [
@@ -107,7 +109,7 @@ def merge_dicts(d1, d2):
             and isinstance(d2[key], list)
         ):
             result[key] = d1[key] + d2[key]
-        if key in d1 and key in d2:
+        elif key in d1 and key in d2:
             result[key] = merge_dicts(d1[key], d2[key])
         elif key in d1:
             result[key] = d1[key]

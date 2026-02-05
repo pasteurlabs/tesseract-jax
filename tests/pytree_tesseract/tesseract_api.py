@@ -91,8 +91,8 @@ def jacobian(
         "beta.z": 2,
         "beta.gamma.{u}": 3,
         "beta.gamma.{v}": 4,
-        "delta[0]": 5,
-        "delta[1]": 6,
+        "delta.[0]": 5,
+        "delta.[1]": 6,
     }
     for out in jac_outputs:
         jac[out] = {}
