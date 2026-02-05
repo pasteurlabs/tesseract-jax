@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
@@ -77,21 +78,75 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _pytree_to_tesseract_flat(pytree: PyTree) -> list[tuple]:
+def _merge_path(explicit_path: str, array_paths: list[str]):
+    """Merges and formats explicit path with array paths containing templates.
+
+    Examples:
+        merge_path('alpha.beta.x', ['alpha.beta.{}']) -> 'alpha.beta.{x}'
+        merge_path('delta[2]', ['delta.[]']) -> 'delta.[2]'
+    """
+    # Direct match
+    if explicit_path in array_paths:
+        return explicit_path
+
+    for array_path in array_paths:
+        # Replace template markers with regex patterns
+        escaped_path = re.escape(array_path)
+        pattern_str = escaped_path.replace(r"\{\}", r"(.+)").replace(
+            r"\.\[\]", r"\[(.+)\]"
+        )
+
+        # Check if explicit path matches the pattern
+        match = re.fullmatch(pattern_str, explicit_path)
+        if match:
+            # Extract the captured value
+            captured_value = match.group(1)
+            result = array_path.replace("{}", f"{{{captured_value}}}").replace(
+                ".[]", f".[{captured_value}]"
+            )
+            return result
+
+    return explicit_path
+
+
+def _pytree_to_tesseract_flat(
+    pytree: PyTree, schema_paths: dict[str, Any] | None = None
+) -> list[tuple]:
+    """Flatten a pytree to tesseract path format.
+
+    Takes a pytree, flattens it and converts the flat paths
+    into a Tesseract compatible format.
+    For inputs that are differentiable, Tesseracts has the
+    convention to wrap dict keys that are not pydantic models in curly braces {}.
+    Furthermore, list indices are represented as .[index].
+
+    Args:
+        pytree: The pytree to flatten and convert.
+        schema_paths: Optional dict from OpenAPI schema differentiable_arrays.
+            Used to identify dict fields that need {key} formatting.
+
+    Returns:
+        List of (path_string, value) tuples
+    """
     leaves = jax.tree_util.tree_flatten_with_path(pytree)[0]
 
     flat_list = []
     for jax_path, val in leaves:
         tesseract_path = ""
-        first_elem = True
         for elem in jax_path:
+            # for handling dicts
             if hasattr(elem, "key"):
-                if not first_elem:
-                    tesseract_path += "."
-                tesseract_path += elem.key
+                tesseract_path += f".{elem.key}"
+            # for handling lists/tuples
             elif hasattr(elem, "idx"):
                 tesseract_path += f"[{elem.idx}]"
-            first_elem = False
+        # remove leading dot
+        tesseract_path = tesseract_path.lstrip(".")
+
+        tesseract_path = _merge_path(
+            tesseract_path, list(schema_paths.keys()) if schema_paths else []
+        )
+
         flat_list.append((tesseract_path, val))
 
     return flat_list
@@ -210,7 +265,11 @@ class Jaxeract:
             remove_static_args=True,
         )
 
-        flat_tangents = dict(_pytree_to_tesseract_flat(tangent_inputs))
+        flat_tangents = dict(
+            _pytree_to_tesseract_flat(
+                tangent_inputs, schema_paths=self.differentiable_input_paths
+            )
+        )
 
         jvp_inputs = list(flat_tangents.keys())
         jvp_outputs = list(self.differentiable_output_paths.keys())
@@ -225,7 +284,8 @@ class Jaxeract:
         paths = [
             p
             for p, _ in _pytree_to_tesseract_flat(
-                jax.tree.unflatten(output_pytreedef, range(len(output_avals)))
+                jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+                schema_paths=self.differentiable_output_paths,
             )
         ]
 
@@ -256,14 +316,20 @@ class Jaxeract:
             primals, static_args, input_pytreedef, is_static_mask
         )
 
-        in_keys = [k for k, _ in _pytree_to_tesseract_flat(primal_inputs)]
+        in_keys = [
+            k
+            for k, _ in _pytree_to_tesseract_flat(
+                primal_inputs, schema_paths=self.differentiable_input_paths
+            )
+        ]
         vjp_inputs = [o for o, m in zip(in_keys, is_static_mask, strict=True) if not m]
         vjp_outputs = list(self.differentiable_output_paths.keys())
 
         paths = [
             p
             for p, _ in _pytree_to_tesseract_flat(
-                jax.tree.unflatten(output_pytreedef, range(len(output_avals)))
+                jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+                schema_paths=self.differentiable_output_paths,
             )
         ]
 

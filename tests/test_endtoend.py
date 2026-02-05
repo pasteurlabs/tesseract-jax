@@ -619,3 +619,18 @@ def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
 
     with pytest.raises(ValueError):
         jax.vjp(f, a)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    def f(a):
+        return apply_tesseract(dict_tess, inputs=a)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    result = f(pytree_tess_inputs)
+    result_ref = dict_tess.apply(pytree_tess_inputs)
+    _assert_pytree_isequal(result, result_ref)
