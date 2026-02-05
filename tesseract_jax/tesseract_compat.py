@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
@@ -77,57 +78,32 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _match_path_to_pattern(path_parts: list[str], pattern_parts: list[str]) -> bool:
-    """Check if a concrete path matches a schema pattern.
+def _merge_path(explicit_path: str, array_paths: list[str]):
+    """Merges and formats explicit path with array paths containing templates.
 
-    Args:
-        path_parts: Concrete path components, e.g., ["outer", "key1", "[0]"]
-        pattern_parts: Schema pattern components, e.g., ["outer", "{}", "[]"]
-
-    Returns:
-        True if path matches pattern
+    Examples:
+        merge_path('alpha.beta.x', ['alpha.beta.{}']) -> 'alpha.beta.{x}'
     """
-    if len(path_parts) != len(pattern_parts):
-        return False
+    # Direct match
+    if explicit_path in array_paths:
+        return explicit_path
 
-    for path_part, pattern_part in zip(path_parts, pattern_parts, strict=True):
-        if pattern_part == "{}":
-            # Wildcard for dict key - matches any non-bracket identifier
-            if path_part.startswith("["):
-                return False
-        elif pattern_part == "[]":
-            # Wildcard for sequence index - matches [n]
-            if not path_part.startswith("["):
-                return False
-        else:
-            # Literal - must match exactly
-            if path_part != pattern_part:
-                return False
+    for array_path in array_paths:
+        # Convert template path to regex pattern by:
+        # 1. Escape special regex chars (e.g. '.' becomes '\.')
+        # 2. Replace {} wildcards with capture groups (.+)
+        escaped_path = re.escape(array_path)
+        pattern_str = escaped_path.replace(r"\{\}", r"(.+)")
 
-    return True
+        # Check if explicit path matches the pattern
+        match = re.fullmatch(pattern_str, explicit_path)
+        if match:
+            # Extract the captured value
+            captured_value = match.group(1)
+            result = array_path.replace("{}", f"{{{captured_value}}}")
+            return result
 
-
-def _format_path_with_pattern(path_parts: list[str], pattern_parts: list[str]) -> str:
-    """Format a path by wrapping dict keys in curly braces based on pattern.
-
-    Args:
-        path_parts: Concrete path components, e.g., ["outer", "key1", "key2"]
-        pattern_parts: Schema pattern components, e.g., ["outer", "{}", "{}"]
-
-    Returns:
-        Formatted path string, e.g., "outer.{key1}.{key2}"
-    """
-    formatted_parts = []
-
-    for path_part, pattern_part in zip(path_parts, pattern_parts, strict=True):
-        if pattern_part == "{}":
-            # Dict key - wrap in curly braces
-            formatted_parts.append(f"{{{path_part}}}")
-        else:
-            # Literal field name or sequence index - use as-is
-            formatted_parts.append(path_part)
-
-    return ".".join(formatted_parts)
+    return explicit_path
 
 
 def _pytree_to_tesseract_flat(
@@ -135,12 +111,14 @@ def _pytree_to_tesseract_flat(
 ) -> list[tuple]:
     """Flatten a pytree to tesseract path format.
 
-    Dict keys are wrapped in curly braces {key} based on
-    schema_paths metadata.
-    List indices are represented as .[index].
+    Takes a pytree, flattens it and converts the flat paths
+    into a Tesseract compatible format.
+    For inputs that are differentiable, Tesseracts has the
+    convention to wrap dict keys that are not pydantic models in curly braces {}.
+    Furthermore, list indices are represented as .[index].
 
-    Args:W
-        pytree: The pytree to flatten
+    Args:
+        pytree: The pytree to flatten and convert.
         schema_paths: Optional dict from OpenAPI schema differentiable_arrays.
             Used to identify dict fields that need {key} formatting.
 
@@ -149,38 +127,23 @@ def _pytree_to_tesseract_flat(
     """
     leaves = jax.tree_util.tree_flatten_with_path(pytree)[0]
 
-    # Parse schema patterns if provided
-    schema_patterns = []
-    if schema_paths:
-        for schema_path in schema_paths.keys():
-            pattern_parts = schema_path.split(".")
-            schema_patterns.append(pattern_parts)
-
     flat_list = []
     for jax_path, val in leaves:
         # Extract path components
-        path_keys = []
+        flat_path = ""
         for elem in jax_path:
             # for handling dicts
             if hasattr(elem, "key"):
-                path_keys.append(elem.key)
+                flat_path += f".{elem.key}"
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                path_keys.append(f"[{elem.idx}]")
+                flat_path += f".[{elem.idx}]"
+        # remove leading dot
+        flat_path = flat_path.lstrip(".")
 
-        # Try to match against schema patterns
-        tesseract_path = None
+        flat_path = _merge_path(flat_path, schema_paths.keys() if schema_paths else [])
 
-        for pattern_parts in schema_patterns:
-            if _match_path_to_pattern(path_keys, pattern_parts):
-                tesseract_path = _format_path_with_pattern(path_keys, pattern_parts)
-                break
-
-        # Fallback to simple dot-joined path if no pattern matches
-        if tesseract_path is None:
-            tesseract_path = ".".join(path_keys)
-
-        flat_list.append((tesseract_path, val))
+        flat_list.append((flat_path, val))
 
     return flat_list
 
