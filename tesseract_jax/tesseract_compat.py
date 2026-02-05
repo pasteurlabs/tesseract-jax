@@ -132,7 +132,6 @@ def _pytree_to_tesseract_flat(
 
     flat_list = []
     for jax_path, val in leaves:
-        # Extract path components
         tesseract_path = ""
         for elem in jax_path:
             # for handling dicts
