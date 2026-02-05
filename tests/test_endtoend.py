@@ -590,7 +590,6 @@ def test_tesseract_loss(served_vectoradd_tesseract, use_jit):
                 a=a,
                 b=c,
             ),
-            static_arg_names=["b"],
         )
 
         outputs = vectoradd_fn_b(a)
