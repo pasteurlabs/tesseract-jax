@@ -83,24 +83,27 @@ def _merge_path(explicit_path: str, array_paths: list[str]):
 
     Examples:
         merge_path('alpha.beta.x', ['alpha.beta.{}']) -> 'alpha.beta.{x}'
+        merge_path('delta[2]', ['delta.[]']) -> 'delta.[2]'
     """
     # Direct match
     if explicit_path in array_paths:
         return explicit_path
 
     for array_path in array_paths:
-        # Convert template path to regex pattern by:
-        # 1. Escape special regex chars (e.g. '.' becomes '\.')
-        # 2. Replace {} wildcards with capture groups (.+)
+        # Replace template markers with regex patterns
         escaped_path = re.escape(array_path)
-        pattern_str = escaped_path.replace(r"\{\}", r"(.+)")
+        pattern_str = escaped_path.replace(r"\{\}", r"(.+)").replace(
+            r"\.\[\]", r"\[(.+)\]"
+        )
 
         # Check if explicit path matches the pattern
         match = re.fullmatch(pattern_str, explicit_path)
         if match:
             # Extract the captured value
             captured_value = match.group(1)
-            result = array_path.replace("{}", f"{{{captured_value}}}")
+            result = array_path.replace("{}", f"{{{captured_value}}}").replace(
+                ".[]", f".[{captured_value}]"
+            )
             return result
 
     return explicit_path
@@ -137,11 +140,13 @@ def _pytree_to_tesseract_flat(
                 flat_path += f".{elem.key}"
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                flat_path += f".[{elem.idx}]"
+                flat_path += f"[{elem.idx}]"
         # remove leading dot
         flat_path = flat_path.lstrip(".")
 
-        flat_path = _merge_path(flat_path, schema_paths.keys() if schema_paths else [])
+        flat_path = _merge_path(
+            flat_path, list(schema_paths.keys()) if schema_paths else []
+        )
 
         flat_list.append((flat_path, val))
 

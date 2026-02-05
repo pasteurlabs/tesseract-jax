@@ -111,6 +111,8 @@ def pytree_tess_inputs() -> dict:
     d1 = np.array([19.0, 20.0, 21.0], dtype="float32")
     k = np.array([2.0, 2.0, 2.0], dtype="float32")
     m = np.array([3.0, 3.0, 3.0], dtype="float32")
+    z0 = np.array([1.0, 1.0, 1.0], dtype="float32")
+    z1 = np.array([2.0, 2.0, 2.0], dtype="float32")
 
     inputs = {
         "alpha": {
@@ -120,6 +122,7 @@ def pytree_tess_inputs() -> dict:
         "beta": {"z": z, "gamma": {"u": u, "v": v}},
         "delta": [d0, d1],
         "epsilon": {"k": k, "m": m},
+        "zeta": [z0, z1],
     }
 
     return inputs
