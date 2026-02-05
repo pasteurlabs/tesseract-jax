@@ -318,6 +318,8 @@ def _check_dtype(dtype: Any) -> None:
 
 
 def _is_static(x: Any) -> bool:
+    # This is not right!
+    # A traced array that is traced because of JIT and can be differentiable will be marked as differentiable
     if isinstance(x, jax.core.Tracer):
         return False
     return True
