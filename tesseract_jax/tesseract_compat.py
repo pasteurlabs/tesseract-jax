@@ -133,22 +133,22 @@ def _pytree_to_tesseract_flat(
     flat_list = []
     for jax_path, val in leaves:
         # Extract path components
-        flat_path = ""
+        tesseract_path = ""
         for elem in jax_path:
             # for handling dicts
             if hasattr(elem, "key"):
-                flat_path += f".{elem.key}"
+                tesseract_path += f".{elem.key}"
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                flat_path += f"[{elem.idx}]"
+                tesseract_path += f"[{elem.idx}]"
         # remove leading dot
-        flat_path = flat_path.lstrip(".")
+        tesseract_path = tesseract_path.lstrip(".")
 
-        flat_path = _merge_path(
-            flat_path, list(schema_paths.keys()) if schema_paths else []
+        tesseract_path = _merge_path(
+            tesseract_path, list(schema_paths.keys()) if schema_paths else []
         )
 
-        flat_list.append((flat_path, val))
+        flat_list.append((tesseract_path, val))
 
     return flat_list
 
