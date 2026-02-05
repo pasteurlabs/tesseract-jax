@@ -135,12 +135,14 @@ def _pytree_to_tesseract_flat(
 ) -> list[tuple]:
     """Flatten a pytree to tesseract path format.
 
-    Dict keys are wrapped in curly braces {key} based on schema_paths metadata.
+    Dict keys are wrapped in curly braces {key} based on
+    schema_paths metadata.
+    List indices are represented as .[index].
 
-    Args:
+    Args:W
         pytree: The pytree to flatten
         schema_paths: Optional dict from OpenAPI schema differentiable_arrays.
-                     Used to identify dict fields that need {key} formatting.
+            Used to identify dict fields that need {key} formatting.
 
     Returns:
         List of (path_string, value) tuples
@@ -159,18 +161,20 @@ def _pytree_to_tesseract_flat(
         # Extract path components
         path_keys = []
         for elem in jax_path:
+            # for handling dicts
             if hasattr(elem, "key"):
                 path_keys.append(elem.key)
+            # for handling lists/tuples
             elif hasattr(elem, "idx"):
                 path_keys.append(f"[{elem.idx}]")
 
         # Try to match against schema patterns
         tesseract_path = None
-        if schema_patterns:
-            for pattern_parts in schema_patterns:
-                if _match_path_to_pattern(path_keys, pattern_parts):
-                    tesseract_path = _format_path_with_pattern(path_keys, pattern_parts)
-                    break
+
+        for pattern_parts in schema_patterns:
+            if _match_path_to_pattern(path_keys, pattern_parts):
+                tesseract_path = _format_path_with_pattern(path_keys, pattern_parts)
+                break
 
         # Fallback to simple dot-joined path if no pattern matches
         if tesseract_path is None:

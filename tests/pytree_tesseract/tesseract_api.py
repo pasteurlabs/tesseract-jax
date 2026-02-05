@@ -30,10 +30,14 @@ class InputSchema(BaseModel):
         description="List of input parameters.",
     )
 
+    epsilon: dict[str, Array[(None,), Float32]] = Field(
+        description="Parameters k and m that are not differentiable.",
+    )
+
 
 class OutputSchema(BaseModel):
     result: Differentiable[Array[(None,), Float32]] = Field(
-        description="x * y + z * v + u + delta[0] + delta[1]",
+        description="x * y + z * v + u + delta[0] + delta[1] * k + m",
     )
 
 
@@ -54,7 +58,10 @@ def apply(inputs: InputSchema) -> OutputSchema:
     d0 = inputs.delta[0]
     d1 = inputs.delta[1]
 
-    result = x * y + z * v + u + d0 + d1
+    k = inputs.epsilon["k"]
+    m = inputs.epsilon["m"]
+
+    result = x * y + z * v + u + d0 + d1 * k + m
     return OutputSchema(result=result)
 
 
