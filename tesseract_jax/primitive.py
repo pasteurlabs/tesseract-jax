@@ -453,7 +453,14 @@ def apply_tesseract(
             for aval in flat_avals
         )
 
-        # Apply the primitive
+        # I think the best way is to try something like this:
+        # out = tesseract_dispatch_p.bind(
+        #     inputs,
+        #     client=client,
+        #     eval_func="apply",
+        # )
+        # and construct all the static / abstract stuff from inside the dispatch
+
         out = tesseract_dispatch_p.bind(
             *array_args,
             static_args=static_args,
