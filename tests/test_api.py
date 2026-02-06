@@ -7,7 +7,7 @@ import pytest
 from tesseract_jax import apply_tesseract
 
 # Parametrization for testing different subsets of differentiable inputs
-# This inlcudes subsets of non pydantic model dicts
+# This includes subsets of non pydantic model dicts
 # and lists
 DIFFABLE_PATHS_PARAMS = pytest.mark.parametrize(
     "diffable_paths",
@@ -94,7 +94,11 @@ def split_by_paths(inputs, diffable_paths):
 
 
 def merge_dicts(d1, d2):
-    """Merge two dicts recursively. Assumes disjoint leaf keys."""
+    """Merge two dicts recursively. Assumes disjoint leaf keys.
+
+    Lists are merged by concatenation, so ordering is only preserved when
+    d1 contains the lower-indexed elements and d2 the higher-indexed ones.
+    """
     if not isinstance(d1, dict) or not isinstance(d2, dict):
         return d1 if d1 is not None else d2
 
