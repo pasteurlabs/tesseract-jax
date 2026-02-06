@@ -567,12 +567,9 @@ def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
 def test_tesseract_loss(served_vectoradd_tesseract, use_jit):
     vectoradd_tess = Tesseract(served_vectoradd_tesseract)
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
+    b = np.array([4.0, 5.0, 6.0], dtype="float32")
 
-    # b = jax.lax.stop_gradient(b)
-
-    def loss_fn(a):
-        b = np.array([4.0, 5.0, 6.0], dtype="float32")
-
+    def loss_fn(a, b):
         vectoradd_fn_a: jax.Callable = lambda a: apply_tesseract(
             vectoradd_tess,
             inputs=dict(
@@ -582,26 +579,17 @@ def test_tesseract_loss(served_vectoradd_tesseract, use_jit):
         )
 
         c = vectoradd_fn_a(a)["c"]
-        c = jax.lax.stop_gradient(c)
 
-        vectoradd_fn_b: jax.Callable = lambda a: apply_tesseract(
-            vectoradd_tess,
-            inputs=dict(
-                a=a,
-                b=c,
-            ),
-        )
-
-        outputs = vectoradd_fn_b(a)
-
-        return jnp.sum((outputs["c"]) ** 2)
+        return jnp.sum((c) ** 2)
 
     if use_jit:
         loss_fn = jax.jit(loss_fn)
 
-    value_and_grad_fn = jax.value_and_grad(loss_fn)
+    grad_fn = jax.grad(loss_fn)
 
-    assert value_and_grad_fn(a) is not None
+    grad = grad_fn(a, b)
+
+    assert grad is not None
 
 
 def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):

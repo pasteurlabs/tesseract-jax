@@ -222,3 +222,43 @@ def test_tesseract_loss(vectoradd_tess, use_jit):
     value_and_grad_fn = jax.value_and_grad(loss_fn)
 
     assert value_and_grad_fn(a) is not None
+
+
+def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
+    return (a - x) ** 2 + b * (y - x**2) ** 2
+
+
+def test_tesseract_loss_univariate(univariate_tess):
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+
+    def loss_fn(x, y):
+        univariate_fn_x: jax.Callable = lambda x: apply_tesseract(
+            univariate_tess,
+            inputs=dict(
+                x=x,
+                y=y,
+            ),
+        )
+
+        c = univariate_fn_x(x)["result"]
+
+        return jnp.sum((c) ** 2)
+
+    def loss_fn_raw(x, y):
+        c = rosenbrock(x, y, a=1.0, b=100.0)
+        return jnp.sum((c) ** 2)
+
+    loss_fn = jax.jit(loss_fn)
+
+    grad_fn = jax.grad(loss_fn)
+
+    grad = grad_fn(x, y)
+
+    assert grad is not None
+
+    grad_fn_raw = jax.grad(loss_fn_raw)
+
+    grad_raw = grad_fn_raw(x, y)
+
+    assert np.allclose(grad, grad_raw)

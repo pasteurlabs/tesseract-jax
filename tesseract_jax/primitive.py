@@ -406,6 +406,9 @@ def apply_tesseract(
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
+    # is_static_mask = client.static_mask(
+    #     inputs
+    # )
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later

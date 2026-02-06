@@ -102,6 +102,12 @@ def pytree_tess() -> Tesseract:
 
 
 @pytest.fixture
+def univariate_tess() -> Tesseract:
+    """Load univariate_tesseract directly from the API file."""
+    return Tesseract.from_tesseract_api("tests/univariate_tesseract/tesseract_api.py")
+
+
+@pytest.fixture
 def pytree_tess_inputs() -> dict:
     """Provide inputs for pytree_tesseract tests."""
     x = np.array([1.0, 2.0, 3.0], dtype="float32")

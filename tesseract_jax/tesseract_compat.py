@@ -152,31 +152,6 @@ def _pytree_to_tesseract_flat(
     return flat_list
 
 
-def is_static(
-    paths: list[str],
-    differentiable_input_paths: dict[str, Any],
-) -> tuple[bool, ...]:
-    """Filters a pytree of inputs a mask indicating which inputs are static.
-
-    Args:
-        paths: List of paths corresponding to the pytree leaves.
-        differentiable_input_paths: Dict from OpenAPI schema differentiable_arrays.
-
-
-    Returns:
-        Static mask.
-    """
-    static_mask = []
-
-    for p in paths:
-        if p in differentiable_input_paths:
-            static_mask.append(False)
-        else:
-            static_mask.append(True)
-
-    return tuple(static_mask)
-
-
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
@@ -211,13 +186,14 @@ class Jaxeract:
 
         self.available_methods = self.client.available_endpoints
 
-    # def is_static(x: Any, path: str) -> bool:
-    #     # This is not right!
-    #     # A traced array that is traced because of JIT
-    #     # and can be differentiable will be marked as differentiable here
-    #     if isinstance(x, jax.core.Tracer):
-    #         return False
-    #     return True
+    def static_mask(x: Any, path: str) -> bool:
+        """Docstring for static_mask."""
+        # This is not right!
+        # A traced array that is traced because of JIT
+        # and can be differentiable will be marked as differentiable here
+        if isinstance(x, jax.core.Tracer):
+            return False
+        return True
 
     def abstract_eval(
         self,
@@ -232,7 +208,7 @@ class Jaxeract:
 
         This used in order to get output shapes given input shapes.
         """
-        is_static_mask = is_static()
+        # is_static_mask = is_static()
         avals = unflatten_args(array_args, static_args, input_pytreedef, is_static_mask)
 
         abstract_inputs = jax.tree.map(
