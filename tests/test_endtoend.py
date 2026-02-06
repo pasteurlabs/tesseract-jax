@@ -715,7 +715,7 @@ def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit
 
     def f(diffable):
         inputs = {**diffable, **non_diffable_inputs}
-        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+        return apply_tesseract(dict_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -739,7 +739,7 @@ def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit
 
     def f(diffable):
         inputs = {**diffable, **non_diffable_inputs}
-        return apply_tesseract(dict_tess, inputs=inputs)["result"]
+        return apply_tesseract(dict_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)

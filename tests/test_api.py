@@ -146,7 +146,7 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -164,7 +164,7 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -190,7 +190,7 @@ def test_pytree_tesseract_jacobian(
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if jac_direction == "fwd":
         f_jac = jax.jacfwd(f)
