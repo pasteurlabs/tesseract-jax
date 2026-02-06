@@ -75,6 +75,24 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
 
 
+# def filter_zeros(
+#     cotangent: Sequence[ArrayLike],
+#     static_args: tuple[_Hashable, ...],
+#     is_static_mask: tuple[bool, ...],
+# ) -> tuple[Sequence[ArrayLike], tuple[_Hashable, ...], tuple[bool, ...]]:
+#     zeros_mask = tuple(isinstance(c, jax._src.ad_util.Zero) for c in cotangent)
+
+#     cotan_args_ = tuple(c for c, z in zip(cotangent, zeros_mask, strict=True) if not z)
+#     static_args_ = tuple(
+#         a for a, z in zip(static_args, zeros_mask, strict=True) if not z
+#     )
+#     is_static_mask_ = tuple(
+#         m for m, z in zip(is_static_mask, zeros_mask, strict=True) if not z
+#     )
+
+#     return cotan_args_, static_args_, is_static_mask_
+
+
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike, ...],
@@ -107,6 +125,7 @@ def tesseract_dispatch_jvp_rule(
         )
         for arg in tan_args
     )
+    # tan_args_, static_args_, is_static_mask_ = filter_zeros(tan_args, static_args, is_static_mask)
 
     jvp = tesseract_dispatch_p.bind(
         *in_args,
@@ -153,6 +172,8 @@ def tesseract_dispatch_transpose_rule(
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     args = args[:n_primals]
+
+    # cotan_args_, static_args_, is_static_mask_ = filter_zeros(cotangent, static_args, is_static_mask)
 
     cotan_args_ = tuple(
         (
@@ -406,21 +427,10 @@ def apply_tesseract(
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
-    # is_static_mask = client.static_mask(
-    #     inputs
-    # )
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
-        output_pytreedef, avals = None, None
-        avals = client.abstract_eval(
-            array_args,
-            static_args,
-            input_pytreedef,
-            output_pytreedef,
-            avals,
-            is_static_mask,
-        )
+        avals = client.abstract_eval(inputs)
 
         is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
         flat_avals, output_pytreedef = jax.tree.flatten(avals, is_leaf=is_aval)
@@ -464,5 +474,4 @@ def apply_tesseract(
             eval_func="apply",
         )
 
-        # Unflatten the output
         return out

@@ -186,36 +186,22 @@ class Jaxeract:
 
         self.available_methods = self.client.available_endpoints
 
-    def static_mask(x: Any, path: str) -> bool:
-        """Docstring for static_mask."""
-        # This is not right!
-        # A traced array that is traced because of JIT
-        # and can be differentiable will be marked as differentiable here
-        if isinstance(x, jax.core.Tracer):
-            return False
-        return True
-
+    # The abstract_eval method is never called from a dispatch function,
+    # hence its signature does not need to be identical to the one of apply,
+    # vjp and vjp.
     def abstract_eval(
         self,
-        array_args: tuple[ArrayLike, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef | None,
-        output_avals: tuple[ShapeDtypeStruct, ...] | None,
-        is_static_mask: tuple[bool, ...],
+        inputs: PyTree,
     ) -> PyTree:
         """Run an abstract evaluation on a Tesseract.
 
         This used in order to get output shapes given input shapes.
         """
-        # is_static_mask = is_static()
-        avals = unflatten_args(array_args, static_args, input_pytreedef, is_static_mask)
-
         abstract_inputs = jax.tree.map(
             lambda x: (
                 {"shape": x.shape, "dtype": x.dtype.name} if hasattr(x, "shape") else x
             ),
-            avals,
+            inputs,
         )
 
         out_data = self.client.abstract_eval(abstract_inputs)
@@ -242,13 +228,6 @@ class Jaxeract:
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
         return out_data
-
-    def apply_pytree(
-        self,
-        inputs: PyTree,
-    ) -> PyTree:
-        """Call the Tesseract's apply endpoint with the given arguments."""
-        return self.client.apply(inputs)
 
     def jacobian_vector_product(
         self,
