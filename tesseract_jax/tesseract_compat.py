@@ -1,7 +1,6 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import re
 from collections.abc import Sequence
 from typing import Any, TypeAlias
 
@@ -78,33 +77,34 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _merge_path(explicit_path: str, array_paths: list[str]):
+def _merge_path(explicit_path: str, array_paths: list[str]) -> str:
     """Merges and formats explicit path with array paths containing templates.
 
     Examples:
-        merge_path('alpha.beta.x', ['alpha.beta.{}']) -> 'alpha.beta.{x}'
-        merge_path('delta[2]', ['delta.[]']) -> 'delta.[2]'
+        _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> 'alpha.beta.{x}'
+        _merge_path('delta.[2]', ['delta.[]']) -> 'delta.[2]'
     """
-    # Direct match
-    if explicit_path in array_paths:
-        return explicit_path
-
+    explicit_parts = explicit_path.split(".")
     for array_path in array_paths:
-        # Replace template markers with regex patterns
-        escaped_path = re.escape(array_path)
-        pattern_str = escaped_path.replace(r"\{\}", r"(.+)").replace(
-            r"\.\[\]", r"\[(.+)\]"
-        )
+        template_parts = array_path.split(".")
+        if len(template_parts) != len(explicit_parts):
+            continue
 
-        # Check if explicit path matches the pattern
-        match = re.fullmatch(pattern_str, explicit_path)
-        if match:
-            # Extract the captured value
-            captured_value = match.group(1)
-            result = array_path.replace("{}", f"{{{captured_value}}}").replace(
-                ".[]", f".[{captured_value}]"
-            )
-            return result
+        result_parts = []
+        matched = True
+        for tp, ep in zip(template_parts, explicit_parts, strict=True):
+            if tp == ep:
+                result_parts.append(ep)
+            elif tp == "{}":
+                result_parts.append(f"{{{ep}}}")
+            elif tp == "[]":
+                result_parts.append(ep)  # already "[n]"
+            else:
+                matched = False
+                break
+
+        if matched:
+            return ".".join(result_parts)
 
     return explicit_path
 
@@ -139,7 +139,7 @@ def _pytree_to_tesseract_flat(
                 tesseract_path += f".{elem.key}"
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                tesseract_path += f"[{elem.idx}]"
+                tesseract_path += f".[{elem.idx}]"
         # remove leading dot
         tesseract_path = tesseract_path.lstrip(".")
 
