@@ -55,7 +55,12 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
-    """Define how to dispatch evals and pipe arguments."""
+    """Define how to dispatch evals and pipe arguments.
+
+    We dont actually need to communicate with the Tesseract in abstract_eval,
+    as the we already computed the abstract outputs, we just need to put them
+    in the right format and return them.
+    """
     if eval_func not in (
         "apply",
         "jacobian_vector_product",
@@ -76,10 +81,14 @@ def tesseract_dispatch_abstract_eval(
 
 
 # def filter_zeros(
-#     cotangent: Sequence[ArrayLike],
-#     static_args: tuple[_Hashable, ...],
-#     is_static_mask: tuple[bool, ...],
+#     inputs: Any,
+#     g: Sequence[ArrayLike],
 # ) -> tuple[Sequence[ArrayLike], tuple[_Hashable, ...], tuple[bool, ...]]:
+#     flat_args, input_pytreedef = jax.tree.flatten(inputs)
+#     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+#     array_args, static_args = split_args(flat_args, is_static_mask)
+#     static_args = tuple(_make_hashable(arg) for arg in static_args)
+
 #     zeros_mask = tuple(isinstance(c, jax._src.ad_util.Zero) for c in cotangent)
 
 #     cotan_args_ = tuple(c for c, z in zip(cotangent, zeros_mask, strict=True) if not z)
