@@ -32,6 +32,7 @@ dev = [
     "pytest-cov",
     "typeguard",
     "requests",
+    "equinox",
     "tesseract-core[runtime]",
     "tesseract-jax[docs]",
 ]

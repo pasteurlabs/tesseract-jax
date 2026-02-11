@@ -9,7 +9,7 @@ import pytest
 from tesseract_jax import apply_tesseract
 
 # Parametrization for testing different subsets of differentiable inputs
-# This inlcudes subsets of non pydantic model dicts
+# This includes subsets of non pydantic model dicts
 # and lists
 DIFFABLE_PATHS_PARAMS = pytest.mark.parametrize(
     "diffable_paths",
@@ -96,7 +96,11 @@ def split_by_paths(inputs, diffable_paths):
 
 
 def merge_dicts(d1, d2):
-    """Merge two dicts recursively. Assumes disjoint leaf keys."""
+    """Merge two dicts recursively. Assumes disjoint leaf keys.
+
+    Lists are merged by concatenation, so ordering is only preserved when
+    d1 contains the lower-indexed elements and d2 the higher-indexed ones.
+    """
     if not isinstance(d1, dict) or not isinstance(d2, dict):
         return d1 if d1 is not None else d2
 
@@ -144,7 +148,7 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -162,7 +166,7 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -188,7 +192,7 @@ def test_pytree_tesseract_jacobian(
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+        return apply_tesseract(pytree_tess, inputs=inputs)
 
     if jac_direction == "fwd":
         f_jac = jax.jacfwd(f)
