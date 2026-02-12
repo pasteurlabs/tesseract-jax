@@ -113,7 +113,8 @@ def filter_zeros(
     Returns:
         Filtered primals, filtered tangents, adjusted static args, adjusted is_static mask
     """
-    return primal_args, tan_args, static_args, is_static_mask
+    # return primal_args, tan_args, static_args, is_static_mask
+
     # Identify which tangent positions are Zero
     zeros_mask = tuple(isinstance(arg, jax._src.ad_util.Zero) for arg in tan_args)
 
