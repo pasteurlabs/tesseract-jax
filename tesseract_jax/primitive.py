@@ -24,6 +24,14 @@ tesseract_dispatch_p.multiple_results = True
 
 
 class _Hashable:
+    """A wrapper class to make non-hashable objects hashable by using their id.
+
+    This is not a proper solution, as two identical objects with different memory
+    addresses will have different hashes.
+    However
+
+    """
+
     def __init__(self, obj: Any) -> None:
         self.wrapped = obj
 
@@ -432,6 +440,9 @@ def apply_tesseract(
 
     client = Jaxeract(tesseract_client)
 
+    # We are splitting the arguments into static and array arguments
+    # This is because JAX primitives require all non-array arguments to be hashable
+    # This way we can use our custom _Hashable class to wrap non-hashable args
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     is_static_mask = tuple(_is_static(arg) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
