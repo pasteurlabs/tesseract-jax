@@ -185,10 +185,11 @@ def tesseract_dispatch_transpose_rule(
     )
     # TODO: I'm not sure this makes sense given these docs:
     #       https://jax.readthedocs.io/en/latest/jax-primitives.html#transposition
-    #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"
+    #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"W
     #       ...but if I provide only cotangent, jax complains, and if I investigate its internals,
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
+    jax.debug.callback(lambda x: print(f"value: {x}"), cotangent_tuple)
 
     return tuple([None] * len(array_args) + list(vjp))
 

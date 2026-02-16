@@ -8,6 +8,33 @@ import pytest
 
 from tesseract_jax import apply_tesseract
 
+
+def pytree_apply_impl(inputs: dict) -> dict:
+    """JAX-traceable version of pytree_tesseract apply function."""
+    x = inputs["alpha"]["x"]
+    y = inputs["alpha"]["y"]
+    z = inputs["beta"]["z"]
+    u = inputs["beta"]["gamma"]["u"]
+    v = inputs["beta"]["gamma"]["v"]
+    d0 = inputs["delta"][0]
+    d1 = inputs["delta"][1]
+    k = inputs["epsilon"]["k"]
+    m = inputs["epsilon"]["m"]
+    z0 = inputs["zeta"][0]
+    z1 = inputs["zeta"][1]
+
+    result = x * y + z * v + u + d0 + d1 * k + m + z0 + z1
+    result_dict = {"a": x + y, "b": z + u}
+    result_list = [d0 + v, d1 + u]
+
+    return {
+        "metadata": k + m,
+        "result": result,
+        "result_dict": result_dict,
+        "result_list": result_list,
+    }
+
+
 # Parametrization for testing different subsets of differentiable inputs
 # This includes subsets of non pydantic model dicts
 # and lists
@@ -150,10 +177,20 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return apply_tesseract(pytree_tess, inputs=inputs)
 
+    def f_raw(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        return pytree_apply_impl(inputs)
+
     if use_jit:
         f = jax.jit(f)
+        f_raw = jax.jit(f_raw)
 
-    _ = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
+    primal, jvp = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
+    primal_raw, jvp_raw = jax.jvp(f_raw, (diffable_inputs,), (diffable_inputs,))
+
+    # Verify results match raw implementation
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), primal, primal_raw)
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), jvp, jvp_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -168,15 +205,27 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return apply_tesseract(pytree_tess, inputs=inputs)
 
+    def f_raw(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        return pytree_apply_impl(inputs)
+
     if use_jit:
         f = jax.jit(f)
+        f_raw = jax.jit(f_raw)
 
     (primal, f_vjp) = jax.vjp(f, diffable_inputs)
+    (primal_raw, f_vjp_raw) = jax.vjp(f_raw, diffable_inputs)
 
     if use_jit:
         f_vjp = jax.jit(f_vjp)
+        f_vjp_raw = jax.jit(f_vjp_raw)
 
-    _ = f_vjp(primal)
+    vjp = f_vjp(primal)
+    vjp_raw = f_vjp_raw(primal_raw)
+
+    # Verify results match raw implementation
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), primal, primal_raw)
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), vjp, vjp_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -194,15 +243,26 @@ def test_pytree_tesseract_jacobian(
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return apply_tesseract(pytree_tess, inputs=inputs)
 
+    def f_raw(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        return pytree_apply_impl(inputs)
+
     if jac_direction == "fwd":
         f_jac = jax.jacfwd(f)
+        f_jac_raw = jax.jacfwd(f_raw)
     else:
         f_jac = jax.jacrev(f)
+        f_jac_raw = jax.jacrev(f_raw)
 
     if use_jit:
         f_jac = jax.jit(f_jac)
+        f_jac_raw = jax.jit(f_jac_raw)
 
-    _ = f_jac(diffable_inputs)
+    jac = f_jac(diffable_inputs)
+    jac_raw = f_jac_raw(diffable_inputs)
+
+    # Verify results match raw implementation
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), jac, jac_raw)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -235,6 +295,13 @@ def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
 def test_tesseract_loss_univariate(univariate_tess):
     x = np.array(1.0, dtype="float64")
     y = np.array(2.0, dtype="float64")
+
+    # First verify forward pass
+    result = apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+    expected = rosenbrock(x, y, a=1.0, b=100.0)
+    assert np.allclose(result, expected), (
+        f"Forward pass mismatch: {result} vs {expected}"
+    )
 
     def loss_fn(x, y):
         univariate_fn_x: jax.Callable = lambda x: apply_tesseract(
