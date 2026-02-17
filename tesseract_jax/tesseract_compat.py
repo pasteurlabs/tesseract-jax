@@ -187,21 +187,27 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        # Jax still expects an ouput for every input, even non-differentiable ones
-        # Hence we need to reconstruct the full output, filling in zeros for missing paths.
+        # JAX expects gradients for all inputs, even non-differentiable ones.
+        # Reconstruct the full output tuple in the same order as flat_inputs.
         out = []
-        i = 0
+        i = 0  # Index into flat_inputs, none_mask, and is_static_mask
+        array_idx = 0  # Index into array_args (which excludes static inputs)
         for path in flat_inputs:
             if path in out_data:
+                # Path has a gradient from the server
                 out.append(out_data[path])
-            # We only care about non-differentiable inputs that are not static, since static inputs
-            # are not passed to the VJP function at all.
             elif none_mask[i] and not is_static_mask[i]:
+                # Non-differentiable but non-static input: return zero gradient
+                # with the same shape/dtype as the corresponding input array
                 out.append(
-                    jax.numpy.zeros(array_args[i].shape, dtype=array_args[i].dtype)
+                    jax.numpy.zeros(
+                        array_args[array_idx].shape, dtype=array_args[array_idx].dtype
+                    )
                 )
 
+            # Increment array_idx only for non-static inputs (which appear in array_args)
+            if not is_static_mask[i]:
+                array_idx += 1
             i += 1
 
-        # out_data = tuple(jax.tree.flatten(out_data)[0])
         return tuple(out)
