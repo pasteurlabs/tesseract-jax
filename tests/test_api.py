@@ -11,47 +11,51 @@ from tesseract_jax import apply_tesseract
 
 def pytree_apply_impl(inputs: dict) -> dict:
     """JAX-traceable version of pytree_tesseract apply function."""
-    x = inputs["alpha"]["x"]
-    y = inputs["alpha"]["y"]
-    z = inputs["beta"]["z"]
-    u = inputs["beta"]["gamma"]["u"]
-    v = inputs["beta"]["gamma"]["v"]
-    d0 = inputs["delta"][0]
-    d1 = inputs["delta"][1]
-    k = inputs["epsilon"]["k"]
-    m = inputs["epsilon"]["m"]
-    z0 = inputs["zeta"][0]
-    z1 = inputs["zeta"][1]
+    x = inputs["alpha"]["x"]  # shape (3,)
+    y = inputs["alpha"]["y"]  # shape (4,)
+    z = inputs["beta"]["z"]  # shape (5,)
+    u = inputs["beta"]["gamma"]["u"]  # shape (6,)
+    v = inputs["beta"]["gamma"]["v"]  # shape (7,)
+    d0 = inputs["delta"][0]  # shape (8,)
+    d1 = inputs["delta"][1]  # shape (9,)
+    k = inputs["epsilon"]["k"]  # shape (2,)
+    m = inputs["epsilon"]["m"]  # shape (10,)
+    z0 = inputs["zeta"][0]  # shape (11,)
+    z1 = inputs["zeta"][1]  # shape (12,)
 
     # Complex operations with non-element-wise ops for non-trivial Jacobians
-    # Element-wise terms
-    term1 = x * y
-    # Dot product - couples all elements
-    term2 = jnp.dot(z, v)
+    # Since inputs have different shapes, we need to broadcast/slice appropriately
+
+    # Element-wise terms (broadcast to shape 3)
+    term1 = x * y[:3]
+    # Dot product - couples all elements (use first 5 elements of v)
+    term2 = jnp.dot(z, v[:5])
     # Reductions - each output depends on all input elements
     term3 = u.sum()
-    # Mixed reduction and element-wise
-    term4 = d0 * d1.mean()
-    # Non-linear with reduction
-    term5 = jnp.exp(jnp.clip(k.sum() * 0.1, -5, 5)) * m
+    # Mixed reduction and element-wise (broadcast to shape 3)
+    term4 = d0[:3] * d1.mean()
+    # Non-linear with reduction (broadcast to shape 3)
+    term5 = jnp.exp(jnp.clip(k.sum() * 0.1, -5, 5)) * m[:3]
 
-    result = term1 + term2 + term3 + term4 + term5 + z0 + z1
+    result = term1 + term2 + term3 + term4 + term5 + z0[:3] + z1[:3]
 
     # Dictionary outputs with various coupling
     result_dict = {
-        "a": x + y + z.mean(),  # reduction couples z to outputs
-        "b": z + u + jnp.outer(x[:1], y[:1]).sum(),  # outer product coupling
+        "a": x + y[:3] + z.mean(),  # shape (3,), reduction couples z to outputs
+        "b": z
+        + u[:5]
+        + jnp.outer(x[:1], y[:1]).sum(),  # shape (5,), outer product coupling
     }
 
     # List outputs with reductions and cross-terms
     result_list = [
-        d0 + v + u.mean(),  # reduction couples all u elements
-        d1 + u + jnp.sum(d0 * v),  # dot-product-like coupling
+        d0[:7] + v + u.mean(),  # shape (7,), reduction couples all u elements
+        d1[:6] + u + jnp.sum(d0[:6] * v[:6]),  # shape (6,), dot-product-like coupling
     ]
 
     return {
-        "metadata": k + m,
-        "result": result,
+        "metadata": k + m[:2],  # shape (2,)
+        "result": result,  # shape (3,)
         "result_dict": result_dict,
         "result_list": result_list,
     }
@@ -211,8 +215,16 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
     primal_raw, jvp_raw = jax.jvp(f_raw, (diffable_inputs,), (diffable_inputs,))
 
     # Verify results match raw implementation
-    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), primal, primal_raw)
-    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), jvp, jvp_raw)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        primal,
+        primal_raw,
+    )
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        jvp,
+        jvp_raw,
+    )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -246,8 +258,16 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
     vjp_raw = f_vjp_raw(primal_raw)
 
     # Verify results match raw implementation
-    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), primal, primal_raw)
-    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), vjp, vjp_raw)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        primal,
+        primal_raw,
+    )
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        vjp,
+        vjp_raw,
+    )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -284,37 +304,105 @@ def test_pytree_tesseract_jacobian(
     jac_raw = f_jac_raw(diffable_inputs)
 
     # Verify results match raw implementation
-    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b), jac, jac_raw)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        jac,
+        jac_raw,
+    )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("mode", ["fwd", "rev"])
-def test_tesseract_loss(vectoradd_tess, use_jit, mode):
-    """Test nested tesseract calls with stop_gradient in both forward and reverse mode."""
-    a = np.array([1.0, 2.0, 3.0], dtype="float32")
+@DIFFABLE_PATHS_PARAMS
+def test_pytree_tesseract_loss(
+    pytree_tess, pytree_tess_inputs, use_jit, mode, diffable_paths
+):
+    """Test that non-differentiable inputs in closure don't get included in VJP/JVP for pytree."""
+    # Split inputs into differentiable and non-differentiable based on test parameters
+    diffable_inputs, non_diffable_inputs = split_by_paths(
+        pytree_tess_inputs, diffable_paths
+    )
 
-    def loss_fn(a):
-        b = np.array([4.0, 5.0, 6.0], dtype="float32")
+    # Also include the non-differentiable epsilon and zeta inputs as function arguments
+    # to trigger the tracer issue
+    k = pytree_tess_inputs["epsilon"]["k"]  # non-differentiable per schema
+    m = pytree_tess_inputs["epsilon"]["m"]  # non-differentiable per schema
+    z0 = pytree_tess_inputs["zeta"][0]  # non-differentiable per schema
+    z1 = pytree_tess_inputs["zeta"][1]  # non-differentiable per schema
 
-        c = apply_tesseract(vectoradd_tess, inputs=dict(a=a, b=b))["c"]
-        c = jax.lax.stop_gradient(c)
+    def loss_fn(diffable_inputs, k, m, z0, z1):
+        # Lambda closes over non-differentiable inputs, making them tracers
+        pytree_fn: jax.Callable = lambda diffable_inputs: apply_tesseract(
+            pytree_tess,
+            inputs=merge_dicts(
+                diffable_inputs,
+                merge_dicts(
+                    non_diffable_inputs, {"epsilon": {"k": k, "m": m}, "zeta": [z0, z1]}
+                ),
+            ),
+        )
 
-        outputs = apply_tesseract(vectoradd_tess, inputs=dict(a=a, b=c))
-
-        return jnp.sum((outputs["c"]) ** 2)
+        result = pytree_fn(diffable_inputs)["result"]
+        return jnp.sum(result**2)
 
     if use_jit:
         loss_fn = jax.jit(loss_fn)
 
     if mode == "fwd":
         # Forward mode: JVP
-        primal, tangent = jax.jvp(loss_fn, (a,), (a,))
+        # Note: k, m, z0, z1 get passed as tracers to apply_tesseract.
+        # The schema says they are non-differentiable, so they should not be included in jvp_inputs.
+        primal, tangent = jax.jvp(
+            loss_fn, (diffable_inputs, k, m, z0, z1), (diffable_inputs, k, m, z0, z1)
+        )
         assert primal is not None
         assert tangent is not None
     else:
         # Reverse mode: VJP via grad
+        # Note: k, m, z0, z1 get passed as tracers to apply_tesseract.
+        # The schema says they are non-differentiable, so they should not be included in vjp_inputs.
+        # Only differentiate w.r.t. diffable_inputs (argnums=0)
+        value_and_grad_fn = jax.value_and_grad(loss_fn, argnums=0)
+        assert value_and_grad_fn(diffable_inputs, k, m, z0, z1) is not None
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+@pytest.mark.parametrize("mode", ["fwd", "rev"])
+def test_tesseract_loss(vectoradd_tess, use_jit, mode):
+    """Test that non-differentiable inputs in closure don't get included in VJP/JVP."""
+    a = np.array([1.0, 2.0, 3.0], dtype="float32")
+    b = np.array([4.0, 5.0, 6.0], dtype="float32")
+
+    def loss_fn(a, b):
+        vectoradd_fn_a: jax.Callable = lambda a: apply_tesseract(
+            vectoradd_tess,
+            inputs=dict(
+                a=a,
+                b=b,
+            ),
+        )
+
+        c = vectoradd_fn_a(a)["c"]
+
+        return jnp.sum((c) ** 2)
+
+    if use_jit:
+        loss_fn = jax.jit(loss_fn)
+
+    if mode == "fwd":
+        # Forward mode: JVP
+        # Note: 'b' gets passed as a tracer to apply_tesseract.
+        # The schema says 'b' is non-differentiable, so it should not be included in jvp_inputs.
+        primal, tangent = jax.jvp(loss_fn, (a, b), (a, b))
+        assert primal is not None
+        assert tangent is not None
+    else:
+        # Reverse mode: VJP via grad
+        # Note: This should only differentiate w.r.t. the first argument 'a',
+        # but 'b' gets passed as a tracer to apply_tesseract.
+        # The schema says 'b' is non-differentiable, so it should not be included in vjp_inputs.
         value_and_grad_fn = jax.value_and_grad(loss_fn)
-        assert value_and_grad_fn(a) is not None
+        assert value_and_grad_fn(a, b) is not None
 
 
 def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:

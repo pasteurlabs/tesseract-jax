@@ -109,18 +109,30 @@ def univariate_tess() -> Tesseract:
 
 @pytest.fixture
 def pytree_tess_inputs() -> dict:
-    """Provide inputs for pytree_tesseract tests."""
-    x = np.array([1.0, 2.0, 3.0], dtype="float32")
-    y = np.array([4.0, 5.0, 6.0], dtype="float32")
-    z = np.array([7.0, 8.0, 9.0], dtype="float32")
-    u = np.array([10.0, 11.0, 12.0], dtype="float32")
-    v = np.array([13.0, 14.0, 15.0], dtype="float32")
-    d0 = np.array([16.0, 17.0, 18.0], dtype="float32")
-    d1 = np.array([19.0, 20.0, 21.0], dtype="float32")
-    k = np.array([2.0, 2.0, 2.0], dtype="float32")
-    m = np.array([3.0, 3.0, 3.0], dtype="float32")
-    z0 = np.array([1.0, 1.0, 1.0], dtype="float32")
-    z1 = np.array([2.0, 2.0, 2.0], dtype="float32")
+    """Provide inputs for pytree_tesseract tests with different shapes."""
+    x = np.array([1.0, 2.0, 3.0], dtype="float32")  # shape (3,)
+    y = np.array([4.0, 5.0, 6.0, 7.0], dtype="float32")  # shape (4,)
+    z = np.array([8.0, 9.0, 10.0, 11.0, 12.0], dtype="float32")  # shape (5,)
+    u = np.array([13.0, 14.0, 15.0, 16.0, 17.0, 18.0], dtype="float32")  # shape (6,)
+    v = np.array(
+        [19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0], dtype="float32"
+    )  # shape (7,)
+    d0 = np.array(
+        [26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0], dtype="float32"
+    )  # shape (8,)
+    d1 = np.array(
+        [34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0], dtype="float32"
+    )  # shape (9,)
+    k = np.array([2.0, 2.0], dtype="float32")  # shape (2,) non-differentiable
+    m = np.array(
+        [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0], dtype="float32"
+    )  # shape (10,) non-differentiable
+    z0 = np.array(
+        [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype="float32"
+    )  # shape (11,) non-differentiable
+    z1 = np.array(
+        [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype="float32"
+    )  # shape (12,) non-differentiable
 
     inputs = {
         "alpha": {

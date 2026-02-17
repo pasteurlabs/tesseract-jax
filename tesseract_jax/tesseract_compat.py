@@ -164,8 +164,10 @@ class Jaxeract:
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        # filter out None and static args
+        # Leaves that are None in flat_inputs should be treated as zero in the VJP,
+        # since they correspond to non-differentiable inputs.
         none_mask = [v is None for v in flat_inputs.values()]
+        # We remove static and None entries from the VJP inputs
         vjp_inputs = [
             p
             for p, m, n in zip(flat_inputs, is_static_mask, none_mask, strict=True)
@@ -185,14 +187,16 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        # Add zeros for None entries in flat_inputs
+        # Jax still expects an ouput for every input, even non-differentiable ones
+        # Hence we need to reconstruct the full output, filling in zeros for missing paths.
         out = []
         i = 0
         for path in flat_inputs:
             if path in out_data:
                 out.append(out_data[path])
+            # We only care about non-differentiable inputs that are not static, since static inputs
+            # are not passed to the VJP function at all.
             elif none_mask[i] and not is_static_mask[i]:
-                # Missing paths mean zero gradient
                 out.append(
                     jax.numpy.zeros(array_args[i].shape, dtype=array_args[i].dtype)
                 )

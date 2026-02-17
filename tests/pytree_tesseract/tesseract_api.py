@@ -15,15 +15,17 @@ from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_pat
 
 
 class Foo(BaseModel):
-    z: Differentiable[Array[(None,), Float32]] = Field(description="Input parameter x.")
+    z: Differentiable[Array[(5,), Float32]] = Field(
+        description="Input parameter z, shape (5,)."
+    )
     gamma: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Input parameters u and v as a dictionary.",
+        description="Input parameters u (shape 6) and v (shape 7) as a dictionary.",
     )
 
 
 class InputSchema(BaseModel):
     alpha: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Input parameters x and y as a dictionary.",
+        description="Input parameters x (shape 3) and y (shape 4) as a dictionary.",
     )
 
     beta: Foo = Field(
@@ -31,30 +33,30 @@ class InputSchema(BaseModel):
     )
 
     delta: list[Differentiable[Array[(None,), Float32]]] = Field(
-        description="List of input parameters.",
+        description="List of input parameters: delta[0] (shape 8), delta[1] (shape 9).",
     )
 
     epsilon: dict[str, Array[(None,), Float32]] = Field(
-        description="Parameters k and m that are not differentiable.",
+        description="Parameters k (shape 2, non-diff) and m (shape 10, non-diff).",
     )
 
     zeta: list[Array[(None,), Float32]] = Field(
-        description="List of parameters that are not differentiable.",
+        description="List of parameters that are not differentiable: zeta[0] (shape 11), zeta[1] (shape 12).",
     )
 
 
 class OutputSchema(BaseModel):
-    metadata: Array[(None,), Float32] = Field(
-        description="Non-differentiable output: k + m",
+    metadata: Array[(2,), Float32] = Field(
+        description="Non-differentiable output: k + m[:2], shape (2,)",
     )
-    result: Differentiable[Array[(None,), Float32]] = Field(
-        description="x * y + z * v + u + delta[0] + delta[1] * k + m + z0 + z1",
+    result: Differentiable[Array[(3,), Float32]] = Field(
+        description="Complex combination of inputs, shape (3,)",
     )
     result_dict: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Dict output: a=x+y, b=z+u",
+        description="Dict output: a (shape 3), b (shape 5)",
     )
     result_list: list[Differentiable[Array[(None,), Float32]]] = Field(
-        description="List output: [d0+v, d1+u]",
+        description="List output: [shape 7, shape 6]",
     )
 
 
@@ -65,51 +67,57 @@ class OutputSchema(BaseModel):
 
 @eqx.filter_jit
 def apply_jit(inputs: dict) -> dict:
-    x = inputs["alpha"]["x"]
-    y = inputs["alpha"]["y"]
+    x = inputs["alpha"]["x"]  # shape (3,)
+    y = inputs["alpha"]["y"]  # shape (4,)
 
-    z = inputs["beta"]["z"]
-    u = inputs["beta"]["gamma"]["u"]
-    v = inputs["beta"]["gamma"]["v"]
+    z = inputs["beta"]["z"]  # shape (5,)
+    u = inputs["beta"]["gamma"]["u"]  # shape (6,)
+    v = inputs["beta"]["gamma"]["v"]  # shape (7,)
 
-    d0 = inputs["delta"][0]
-    d1 = inputs["delta"][1]
+    d0 = inputs["delta"][0]  # shape (8,)
+    d1 = inputs["delta"][1]  # shape (9,)
 
-    k = inputs["epsilon"]["k"]
-    m = inputs["epsilon"]["m"]
+    k = inputs["epsilon"]["k"]  # shape (2,) non-differentiable
+    m = inputs["epsilon"]["m"]  # shape (10,) non-differentiable
 
-    z0 = inputs["zeta"][0]
-    z1 = inputs["zeta"][1]
+    z0 = inputs["zeta"][0]  # shape (11,) non-differentiable
+    z1 = inputs["zeta"][1]  # shape (12,) non-differentiable
 
     # Complex operations with non-element-wise ops for non-trivial Jacobians
-    # Element-wise terms
-    term1 = x * y
-    # Dot product - couples all elements
-    term2 = jax.numpy.dot(z, v)
+    # Since inputs have different shapes, we need to broadcast/slice appropriately
+
+    # Element-wise terms (broadcast to shape 3)
+    term1 = x * y[:3]
+    # Dot product - couples all elements (use first 5 elements of v)
+    term2 = jax.numpy.dot(z, v[:5])
     # Reductions - each output depends on all input elements
     term3 = u.sum()
-    # Mixed reduction and element-wise
-    term4 = d0 * d1.mean()
-    # Non-linear with reduction
-    term5 = jax.numpy.exp(jax.numpy.clip(k.sum() * 0.1, -5, 5)) * m
+    # Mixed reduction and element-wise (broadcast to shape 3)
+    term4 = d0[:3] * d1.mean()
+    # Non-linear with reduction (broadcast to shape 3)
+    term5 = jax.numpy.exp(jax.numpy.clip(k.sum() * 0.1, -5, 5)) * m[:3]
 
-    result = term1 + term2 + term3 + term4 + term5 + z0 + z1
+    result = term1 + term2 + term3 + term4 + term5 + z0[:3] + z1[:3]
 
     # Dictionary outputs with various coupling
     result_dict = {
-        "a": x + y + z.mean(),  # reduction couples z to outputs
-        "b": z + u + jax.numpy.outer(x[:1], y[:1]).sum(),  # outer product coupling
+        "a": x + y[:3] + z.mean(),  # shape (3,), reduction couples z to outputs
+        "b": z
+        + u[:5]
+        + jax.numpy.outer(x[:1], y[:1]).sum(),  # shape (5,), outer product coupling
     }
 
     # List outputs with reductions and cross-terms
     result_list = [
-        d0 + v + u.mean(),  # reduction couples all u elements
-        d1 + u + jax.numpy.sum(d0 * v),  # dot-product-like coupling
+        d0[:7] + v + u.mean(),  # shape (7,), reduction couples all u elements
+        d1[:6]
+        + u
+        + jax.numpy.sum(d0[:6] * v[:6]),  # shape (6,), dot-product-like coupling
     ]
 
     return {
-        "metadata": k + m,
-        "result": result,
+        "metadata": k + m[:2],  # shape (2,)
+        "result": result,  # shape (3,)
         "result_dict": result_dict,
         "result_list": result_list,
     }

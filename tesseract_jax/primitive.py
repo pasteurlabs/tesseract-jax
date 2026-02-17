@@ -117,12 +117,6 @@ def tesseract_dispatch_jvp_rule(
         for arg in tan_args
     )
 
-    print(
-        f"JVP DEBUG: len(in_args)={len(in_args)}, len(tan_args)={len(tan_args)}, len(tan_args_)={len(tan_args_)}"
-    )
-    print(f"JVP DEBUG: is_static_mask={is_static_mask}, sum={sum(is_static_mask)}")
-    print(f"JVP DEBUG: len(static_args)={len(static_args)}")
-
     jvp = tesseract_dispatch_p.bind(
         *in_args,
         *tan_args_,
@@ -153,7 +147,7 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 
 def tesseract_dispatch_transpose_rule(
-    cotangent: Sequence[ArrayLike],
+    cotangent: Sequence[Any],  # Can contain Zero objects from JAX AD
     *args: ArrayLike,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
