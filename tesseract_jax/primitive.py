@@ -185,11 +185,10 @@ def tesseract_dispatch_transpose_rule(
     )
     # TODO: I'm not sure this makes sense given these docs:
     #       https://jax.readthedocs.io/en/latest/jax-primitives.html#transposition
-    #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"W
+    #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"
     #       ...but if I provide only cotangent, jax complains, and if I investigate its internals,
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
-    jax.debug.callback(lambda x: print(f"value: {x}"), cotangent_tuple)
 
     return tuple([None] * len(array_args) + list(vjp))
 
@@ -356,22 +355,7 @@ def filter_static_zeros(
             s or z for s, z in zip(is_static_mask, is_zeros_mask, strict=True)
         )
 
-        # Convert traced arrays with Zero tangents to concrete zeros
-        flat_args_converted = []
-        for arg, tan_arg, is_zero in zip(
-            flat_args, tan_args, is_zeros_mask, strict=True
-        ):
-            if is_zero and isinstance(arg, jax.core.Tracer):
-                # This is a traced array with Zero tangent - convert to concrete zero
-                # Use np.zeros (not jnp.zeros_like) to create a concrete array, not a traced one
-                flat_args_converted.append(
-                    np.zeros(tan_arg.aval.shape, dtype=tan_arg.aval.dtype)
-                )
-            else:
-                flat_args_converted.append(arg)
-        flat_args = tuple(flat_args_converted)
-
-        # Remove it from tangents
+        # Remove Zero tangents from tan_args
         tan_args = tuple(
             arg
             for arg, is_static in zip(tan_args, is_static_mask, strict=True)

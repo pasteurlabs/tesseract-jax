@@ -23,9 +23,31 @@ def pytree_apply_impl(inputs: dict) -> dict:
     z0 = inputs["zeta"][0]
     z1 = inputs["zeta"][1]
 
-    result = x * y + z * v + u + d0 + d1 * k + m + z0 + z1
-    result_dict = {"a": x + y, "b": z + u}
-    result_list = [d0 + v, d1 + u]
+    # Complex operations with non-element-wise ops for non-trivial Jacobians
+    # Element-wise terms
+    term1 = x * y
+    # Dot product - couples all elements
+    term2 = jnp.dot(z, v)
+    # Reductions - each output depends on all input elements
+    term3 = u.sum()
+    # Mixed reduction and element-wise
+    term4 = d0 * d1.mean()
+    # Non-linear with reduction
+    term5 = jnp.exp(jnp.clip(k.sum() * 0.1, -5, 5)) * m
+
+    result = term1 + term2 + term3 + term4 + term5 + z0 + z1
+
+    # Dictionary outputs with various coupling
+    result_dict = {
+        "a": x + y + z.mean(),  # reduction couples z to outputs
+        "b": z + u + jnp.outer(x[:1], y[:1]).sum(),  # outer product coupling
+    }
+
+    # List outputs with reductions and cross-terms
+    result_list = [
+        d0 + v + u.mean(),  # reduction couples all u elements
+        d1 + u + jnp.sum(d0 * v),  # dot-product-like coupling
+    ]
 
     return {
         "metadata": k + m,
