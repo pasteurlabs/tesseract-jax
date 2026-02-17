@@ -164,8 +164,12 @@ class Jaxeract:
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
+        # filter out None and static args
+        none_mask = [v is None for v in flat_inputs.values()]
         vjp_inputs = [
-            p for p, m in zip(flat_inputs, is_static_mask, strict=True) if not m
+            p
+            for p, m, n in zip(flat_inputs, is_static_mask, none_mask, strict=True)
+            if not m and not n
         ]
 
         cotangent_pytree = jax.tree.unflatten(output_pytreedef, cotangents)
@@ -181,5 +185,19 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        out_data = tuple(jax.tree.flatten(out_data)[0])
-        return out_data
+        # Add zeros for None entries in flat_inputs
+        out = []
+        i = 0
+        for path in flat_inputs:
+            if path in out_data:
+                out.append(out_data[path])
+            elif none_mask[i] and not is_static_mask[i]:
+                # Missing paths mean zero gradient
+                out.append(
+                    jax.numpy.zeros(array_args[i].shape, dtype=array_args[i].dtype)
+                )
+
+            i += 1
+
+        # out_data = tuple(jax.tree.flatten(out_data)[0])
+        return tuple(out)

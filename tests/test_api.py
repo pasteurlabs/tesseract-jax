@@ -288,8 +288,9 @@ def test_pytree_tesseract_jacobian(
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_tesseract_loss(vectoradd_tess, use_jit):
-    """Test nested tesseract calls with stop_gradient and value_and_grad."""
+@pytest.mark.parametrize("mode", ["fwd", "rev"])
+def test_tesseract_loss(vectoradd_tess, use_jit, mode):
+    """Test nested tesseract calls with stop_gradient in both forward and reverse mode."""
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
 
     def loss_fn(a):
@@ -305,9 +306,15 @@ def test_tesseract_loss(vectoradd_tess, use_jit):
     if use_jit:
         loss_fn = jax.jit(loss_fn)
 
-    value_and_grad_fn = jax.value_and_grad(loss_fn)
-
-    assert value_and_grad_fn(a) is not None
+    if mode == "fwd":
+        # Forward mode: JVP
+        primal, tangent = jax.jvp(loss_fn, (a,), (a,))
+        assert primal is not None
+        assert tangent is not None
+    else:
+        # Reverse mode: VJP via grad
+        value_and_grad_fn = jax.value_and_grad(loss_fn)
+        assert value_and_grad_fn(a) is not None
 
 
 def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:

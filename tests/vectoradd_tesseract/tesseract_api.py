@@ -33,6 +33,21 @@ def abstract_eval(abstract_inputs):
     }
 
 
+def jacobian_vector_product(
+    inputs: InputSchema,
+    jvp_inputs: set[str],
+    jvp_outputs: set[str],
+    tangent_vector: dict[str, Any],
+):
+    """Forward-mode AD for c = a + b.
+
+    Since dc/da = 1 and b is not differentiable, the JVP is just the tangent of a.
+    """
+    return {
+        "c": tangent_vector.get("a", 0.0),
+    }
+
+
 def vector_jacobian_product(
     inputs: InputSchema,
     vjp_inputs: set[str],

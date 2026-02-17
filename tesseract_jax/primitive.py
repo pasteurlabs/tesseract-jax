@@ -64,12 +64,7 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
-    """Define how to dispatch evals and pipe arguments.
-
-    We dont actually need to communicate with the Tesseract in abstract_eval,
-    as the we already computed the abstract outputs, we just need to put them
-    in the right format and return them.
-    """
+    """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
         "apply",
         "jacobian_vector_product",
@@ -110,36 +105,43 @@ def tesseract_dispatch_jvp_rule(
     #          (not in ad.py's backward_pass), you probably want to instantiate
     #          it so that it's no longer symbolic
 
-    # Reconstruct flat_args to detect Zero tangents
-    unmasked_args = combine_args(in_args, static_args, is_static_mask)
-    unmasked_tans = combine_args(tan_args, (None,) * len(static_args), is_static_mask)
+    # TODO: create a mask for Zero (essentially, jvp_in)? or maybe substitute it
+    #       with something that jax still likes, while not wasting memory and time?
 
-    # Filter to update static mask based on Zero tangents
-    # Pass is_static_mask so filter_static_zeros knows to expand tan_args
-    array_args, filtered_tan_args, new_static_args, new_is_static_mask = (
-        filter_static_zeros(unmasked_args, unmasked_tans, is_static_mask)
+    tan_args_ = tuple(
+        (
+            jax.numpy.zeros_like(arg.aval)
+            if isinstance(arg, jax._src.ad_util.Zero)
+            else arg
+        )
+        for arg in tan_args
     )
 
-    # this leads to an abstract_eval call and a jvp
+    print(
+        f"JVP DEBUG: len(in_args)={len(in_args)}, len(tan_args)={len(tan_args)}, len(tan_args_)={len(tan_args_)}"
+    )
+    print(f"JVP DEBUG: is_static_mask={is_static_mask}, sum={sum(is_static_mask)}")
+    print(f"JVP DEBUG: len(static_args)={len(static_args)}")
+
     jvp = tesseract_dispatch_p.bind(
-        *array_args,
-        *filtered_tan_args,
-        static_args=new_static_args,
+        *in_args,
+        *tan_args_,
+        static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=new_is_static_mask,
+        is_static_mask=is_static_mask,
         client=client,
         eval_func="jacobian_vector_product",
     )
 
     res = tesseract_dispatch_p.bind(
-        *array_args,
-        static_args=new_static_args,
+        *in_args,
+        static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=new_is_static_mask,
+        is_static_mask=is_static_mask,
         client=client,
         eval_func="apply",
     )
@@ -164,17 +166,21 @@ def tesseract_dispatch_transpose_rule(
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
 
-    # During transpose, args already contains only the array args from forward pass
-    # We need to work with them as-is, without trying to reconstruct the original structure
-    # Filter out UndefinedPrimal values (inputs that don't need gradients)
-    array_args = tuple(arg for arg in args if not isinstance(arg, ad.UndefinedPrimal))
+    n_primals = len(is_static_mask) - sum(is_static_mask)
+    args = args[:n_primals]
 
-    # cotangent should just be used as-is (it corresponds to output gradients)
-    cotangent_tuple = tuple(cotangent)
+    cotan_args_ = tuple(
+        (
+            jax.numpy.zeros_like(arg.aval)
+            if isinstance(arg, jax._src.ad_util.Zero)
+            else arg
+        )
+        for arg in cotangent
+    )
 
     vjp = tesseract_dispatch_p.bind(
-        *array_args,
-        *cotangent_tuple,
+        *args,
+        *cotan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
@@ -190,7 +196,7 @@ def tesseract_dispatch_transpose_rule(
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
 
-    return tuple([None] * len(array_args) + list(vjp))
+    return tuple([None] * len(args) + list(vjp))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
@@ -206,22 +212,27 @@ def tesseract_dispatch(
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
-    """Defines how to dispatch computation.
+    """Defines how to dispatch lowering the computation.
 
     The dispatch that is not lowered is only called in cases where abstract eval is not needed.
     """
-    static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
-    out = getattr(client, eval_func)(
-        array_args,
-        static_args_,
-        input_pytreedef,
-        output_pytreedef,
-        output_avals,
-        is_static_mask,
-    )
-    if not isinstance(out, tuple) and output_avals is not None:
-        out = (out,)
-    return out
+
+    def _dispatch(*args: ArrayLike) -> Any:
+        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        out = getattr(client, eval_func)(
+            args,
+            static_args_,
+            input_pytreedef,
+            output_pytreedef,
+            output_avals,
+            is_static_mask,
+        )
+        if not isinstance(out, tuple) and output_avals is not None:
+            out = (out,)
+        return out
+
+    result = _dispatch(*array_args)
+    return result
 
 
 tesseract_dispatch_p.def_impl(tesseract_dispatch)
@@ -321,51 +332,10 @@ def _check_dtype(dtype: Any) -> None:
         )
 
 
-def filter_static_zeros(
-    flat_args: tuple[ArrayLike | ShapedArray | Any, ...],
-    tan_args: tuple[ArrayLike | None, ...] | None = None,
-    is_static_mask: tuple[bool, ...] | None = None,
-) -> tuple[
-    tuple[ArrayLike, ...],
-    tuple[ArrayLike, ...] | None,
-    tuple[_Hashable, ...],
-    tuple[bool, ...],
-]:
-    """Filter for static arguments and Zero tangents/cotangents.
-
-    Args:
-        flat_args: All arguments (arrays + statics)
-        tan_args: Tangent/cotangent arguments. If is_static_mask is provided,
-                  this should only contain tangents for array args (not statics).
-                  Otherwise, it should have the same length as flat_args.
-        is_static_mask: Optional pre-computed static mask. If provided, tan_args
-                       will be expanded to match flat_args length.
-    """
-    if is_static_mask is None:
-        is_static_mask = tuple(
-            not isinstance(arg, jax.core.Tracer) for arg in flat_args
-        )
-
-    # Tan args provides additional signal for which primals are effectively static
-    if tan_args is not None:
-        is_zeros_mask = tuple(
-            isinstance(arg, jax._src.ad_util.Zero) or arg is None for arg in tan_args
-        )
-        is_static_mask = tuple(
-            s or z for s, z in zip(is_static_mask, is_zeros_mask, strict=True)
-        )
-
-        # Remove Zero tangents from tan_args
-        tan_args = tuple(
-            arg
-            for arg, is_static in zip(tan_args, is_static_mask, strict=True)
-            if not is_static
-        )
-
-    array_args, static_args = split_args(flat_args, is_static_mask)
-    static_args = tuple(_make_hashable(arg) for arg in static_args)
-
-    return array_args, tan_args, static_args, is_static_mask
+def _is_static(x: Any) -> bool:
+    if isinstance(x, jax.core.Tracer):
+        return False
+    return True
 
 
 def _make_hashable(obj: Any) -> _Hashable:
@@ -445,14 +415,14 @@ def apply_tesseract(
 
     client = Jaxeract(tesseract_client)
 
-    # We are splitting the arguments into static and array arguments
-    # This is because JAX primitives require all non-array arguments to be hashable
-    # This way we can use our custom _Hashable class to wrap non-hashable args
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    array_args, _, static_args, is_static_mask = filter_static_zeros(tuple(flat_args))
+    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+    array_args, static_args = split_args(flat_args, is_static_mask)
+    static_args = tuple(_make_hashable(arg) for arg in static_args)
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
+        output_pytreedef, avals = None, None
         avals = client.abstract_eval(inputs)
 
         is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
@@ -467,6 +437,7 @@ def apply_tesseract(
             for aval in flat_avals
         )
 
+        # Apply the primitive
         out = tesseract_dispatch_p.bind(
             *array_args,
             static_args=static_args,
@@ -496,4 +467,5 @@ def apply_tesseract(
             eval_func="apply",
         )
 
+        # Unflatten the output
         return out
