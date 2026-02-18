@@ -99,6 +99,14 @@ def tesseract_dispatch_jvp_rule(
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
+    # Check if JVP endpoint is available
+    if "jacobian_vector_product" not in client.available_methods:
+        raise NotImplementedError(
+            f"Jacobian Vector Product (JVP) not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            "To use jax.jvp or forward-mode differentiation, implement the 'jacobian_vector_product' endpoint."
+        )
+
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
     #          zero `Zero(AbstractToken)`, i.e. in a JVP or transpose rule
@@ -159,6 +167,15 @@ def tesseract_dispatch_transpose_rule(
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
+
+    # Check if VJP endpoint is available
+    if "vector_jacobian_product" not in client.available_methods:
+        raise NotImplementedError(
+            f"Vector Jacobian Product (VJP) not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            "To use jax.grad, jax.vjp, or reverse-mode differentiation, "
+            "implement the 'vector_jacobian_product' endpoint."
+        )
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     args = args[:n_primals]
