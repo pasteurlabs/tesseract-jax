@@ -27,9 +27,8 @@ tesseract_dispatch_p.multiple_results = True
 class _Hashable:
     """A wrapper class to make non-hashable objects hashable by using their id.
 
-    This is not a proper solution, as two identical objects with different memory
+    This is not a proper hash function, as two identical objects with different memory
     addresses will have different hashes.
-    However
 
     """
 
@@ -155,7 +154,7 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 
 def tesseract_dispatch_transpose_rule(
-    cotangent: Sequence[Any],  # Can contain Zero objects from JAX AD
+    cotangent: Sequence[ArrayLike | ad.Zero],
     *args: ArrayLike,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
