@@ -682,3 +682,71 @@ def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
 
     with pytest.raises(ValueError):
         jax.vjp(f, a)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    def f(a):
+        return apply_tesseract(dict_tess, inputs=a)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    result = f(pytree_tess_inputs)
+    result_ref = dict_tess.apply(pytree_tess_inputs)
+    _assert_pytree_isequal(result, result_ref)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    diffable_inputs = {
+        "alpha": pytree_tess_inputs["alpha"],
+        "beta": pytree_tess_inputs["beta"],
+        "delta": pytree_tess_inputs["delta"],
+    }
+    non_diffable_inputs = {
+        "epsilon": pytree_tess_inputs["epsilon"],
+        "zeta": pytree_tess_inputs["zeta"],
+    }
+
+    def f(diffable):
+        inputs = {**diffable, **non_diffable_inputs}
+        return apply_tesseract(dict_tess, inputs=inputs)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _ = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    diffable_inputs = {
+        "alpha": pytree_tess_inputs["alpha"],
+        "beta": pytree_tess_inputs["beta"],
+        "delta": pytree_tess_inputs["delta"],
+    }
+    non_diffable_inputs = {
+        "epsilon": pytree_tess_inputs["epsilon"],
+        "zeta": pytree_tess_inputs["zeta"],
+    }
+
+    def f(diffable):
+        inputs = {**diffable, **non_diffable_inputs}
+        return apply_tesseract(dict_tess, inputs=inputs)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    (primal, f_vjp) = jax.vjp(f, diffable_inputs)
+
+    if use_jit:
+        f_vjp = jax.jit(f_vjp)
+
+    _ = f_vjp(primal)
