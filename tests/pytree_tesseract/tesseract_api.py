@@ -5,87 +5,102 @@ from typing import Any
 
 import equinox as eqx
 import jax
-import jax.numpy as jnp
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
-from typing_extensions import Self
+
+#
+# Schemas
+#
 
 
-class Vector_and_Scalar(BaseModel):
-    v: Differentiable[Array[(None,), Float32]] = Field(
-        description="An arbitrary vector"
+class Foo(BaseModel):
+    z: Differentiable[Array[(None,), Float32]] = Field(description="Input parameter x.")
+    gamma: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+        description="Input parameters u and v as a dictionary.",
     )
-    s: Differentiable[Float32] = Field(description="A scalar", default=1.0)
-
-    def scale(self) -> Differentiable[Array[(None,), Float32]]:
-        return self.s * self.v
 
 
 class InputSchema(BaseModel):
-    a: Vector_and_Scalar = Field(
-        description="An arbitrary vector and a scalar to multiply it by"
-    )
-    b: Vector_and_Scalar = Field(
-        description="An arbitrary vector and a scalar to multiply it by "
-        "must be of same shape as b"
-    )
-    norm_ord: int = Field(
-        description="Order of norm (see numpy.linalg.norm)",
-        default=2,
+    alpha: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+        description="Input parameters x and y as a dictionary.",
     )
 
-    @model_validator(mode="after")
-    def validate_shape_inputs(self) -> Self:
-        if self.a.v.shape != self.b.v.shape:
-            raise ValueError(
-                f"a.v and b.v must have the same shape. "
-                f"Got {self.a.v.shape} and {self.b.v.shape} instead."
-            )
-        return self
-
-
-class Result_and_Norm(BaseModel):
-    result: Differentiable[Array[(None,), Float32]] = Field(
-        description="Vector s_a·a + s_b·b"
+    beta: Foo = Field(
+        description="Nested input parameters.",
     )
-    normed_result: Differentiable[Array[(None,), Float32]] = Field(
-        description="Normalized Vector s_a·a + s_b·b/|s_a·a + s_b·b|"
+
+    delta: list[Differentiable[Array[(None,), Float32]]] = Field(
+        description="List of input parameters.",
+    )
+
+    epsilon: dict[str, Array[(None,), Float32]] = Field(
+        description="Parameters k and m that are not differentiable.",
+    )
+
+    zeta: list[Array[(None,), Float32]] = Field(
+        description="List of parameters that are not differentiable.",
     )
 
 
 class OutputSchema(BaseModel):
-    vector_add: Result_and_Norm
-    vector_min: Result_and_Norm
+    metadata: Array[(None,), Float32] = Field(
+        description="Non-differentiable output: k + m",
+    )
+    result: Differentiable[Array[(None,), Float32]] = Field(
+        description="x * y + z * v + u + delta[0] + delta[1] * k + m + z0 + z1",
+    )
+    result_dict: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
+        description="Dict output: a=x+y, b=z+u",
+    )
+    result_list: list[Differentiable[Array[(None,), Float32]]] = Field(
+        description="List output: [d0+v, d1+u]",
+    )
+
+
+#
+# Required endpoints
+#
 
 
 @eqx.filter_jit
 def apply_jit(inputs: dict) -> dict:
-    a_scaled = inputs["a"]["s"] * inputs["a"]["v"]
-    b_scaled = inputs["b"]["s"] * inputs["b"]["v"]
-    add_result = a_scaled + b_scaled
-    min_result = a_scaled - b_scaled
+    x = inputs["alpha"]["x"]
+    y = inputs["alpha"]["y"]
 
-    def safe_norm(x, ord):
-        # Compute the norm of a vector, adding a small epsilon to ensure
-        # differentiability and avoid division by zero
-        return jnp.power(jnp.power(jnp.abs(x), ord).sum() + 1e-8, 1 / ord)
+    z = inputs["beta"]["z"]
+    u = inputs["beta"]["gamma"]["u"]
+    v = inputs["beta"]["gamma"]["v"]
+
+    d0 = inputs["delta"][0]
+    d1 = inputs["delta"][1]
+
+    k = inputs["epsilon"]["k"]
+    m = inputs["epsilon"]["m"]
+
+    z0 = inputs["zeta"][0]
+    z1 = inputs["zeta"][1]
+
+    result = x * y + z * v + u + d0 + d1 * k + m + z0 + z1
+    result_dict = {"a": x + y, "b": z + u}
+    result_list = [d0 + v, d1 + u]
 
     return {
-        "vector_add": {
-            "result": add_result,
-            "normed_result": add_result / safe_norm(add_result, ord=inputs["norm_ord"]),
-        },
-        "vector_min": {
-            "result": min_result,
-            "normed_result": min_result / safe_norm(min_result, ord=inputs["norm_ord"]),
-        },
+        "metadata": k + m,
+        "result": result,
+        "result_dict": result_dict,
+        "result_list": result_list,
     }
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Multiplies a vector `a` by `s`, and sums the result to `b`."""
+    """Random element-wise operation combining all inputs."""
     return apply_jit(inputs.model_dump())
+
+
+#
+# Optional endpoints
+#
 
 
 def abstract_eval(abstract_inputs):
@@ -116,6 +131,14 @@ def abstract_eval(abstract_inputs):
     )
 
 
+def jacobian(
+    inputs: InputSchema,
+    jac_inputs: set[str],
+    jac_outputs: set[str],
+):
+    return jac_jit(inputs.model_dump(), tuple(jac_inputs), tuple(jac_outputs))
+
+
 def jacobian_vector_product(
     inputs: InputSchema,
     jvp_inputs: set[str],
@@ -142,14 +165,6 @@ def vector_jacobian_product(
         tuple(vjp_outputs),
         cotangent_vector,
     )
-
-
-def jacobian(
-    inputs: InputSchema,
-    jac_inputs: set[str],
-    jac_outputs: set[str],
-):
-    return jac_jit(inputs.model_dump(), tuple(jac_inputs), tuple(jac_outputs))
 
 
 @eqx.filter_jit

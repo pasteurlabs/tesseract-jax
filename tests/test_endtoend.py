@@ -499,6 +499,111 @@ def test_nested_tesseract_vmap(served_nested_tesseract_raw, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
+def test_nested_tesseract_fori_loop(served_nested_tesseract_raw, use_jit):
+    nested_tess = Tesseract(served_nested_tesseract_raw)
+    b = np.array(2.0, dtype="float32")
+    w = np.array([5.0, 7.0, 9.0], dtype="float32")
+
+    def f(a, v, s, i):
+        return apply_tesseract(
+            nested_tess,
+            inputs={
+                "scalars": {"a": a, "b": b},
+                "vectors": {"v": v, "w": w},
+                "other_stuff": {"s": s, "i": i, "f": 2.718},
+            },
+        )
+
+    def f_raw(a, v, s, i):
+        return {
+            "scalars": {"a": a * 10 + b, "b": b},
+            "vectors": {"v": v * 10 + w, "w": w},
+        }
+
+    def body_fun(_i, carry):
+        a, v = carry
+        result = f(a, v, "hello", 3)
+        return (result["scalars"]["a"], result["vectors"]["v"])
+
+    def body_raw(_i, carry):
+        a, v = carry
+        result = f_raw(a, v, "hello", 3)
+        return (result["scalars"]["a"], result["vectors"]["v"])
+
+    def loop_with_tess(a, v):
+        return jax.lax.fori_loop(0, 5, body_fun, (a, v))
+
+    def loop_raw(a, v):
+        return jax.lax.fori_loop(0, 5, body_raw, (a, v))
+
+    if use_jit:
+        loop_with_tess = jax.jit(loop_with_tess)
+        loop_raw = jax.jit(loop_raw)
+
+    a = np.array(1.0, dtype="float32")
+    v = np.array([1.0, 2.0, 3.0], dtype="float32")
+
+    result = loop_with_tess(a, v)
+    result_raw = loop_raw(a, v)
+
+    _assert_pytree_isequal(result, result_raw)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_nested_tesseract_scan(served_nested_tesseract_raw, use_jit):
+    nested_tess = Tesseract(served_nested_tesseract_raw)
+    b = np.array(2.0, dtype="float32")
+    w = np.array([5.0, 7.0, 9.0], dtype="float32")
+
+    def f(a, v, s, i):
+        return apply_tesseract(
+            nested_tess,
+            inputs={
+                "scalars": {"a": a, "b": b},
+                "vectors": {"v": v, "w": w},
+                "other_stuff": {"s": s, "i": i, "f": 2.718},
+            },
+        )
+
+    def f_raw(a, v, s, i):
+        return {
+            "scalars": {"a": a * 10 + b, "b": b},
+            "vectors": {"v": v * 10 + w, "w": w},
+        }
+
+    def scan_fn(carry, a_input):
+        v = carry
+        result = f(a_input, v, "hello", 3)
+        new_carry = result["vectors"]["v"]
+        return new_carry, result["scalars"]["a"]
+
+    def scan_fn_raw(carry, a_input):
+        v = carry
+        result = f_raw(a_input, v, "hello", 3)
+        new_carry = result["vectors"]["v"]
+        return new_carry, result["scalars"]["a"]
+
+    def scan_with_tess(a_arr, v_init):
+        return jax.lax.scan(scan_fn, v_init, a_arr)
+
+    def scan_raw(a_arr, v_init):
+        return jax.lax.scan(scan_fn_raw, v_init, a_arr)
+
+    if use_jit:
+        scan_with_tess = jax.jit(scan_with_tess)
+        scan_raw = jax.jit(scan_raw)
+
+    a_arr = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype="float32")
+    v_init = np.array([1.0, 2.0, 3.0], dtype="float32")
+
+    final_carry, outputs = scan_with_tess(a_arr, v_init)
+    final_carry_raw, outputs_raw = scan_raw(a_arr, v_init)
+
+    _assert_pytree_isequal(final_carry, final_carry_raw)
+    _assert_pytree_isequal(outputs, outputs_raw)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
 def test_partial_differentiation(served_univariate_tesseract_raw, use_jit):
     """Test that differentiation works correctly in cases where some inputs are constants."""
     rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
@@ -645,3 +750,71 @@ def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
     ):
         grad_f = jax.grad(f)
         grad_f(x)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    def f(a):
+        return apply_tesseract(dict_tess, inputs=a)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    result = f(pytree_tess_inputs)
+    result_ref = dict_tess.apply(pytree_tess_inputs)
+    _assert_pytree_isequal(result, result_ref)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    diffable_inputs = {
+        "alpha": pytree_tess_inputs["alpha"],
+        "beta": pytree_tess_inputs["beta"],
+        "delta": pytree_tess_inputs["delta"],
+    }
+    non_diffable_inputs = {
+        "epsilon": pytree_tess_inputs["epsilon"],
+        "zeta": pytree_tess_inputs["zeta"],
+    }
+
+    def f(diffable):
+        inputs = {**diffable, **non_diffable_inputs}
+        return apply_tesseract(dict_tess, inputs=inputs)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _ = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+    dict_tess = Tesseract(served_pytree_tesseract)
+
+    diffable_inputs = {
+        "alpha": pytree_tess_inputs["alpha"],
+        "beta": pytree_tess_inputs["beta"],
+        "delta": pytree_tess_inputs["delta"],
+    }
+    non_diffable_inputs = {
+        "epsilon": pytree_tess_inputs["epsilon"],
+        "zeta": pytree_tess_inputs["zeta"],
+    }
+
+    def f(diffable):
+        inputs = {**diffable, **non_diffable_inputs}
+        return apply_tesseract(dict_tess, inputs=inputs)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    (primal, f_vjp) = jax.vjp(f, diffable_inputs)
+
+    if use_jit:
+        f_vjp = jax.jit(f_vjp)
+
+    _ = f_vjp(primal)

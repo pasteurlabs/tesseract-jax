@@ -1,0 +1,4 @@
+name: "pytree_tesseract"
+version: "0.1.0"
+description: |
+  Tesseract that uses dicts and lists as inputs, to test pytree handling.
