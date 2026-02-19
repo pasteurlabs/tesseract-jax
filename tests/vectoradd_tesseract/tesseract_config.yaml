@@ -1,0 +1,9 @@
+name: vectoradd_tesseracts
+version: "2025-11-05"
+description: |
+  Tesseract that adds two vectors. Uses jax internally.
+
+build_config:
+  target_platform: "native"
+  # package_data: []
+  # custom_build_steps: []
