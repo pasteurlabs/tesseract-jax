@@ -90,14 +90,6 @@ def tesseract_dispatch_jvp_rule(
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
-    # Check if JVP endpoint is available
-    if "jacobian_vector_product" not in client.available_methods:
-        raise NotImplementedError(
-            f"Jacobian Vector Product (JVP) not implemented for this Tesseract. "
-            f"Available endpoints: {', '.join(client.available_methods)}. "
-            "To use jax.jvp or forward-mode differentiation, implement the 'jacobian_vector_product' endpoint."
-        )
-
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
     #          zero `Zero(AbstractToken)`, i.e. in a JVP or transpose rule
@@ -159,15 +151,6 @@ def tesseract_dispatch_transpose_rule(
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
 
-    # Check if VJP endpoint is available
-    if "vector_jacobian_product" not in client.available_methods:
-        raise NotImplementedError(
-            f"Vector Jacobian Product (VJP) not implemented for this Tesseract. "
-            f"Available endpoints: {', '.join(client.available_methods)}. "
-            "To use jax.grad, jax.vjp, or reverse-mode differentiation, "
-            "implement the 'vector_jacobian_product' endpoint."
-        )
-
     n_primals = len(is_static_mask) - sum(is_static_mask)
     args = args[:n_primals]
 
@@ -204,6 +187,15 @@ def tesseract_dispatch_transpose_rule(
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
 
+def _check_eval_func(eval_func: str, client: Jaxeract) -> None:
+    if eval_func not in client.available_methods:
+        raise NotImplementedError(
+            f"Endpoint '{eval_func}' not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            f"To use this endpoint, implement the '{eval_func}' endpoint in your Tesseract object."
+        )
+
+
 def tesseract_dispatch(
     *array_args: ArrayLike | ShapedArray | Any,
     static_args: tuple[_Hashable, ...],
@@ -218,6 +210,7 @@ def tesseract_dispatch(
 
     The dispatch that is not lowered is only called in cases where abstract eval is not needed.
     """
+    _check_eval_func(eval_func, client)
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -252,6 +245,7 @@ def tesseract_dispatch_lowering(
     eval_func: str,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
+    _check_eval_func(eval_func, client)
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)

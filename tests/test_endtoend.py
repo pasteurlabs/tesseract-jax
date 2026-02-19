@@ -684,38 +684,77 @@ def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
         jax.vjp(f, a)
 
 
-def test_tesseract_no_jvp_apply_works(served_tesseract_no_jvp):
-    """Test that tesseract with JVP removed still works for basic apply."""
+def test_tesseract_no_jvp_apply_and_vjp_work(served_tesseract_no_jvp):
+    """Test that tesseract with JVP removed still works for apply and VJP."""
     tess_no_jvp = Tesseract(served_tesseract_no_jvp)
 
     x, y = np.array(0.0), np.array(0.0)
 
-    # Basic apply should still work
+    # Verify the endpoints
+    assert "jacobian_vector_product" not in tess_no_jvp.available_endpoints
+    assert "vector_jacobian_product" in tess_no_jvp.available_endpoints
+
+    # Test 1: Basic apply should still work
     result = apply_tesseract(tess_no_jvp, inputs=dict(x=x, y=y))
     expected = rosenbrock_impl(x, y)
     np.testing.assert_array_equal(result["result"], expected)
 
-    # Verify the endpoint is actually missing
-    assert "jacobian_vector_product" not in tess_no_jvp.available_endpoints
-    # But VJP should still be there
-    assert "vector_jacobian_product" in tess_no_jvp.available_endpoints
+    # Test 2: VJP with jax.grad should work
+    def f(inputs):
+        return apply_tesseract(tess_no_jvp, inputs)["result"]
+
+    grad_f = jax.grad(f)
+    grads = grad_f(dict(x=x, y=y))
+
+    # For Rosenbrock at (0, 0): ∂f/∂x = -2, ∂f/∂y = 0
+    np.testing.assert_allclose(grads["x"], -2.0, rtol=1e-5)
+    np.testing.assert_allclose(grads["y"], 0.0, rtol=1e-5)
+
+    # Test 3: VJP with jax.vjp should work
+    primal, vjp_fun = jax.vjp(f, dict(x=x, y=y))
+    np.testing.assert_allclose(primal, expected, rtol=1e-5)
+
+    grads_vjp = vjp_fun(np.array(1.0))[0]
+    np.testing.assert_allclose(grads_vjp["x"], -2.0, rtol=1e-5)
+    np.testing.assert_allclose(grads_vjp["y"], 0.0, rtol=1e-5)
 
 
-def test_tesseract_no_vjp_apply_works(served_tesseract_no_vjp):
-    """Test that tesseract with VJP removed still works for basic apply."""
+def test_tesseract_no_vjp_apply_and_jvp_work(served_tesseract_no_vjp):
+    """Test that tesseract with VJP removed still works for apply and JVP."""
     tess_no_vjp = Tesseract(served_tesseract_no_vjp)
 
     x, y = np.array(0.0), np.array(0.0)
 
-    # Basic apply should still work
+    # Verify the endpoints
+    assert "vector_jacobian_product" not in tess_no_vjp.available_endpoints
+    assert "jacobian_vector_product" in tess_no_vjp.available_endpoints
+
+    # Test 1: Basic apply should still work
     result = apply_tesseract(tess_no_vjp, inputs=dict(x=x, y=y))
     expected = rosenbrock_impl(x, y)
     np.testing.assert_array_equal(result["result"], expected)
 
-    # Verify the endpoint is actually missing
-    assert "vector_jacobian_product" not in tess_no_vjp.available_endpoints
-    # But JVP should still be there
-    assert "jacobian_vector_product" in tess_no_vjp.available_endpoints
+    # Test 2: JVP with jax.jvp should work
+    def f(inputs):
+        return apply_tesseract(tess_no_vjp, inputs)["result"]
+
+    primals = dict(x=x, y=y)
+    tangents = dict(x=np.array(1.0), y=np.array(0.0))  # Unit vector in x direction
+
+    primal_out, tangent_out = jax.jvp(f, (primals,), (tangents,))
+
+    # Verify the primal output
+    np.testing.assert_allclose(primal_out, expected, rtol=1e-5)
+
+    # For Rosenbrock at (0, 0) with tangent (1, 0): JVP = ∂f/∂x * 1 + ∂f/∂y * 0 = -2
+    np.testing.assert_allclose(tangent_out, -2.0, rtol=1e-5)
+
+    # Test with tangent in y direction
+    tangents_y = dict(x=np.array(0.0), y=np.array(1.0))
+    _, tangent_out_y = jax.jvp(f, (primals,), (tangents_y,))
+
+    # For tangent (0, 1): JVP = ∂f/∂x * 0 + ∂f/∂y * 1 = 0
+    np.testing.assert_allclose(tangent_out_y, 0.0, rtol=1e-5)
 
 
 def test_missing_jvp_endpoint_error(served_tesseract_no_jvp):
@@ -729,7 +768,7 @@ def test_missing_jvp_endpoint_error(served_tesseract_no_jvp):
 
     # Test with jax.jvp - should raise a clear error about missing JVP endpoint
     with pytest.raises(
-        NotImplementedError, match=r".*Jacobian Vector Product.*JVP.*not implemented.*"
+        NotImplementedError, match=r".*jacobian_vector_product.*not implemented.*"
     ):
         dx = np.array(1.0)
         jax.jvp(f, (x,), (dx,))
@@ -746,7 +785,7 @@ def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
 
     # Test with jax.grad - should raise a clear error about missing VJP endpoint
     with pytest.raises(
-        NotImplementedError, match=r".*Vector Jacobian Product.*VJP.*not implemented.*"
+        NotImplementedError, match=r".*vector_jacobian_product.*not implemented.*"
     ):
         grad_f = jax.grad(f)
         grad_f(x)
