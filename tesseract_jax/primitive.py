@@ -290,6 +290,8 @@ def tesseract_dispatch_batching(
     eval_func: str,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
+    _check_eval_func(eval_func, client)
+
     new_args = [
         arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
