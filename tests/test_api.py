@@ -323,47 +323,55 @@ def test_pytree_tesseract_loss(
         pytree_tess_inputs, diffable_paths
     )
 
-    # Also include the non-differentiable epsilon and zeta inputs as function arguments
-    # to trigger the tracer issue
-    k = pytree_tess_inputs["epsilon"]["k"]  # non-differentiable per schema
-    m = pytree_tess_inputs["epsilon"]["m"]  # non-differentiable per schema
-    z0 = pytree_tess_inputs["zeta"][0]  # non-differentiable per schema
-    z1 = pytree_tess_inputs["zeta"][1]  # non-differentiable per schema
-
-    def loss_fn(diffable_inputs, k, m, z0, z1):
-        # Lambda closes over non-differentiable inputs, making them tracers
+    def loss_fn(diffable_inputs):
+        # Merge differentiable and non-differentiable inputs
         pytree_fn: jax.Callable = lambda diffable_inputs: apply_tesseract(
             pytree_tess,
-            inputs=merge_dicts(
-                diffable_inputs,
-                merge_dicts(
-                    non_diffable_inputs, {"epsilon": {"k": k, "m": m}, "zeta": [z0, z1]}
-                ),
-            ),
+            inputs=merge_dicts(diffable_inputs, non_diffable_inputs),
         )
 
         result = pytree_fn(diffable_inputs)["result"]
         return jnp.sum(result**2)
 
+    def loss_fn_raw(diffable_inputs):
+        # Raw implementation using pytree_apply_impl
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        result = pytree_apply_impl(inputs)["result"]
+        return jnp.sum(result**2)
+
     if use_jit:
         loss_fn = jax.jit(loss_fn)
+        loss_fn_raw = jax.jit(loss_fn_raw)
 
     if mode == "fwd":
         # Forward mode: JVP
-        # Note: k, m, z0, z1 get passed as tracers to apply_tesseract.
-        # The schema says they are non-differentiable, so they should not be included in jvp_inputs.
-        primal, tangent = jax.jvp(
-            loss_fn, (diffable_inputs, k, m, z0, z1), (diffable_inputs, k, m, z0, z1)
+        # Non-differentiable inputs are in closure, testing that Tesseract correctly
+        # handles them as non-differentiable even when they become tracers
+        primal, tangent = jax.jvp(loss_fn, (diffable_inputs,), (diffable_inputs,))
+        primal_raw, tangent_raw = jax.jvp(
+            loss_fn_raw, (diffable_inputs,), (diffable_inputs,)
         )
-        assert primal is not None
-        assert tangent is not None
+
+        # Verify results match raw implementation
+        np.testing.assert_allclose(primal, primal_raw, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(tangent, tangent_raw, rtol=1e-5, atol=1e-5)
     else:
         # Reverse mode: VJP via grad
-        # Note: k, m, z0, z1 get passed as tracers to apply_tesseract.
-        # The schema says they are non-differentiable, so they should not be included in vjp_inputs.
-        # Only differentiate w.r.t. diffable_inputs (argnums=0)
-        value_and_grad_fn = jax.value_and_grad(loss_fn, argnums=0)
-        assert value_and_grad_fn(diffable_inputs, k, m, z0, z1) is not None
+        # Non-differentiable inputs are in closure, testing that Tesseract correctly
+        # handles them as non-differentiable even when they become tracers
+        value_and_grad_fn = jax.value_and_grad(loss_fn)
+        value_and_grad_fn_raw = jax.value_and_grad(loss_fn_raw)
+
+        value, grad = value_and_grad_fn(diffable_inputs)
+        value_raw, grad_raw = value_and_grad_fn_raw(diffable_inputs)
+
+        # Verify results match raw implementation
+        np.testing.assert_allclose(value, value_raw, rtol=1e-5, atol=1e-5)
+        jax.tree.map(
+            lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+            grad,
+            grad_raw,
+        )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -409,7 +417,10 @@ def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
     return (a - x) ** 2 + b * (y - x**2) ** 2
 
 
-def test_tesseract_loss_univariate(univariate_tess):
+@pytest.mark.parametrize("use_jit", [True, False])
+@pytest.mark.parametrize("test_mode", ["fwd", "fwd_bwd"])
+def test_tesseract_loss_univariate(univariate_tess, use_jit, test_mode):
+    """Test Tesseract with loss function, parameterized for JIT and forward/backward modes."""
     x = np.array(1.0, dtype="float64")
     y = np.array(2.0, dtype="float64")
 
@@ -420,33 +431,44 @@ def test_tesseract_loss_univariate(univariate_tess):
         f"Forward pass mismatch: {result} vs {expected}"
     )
 
-    def loss_fn(x, y):
-        univariate_fn_x: jax.Callable = lambda x: apply_tesseract(
-            univariate_tess,
-            inputs=dict(
-                x=x,
-                y=y,
-            ),
-        )
+    if test_mode == "fwd_bwd":
 
-        c = univariate_fn_x(x)["result"]
+        def loss_fn(x, y):
+            univariate_fn_x = lambda x: apply_tesseract(
+                univariate_tess,
+                inputs=dict(
+                    x=x,
+                    y=y,
+                ),
+            )
 
-        return jnp.sum((c) ** 2)
+            c = univariate_fn_x(x)["result"]
 
-    def loss_fn_raw(x, y):
-        c = rosenbrock(x, y, a=1.0, b=100.0)
-        return jnp.sum((c) ** 2)
+            return jnp.sum((c) ** 2)
 
-    loss_fn = jax.jit(loss_fn)
+        def loss_fn_raw(x, y):
+            c = rosenbrock(x, y, a=1.0, b=100.0)
+            return jnp.sum((c) ** 2)
 
-    grad_fn = jax.grad(loss_fn)
+        if use_jit:
+            loss_fn = jax.jit(loss_fn)
+            loss_fn_raw = jax.jit(loss_fn_raw)
 
-    grad = grad_fn(x, y)
+        # Test loss computation
+        loss = loss_fn(x, y)
+        loss_raw = loss_fn_raw(x, y)
+        assert np.allclose(loss, loss_raw), f"Loss mismatch: {loss} vs {loss_raw}"
 
-    assert grad is not None
+        # Test gradient computation
+        grad_fn = jax.grad(loss_fn)
+        grad_fn_raw = jax.grad(loss_fn_raw)
 
-    grad_fn_raw = jax.grad(loss_fn_raw)
+        if use_jit:
+            grad_fn = jax.jit(grad_fn)
+            grad_fn_raw = jax.jit(grad_fn_raw)
 
-    grad_raw = grad_fn_raw(x, y)
+        grad = grad_fn(x, y)
+        grad_raw = grad_fn_raw(x, y)
 
-    assert np.allclose(grad, grad_raw)
+        assert grad is not None
+        assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"

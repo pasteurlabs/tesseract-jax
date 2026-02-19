@@ -204,6 +204,12 @@ class Jaxeract:
                         array_args[array_idx].shape, dtype=array_args[array_idx].dtype
                     )
                 )
+            elif is_static_mask[i]:
+                pass
+            else:
+                raise ValueError(
+                    f"Missing gradient for input path '{path}' which is not marked as static or non-differentiable."
+                )
 
             # Increment array_idx only for non-static inputs (which appear in array_args)
             if not is_static_mask[i]:

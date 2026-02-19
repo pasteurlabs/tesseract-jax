@@ -4,6 +4,7 @@
 
 from typing import Any
 
+import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 
@@ -44,7 +45,7 @@ def jacobian_vector_product(
     Since dc/da = 1 and b is not differentiable, the JVP is just the tangent of a.
     """
     return {
-        "c": tangent_vector.get("a", 0.0),
+        "c": tangent_vector.get("a", np.zeros_like(inputs.a)),
     }
 
 

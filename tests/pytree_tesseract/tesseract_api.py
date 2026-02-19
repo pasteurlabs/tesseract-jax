@@ -19,13 +19,13 @@ class Foo(BaseModel):
         description="Input parameter z, shape (5,)."
     )
     gamma: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Input parameters u (shape 6) and v (shape 7) as a dictionary.",
+        description="Input parameters u shape (6,) and v shape (7,) as a dictionary.",
     )
 
 
 class InputSchema(BaseModel):
     alpha: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Input parameters x (shape 3) and y (shape 4) as a dictionary.",
+        description="Input parameters x shape (3,) and y shape (4,) as a dictionary.",
     )
 
     beta: Foo = Field(
@@ -33,15 +33,15 @@ class InputSchema(BaseModel):
     )
 
     delta: list[Differentiable[Array[(None,), Float32]]] = Field(
-        description="List of input parameters: delta[0] (shape 8), delta[1] (shape 9).",
+        description="List of input parameters: delta[0] shape (8,), delta[1] shape (9,).",
     )
 
     epsilon: dict[str, Array[(None,), Float32]] = Field(
-        description="Parameters k (shape 2, non-diff) and m (shape 10, non-diff).",
+        description="Parameters k shape (2,) non-diff and m shape (10,) non-diff.",
     )
 
     zeta: list[Array[(None,), Float32]] = Field(
-        description="List of parameters that are not differentiable: zeta[0] (shape 11), zeta[1] (shape 12).",
+        description="List of parameters that are not differentiable: zeta[0] shape (11,), zeta[1] shape (12,).",
     )
 
 
@@ -53,10 +53,10 @@ class OutputSchema(BaseModel):
         description="Complex combination of inputs, shape (3,)",
     )
     result_dict: dict[str, Differentiable[Array[(None,), Float32]]] = Field(
-        description="Dict output: a (shape 3), b (shape 5)",
+        description="Dict output: a shape (3,), b shape (5,)",
     )
     result_list: list[Differentiable[Array[(None,), Float32]]] = Field(
-        description="List output: [shape 7, shape 6]",
+        description="List output: [shape (7,), shape (6,)]",
     )
 
 
