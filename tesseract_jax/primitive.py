@@ -29,7 +29,6 @@ class _Hashable:
 
     This is not a proper hash function, as two identical objects with different memory
     addresses will have different hashes.
-
     """
 
     def __init__(self, obj: Any) -> None:
