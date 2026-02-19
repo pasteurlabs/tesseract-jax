@@ -15,7 +15,8 @@ from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
-from tesseract_jax.tesseract_compat import Jaxeract, combine_args
+from tesseract_jax.tesseract_compat import Jaxeract
+from tesseract_jax.tree_util import combine_args
 
 T = TypeVar("T")
 
