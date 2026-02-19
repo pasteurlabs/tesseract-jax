@@ -25,6 +25,12 @@ tesseract_dispatch_p.multiple_results = True
 
 
 class _Hashable:
+    """A wrapper class to make non-hashable objects hashable by using their id.
+
+    This is not a proper hash function, as two identical objects with different memory
+    addresses will have different hashes.
+    """
+
     def __init__(self, obj: Any) -> None:
         self.wrapped = obj
 
@@ -91,6 +97,14 @@ def tesseract_dispatch_jvp_rule(
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
+    # Check if JVP endpoint is available
+    if "jacobian_vector_product" not in client.available_methods:
+        raise NotImplementedError(
+            f"Jacobian Vector Product (JVP) not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            "To use jax.jvp or forward-mode differentiation, implement the 'jacobian_vector_product' endpoint."
+        )
+
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
     #          zero `Zero(AbstractToken)`, i.e. in a JVP or transpose rule
@@ -139,7 +153,7 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 
 def tesseract_dispatch_transpose_rule(
-    cotangent: Sequence[ArrayLike],
+    cotangent: Sequence[ArrayLike | ad.Zero],
     *args: ArrayLike,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
@@ -151,6 +165,15 @@ def tesseract_dispatch_transpose_rule(
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
+
+    # Check if VJP endpoint is available
+    if "vector_jacobian_product" not in client.available_methods:
+        raise NotImplementedError(
+            f"Vector Jacobian Product (VJP) not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            "To use jax.grad, jax.vjp, or reverse-mode differentiation, "
+            "implement the 'vector_jacobian_product' endpoint."
+        )
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     args = args[:n_primals]
@@ -409,14 +432,7 @@ def apply_tesseract(
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
         output_pytreedef, avals = None, None
-        avals = client.abstract_eval(
-            array_args,
-            static_args,
-            input_pytreedef,
-            output_pytreedef,
-            avals,
-            is_static_mask,
-        )
+        avals = client.abstract_eval(inputs)
 
         is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
         flat_avals, output_pytreedef = jax.tree.flatten(avals, is_leaf=is_aval)
