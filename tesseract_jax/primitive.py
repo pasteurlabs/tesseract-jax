@@ -93,7 +93,12 @@ def tesseract_dispatch_jvp_rule(
     client: Jaxeract,
     eval_func: str,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
-    """Defines how to dispatch jvp operation."""
+    """Defines how to dispatch jvp operation.
+
+    Note this function is also called when evaluating a VJP or doing
+    reverse-mode autodiff. JAX implements
+
+    """
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
@@ -122,6 +127,14 @@ def tesseract_dispatch_jvp_rule(
         )
         for arg in tan_args
     )
+
+    # mark zeros as static, as we dont need to compute their derivates
+    is_static_mask = tuple(
+        is_static or isinstance(cot, ad.Zero)
+        for is_static, cot in zip(is_static_mask, tan_args, strict=True)
+    )
+
+    # move the args with zero tangents to static args, as they dont need to be passed to the JVP endpoint
 
     jvp = tesseract_dispatch_p.bind(
         *in_args,
@@ -176,7 +189,7 @@ def tesseract_dispatch_transpose_rule(
         )
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
-    args = args[:n_primals]
+    args_ = args[:n_primals]
 
     cotan_args_ = tuple(
         (
@@ -188,7 +201,7 @@ def tesseract_dispatch_transpose_rule(
     )
 
     vjp = tesseract_dispatch_p.bind(
-        *args,
+        *args_,
         *cotan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
@@ -205,7 +218,7 @@ def tesseract_dispatch_transpose_rule(
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
 
-    return tuple([None] * len(args) + list(vjp))
+    return tuple([None] * len(args_) + list(vjp))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
