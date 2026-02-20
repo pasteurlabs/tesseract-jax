@@ -82,6 +82,68 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
 
 
+def filter_static_zeros(
+    flat_args: tuple[ArrayLike | ShapedArray | Any, ...],
+    tan_args: tuple[ArrayLike | None, ...] | None = None,
+    is_static_mask: tuple[bool, ...] | None = None,
+) -> tuple[
+    tuple[ArrayLike, ...],
+    tuple[ArrayLike, ...] | None,
+    tuple[_Hashable, ...],
+    tuple[bool, ...],
+]:
+    """Filter for static arguments and Zero tangents/cotangents.
+
+    Args:
+        flat_args: All arguments (arrays + statics)
+        tan_args: Tangent/cotangent arguments. If is_static_mask is provided,
+                  this should only contain tangents for array args (not statics).
+                  Otherwise, it should have the same length as flat_args.
+        is_static_mask: Optional pre-computed static mask. If provided, tan_args
+                       will be expanded to match flat_args length.
+    """
+    if is_static_mask is None:
+        is_static_mask = tuple(
+            not isinstance(arg, jax.core.Tracer) for arg in flat_args
+        )
+
+    # Tan args provides additional signal for which primals are effectively static
+    if tan_args is not None:
+        is_zeros_mask = tuple(
+            isinstance(arg, jax._src.ad_util.Zero) or arg is None for arg in tan_args
+        )
+        is_static_mask = tuple(
+            s or z for s, z in zip(is_static_mask, is_zeros_mask, strict=True)
+        )
+
+        # Convert traced arrays with Zero tangents to concrete zeros
+        flat_args_converted = []
+        for arg, tan_arg, is_zero in zip(
+            flat_args, tan_args, is_zeros_mask, strict=True
+        ):
+            if is_zero and isinstance(arg, jax.core.Tracer):
+                # This is a traced array with Zero tangent - convert to concrete zero
+                # Use np.zeros (not jnp.zeros_like) to create a concrete array, not a traced one
+                flat_args_converted.append(
+                    np.zeros(tan_arg.aval.shape, dtype=tan_arg.aval.dtype)
+                )
+            else:
+                flat_args_converted.append(arg)
+        flat_args = tuple(flat_args_converted)
+
+        # Remove it from tangents
+        tan_args = tuple(
+            arg
+            for arg, is_static in zip(tan_args, is_static_mask, strict=True)
+            if not is_static
+        )
+
+    array_args, static_args = split_args(flat_args, is_static_mask)
+    static_args = tuple(_make_hashable(arg) for arg in static_args)
+
+    return array_args, tan_args, static_args, is_static_mask
+
+
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike, ...],
@@ -119,42 +181,53 @@ def tesseract_dispatch_jvp_rule(
     # TODO: create a mask for Zero (essentially, jvp_in)? or maybe substitute it
     #       with something that jax still likes, while not wasting memory and time?
 
-    tan_args_ = tuple(
-        (
-            jax.numpy.zeros_like(arg.aval)
-            if isinstance(arg, jax._src.ad_util.Zero)
-            else arg
-        )
-        for arg in tan_args
+    # Reconstruct flat_args to detect Zero tangents
+    unmasked_args = combine_args(in_args, static_args, is_static_mask)
+    unmasked_tans = combine_args(tan_args, (None,) * len(static_args), is_static_mask)
+
+    # Filter to update static mask based on Zero tangents
+    # Pass is_static_mask so filter_static_zeros knows to expand tan_args
+    array_args, filtered_tan_args, new_static_args, new_is_static_mask = (
+        filter_static_zeros(unmasked_args, unmasked_tans, is_static_mask)
     )
 
-    # mark zeros as static, as we dont need to compute their derivates
-    is_static_mask = tuple(
-        is_static or isinstance(cot, ad.Zero)
-        for is_static, cot in zip(is_static_mask, tan_args, strict=True)
-    )
+    # tan_args_ = tuple(
+    #     (
+    #         jax.numpy.zeros_like(arg.aval)
+    #         if isinstance(arg, jax._src.ad_util.Zero)
+    #         else arg
+    #     )
+    #     for arg in tan_args
+    # )
+
+    # # mark zeros as static, as we dont need to compute their derivates
+    # is_static_mask = tuple(
+    #     is_static or isinstance(cot, ad.Zero)
+    #     for is_static, cot in zip(is_static_mask, tan_args, strict=True)
+    # )
 
     # move the args with zero tangents to static args, as they dont need to be passed to the JVP endpoint
 
+    # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
-        *in_args,
-        *tan_args_,
-        static_args=static_args,
+        *array_args,
+        *filtered_tan_args,
+        static_args=new_static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=is_static_mask,
+        is_static_mask=new_is_static_mask,
         client=client,
         eval_func="jacobian_vector_product",
     )
 
     res = tesseract_dispatch_p.bind(
-        *in_args,
-        static_args=static_args,
+        *array_args,
+        static_args=new_static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=is_static_mask,
+        is_static_mask=new_is_static_mask,
         client=client,
         eval_func="apply",
     )
@@ -438,9 +511,11 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
-    array_args, static_args = split_args(flat_args, is_static_mask)
-    static_args = tuple(_make_hashable(arg) for arg in static_args)
+    # is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+    # array_args, static_args = split_args(flat_args, is_static_mask)
+    # static_args = tuple(_make_hashable(arg) for arg in static_args)
+    flat_args, input_pytreedef = jax.tree.flatten(inputs)
+    array_args, _, static_args, is_static_mask = filter_static_zeros(tuple(flat_args))
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
