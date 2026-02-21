@@ -59,6 +59,7 @@ def tesseract_dispatch_abstract_eval(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
@@ -82,57 +83,27 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
 
 
-def filter_nontraced_and_zeros(
+def filter_nontraced(
     flat_args: tuple[ArrayLike | ShapedArray | Any, ...],
-    tan_args: tuple[ArrayLike | None, ...] | None = None,
-    is_static_mask: tuple[bool, ...] | None = None,
 ) -> tuple[
     tuple[ArrayLike, ...],
-    tuple[ArrayLike, ...] | None,
     tuple[_Hashable, ...],
     tuple[bool, ...],
 ]:
-    """Filter for static arguments and Zero tangents/cotangents."""
-    if is_static_mask is None:
-        is_static_mask = tuple(
-            not isinstance(arg, jax.core.Tracer) for arg in flat_args
-        )
-
-    # Tan args provides additional signal for which primals are effectively static
-    if tan_args is not None:
-        is_zeros_mask = tuple(
-            isinstance(arg, jax._src.ad_util.Zero) or arg is None for arg in tan_args
-        )
-        is_static_mask = tuple(
-            s or z for s, z in zip(is_static_mask, is_zeros_mask, strict=True)
-        )
-
-        # # Convert traced arrays with Zero tangents to concrete zeros
-        # flat_args_converted = []
-        # for arg, tan_arg, is_zero in zip(
-        #     flat_args, tan_args, is_zeros_mask, strict=True
-        # ):
-        #     # if is_zero and isinstance(arg, jax.core.Tracer):
-        #     #     # This is a traced array with Zero tangent - convert to concrete zero
-        #     #     # Use np.zeros (not jnp.zeros_like) to create a concrete array, not a traced one
-        #     #     flat_args_converted.append(
-        #     #         np.zeros(tan_arg.aval.shape, dtype=tan_arg.aval.dtype)
-        #     #     )
-        #     # else:
-        #     flat_args_converted.append(arg)
-        # flat_args = tuple(flat_args_converted)
-
-        # Remove it from tangents
-        tan_args = tuple(
-            arg
-            for arg, is_static in zip(tan_args, is_static_mask, strict=True)
-            if not is_static
-        )
-
+    """Split flat args into array (traced) args and static (non-traced) args."""
+    is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
+    return array_args, static_args, is_static_mask
 
-    return array_args, tan_args, static_args, is_static_mask
+
+def get_tangent_mask(
+    tan_args: tuple[ArrayLike | None, ...],
+) -> tuple[bool, ...]:
+    """Return a mask over tan_args indicating which have non-Zero tangents."""
+    return tuple(
+        not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
+    )
 
 
 def tesseract_dispatch_jvp_rule(
@@ -143,6 +114,7 @@ def tesseract_dispatch_jvp_rule(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
@@ -161,56 +133,34 @@ def tesseract_dispatch_jvp_rule(
     #          (not in ad.py's backward_pass), you probably want to instantiate
     #          it so that it's no longer symbolic
 
-    # TODO: create a mask for Zero (essentially, jvp_in)? or maybe substitute it
-    #       with something that jax still likes, while not wasting memory and time?
-
-    # Reconstruct flat_args to detect Zero tangents
-    unmasked_args = combine_args(in_args, static_args, is_static_mask)
-    unmasked_tans = combine_args(tan_args, (None,) * len(static_args), is_static_mask)
-
-    # Filter to update static mask based on Zero tangents
-    # Pass is_static_mask so filter_static_zeros knows to expand tan_args
-    array_args, filtered_tan_args, new_static_args, new_is_static_mask = (
-        filter_nontraced_and_zeros(unmasked_args, unmasked_tans, is_static_mask)
+    # Compute which primals have non-zero tangents
+    has_tangent = get_tangent_mask(tan_args)
+    tan_args_ = tuple(
+        (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
+        for arg, has_tan in zip(tan_args, has_tangent, strict=True)
     )
-
-    # tan_args_ = tuple(
-    #     (
-    #         jax.numpy.zeros_like(arg.aval)
-    #         if isinstance(arg, jax._src.ad_util.Zero)
-    #         else arg
-    #     )
-    #     for arg in tan_args
-    # )
-
-    # # mark zeros as static, as we dont need to compute their derivates
-    # is_static_mask = tuple(
-    #     is_static or isinstance(cot, ad.Zero)
-    #     for is_static, cot in zip(is_static_mask, tan_args, strict=True)
-    # )
-
-    # move the args with zero tangents to static args, as they dont need to be passed to the JVP endpoint
-
     # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
-        *array_args,
-        *filtered_tan_args,
-        static_args=new_static_args,
+        *in_args,
+        *tan_args_,
+        static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=new_is_static_mask,
+        is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="jacobian_vector_product",
     )
 
     res = tesseract_dispatch_p.bind(
-        *array_args,
-        static_args=new_static_args,
+        *in_args,
+        static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
-        is_static_mask=new_is_static_mask,
+        is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="apply",
     )
@@ -229,6 +179,7 @@ def tesseract_dispatch_transpose_rule(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple[ArrayLike | None, ...]:
@@ -255,9 +206,11 @@ def tesseract_dispatch_transpose_rule(
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
         is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="vector_jacobian_product",
     )
+
     # TODO: I'm not sure this makes sense given these docs:
     #       https://jax.readthedocs.io/en/latest/jax-primitives.html#transposition
     #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"
@@ -278,6 +231,7 @@ def tesseract_dispatch(
     output_pytreedef: PyTreeDef | None,
     output_avals: tuple[ShapeDtypeStruct, ...] | None,
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -295,6 +249,7 @@ def tesseract_dispatch(
             output_pytreedef,
             output_avals,
             is_static_mask,
+            has_tangent,
         )
         if not isinstance(out, tuple) and output_avals is not None:
             out = (out,)
@@ -315,6 +270,7 @@ def tesseract_dispatch_lowering(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -329,6 +285,7 @@ def tesseract_dispatch_lowering(
             output_pytreedef,
             output_avals,
             is_static_mask,
+            has_tangent,
         )
         if not isinstance(out, tuple):
             out = (out,)
@@ -359,6 +316,7 @@ def tesseract_dispatch_batching(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -380,6 +338,7 @@ def tesseract_dispatch_batching(
             output_pytreedef=output_pytreedef,
             output_avals=output_avals,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func=eval_func,
         )
@@ -399,12 +358,6 @@ def _check_dtype(dtype: Any) -> None:
             "Cannot return 64-bit values when `jax_enable_x64` is disabled. "
             "Try enabling it with `jax.config.update('jax_enable_x64', True)`."
         )
-
-
-def _is_static(x: Any) -> bool:
-    if isinstance(x, jax.core.Tracer):
-        return False
-    return True
 
 
 def _make_hashable(obj: Any) -> _Hashable:
@@ -485,13 +438,8 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    # is_static_mask = tuple(_is_static(arg) for arg in flat_args)
-    # array_args, static_args = split_args(flat_args, is_static_mask)
-    # static_args = tuple(_make_hashable(arg) for arg in static_args)
-    flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    array_args, _, static_args, is_static_mask = filter_nontraced_and_zeros(
-        tuple(flat_args)
-    )
+    array_args, static_args, is_static_mask = filter_nontraced(tuple(flat_args))
+    has_tangent = (True,) * len(array_args)
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
@@ -518,6 +466,7 @@ def apply_tesseract(
             output_pytreedef=output_pytreedef,
             output_avals=flat_avals,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func="apply",
         )
@@ -536,6 +485,7 @@ def apply_tesseract(
             output_pytreedef=None,
             output_avals=None,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func="apply",
         )

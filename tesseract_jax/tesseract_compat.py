@@ -9,7 +9,12 @@ from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
-from tesseract_jax.tree_util import PyTree, _pytree_to_tesseract_flat, unflatten_args
+from tesseract_jax.tree_util import (
+    PyTree,
+    _pytree_to_tesseract_flat,
+    combine_args,
+    unflatten_args,
+)
 
 
 class Jaxeract:
@@ -75,6 +80,7 @@ class Jaxeract:
         output_pytreedef: PyTreeDef | None,
         output_avals: tuple[ShapeDtypeStruct, ...] | None,
         is_static_mask: tuple[bool, ...],
+        has_tangent: tuple[bool, ...],
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         inputs = unflatten_args(
@@ -97,17 +103,23 @@ class Jaxeract:
         output_pytreedef: PyTreeDef,
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
+        has_tangent: tuple[bool, ...],
     ) -> PyTree:
         """Call the Tesseract's jvp endpoint with the given arguments."""
         n_primals = len(is_static_mask) - sum(is_static_mask)
         primals = array_args[:n_primals]
-        tangents = array_args[n_primals:]
+        tangents = array_args[n_primals:]  # only non-zero tangents
+
+        # Expand filtered tangents back to full length using has_tangent:
+        # positions where has_tangent=True get the tangent, False gets None
+        n_zeros = len(primals) - sum(has_tangent)
+        full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
             primals, static_args, input_pytreedef, is_static_mask
         )
         tangent_inputs = unflatten_args(
-            tangents,
+            full_tangents,
             static_args,
             input_pytreedef,
             is_static_mask,
@@ -151,6 +163,7 @@ class Jaxeract:
         output_pytreedef: PyTreeDef,
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
+        has_tangent: tuple[bool, ...],
     ) -> PyTree:
         """Call the Tesseract's vjp endpoint with the given arguments."""
         n_primals = len(is_static_mask) - sum(is_static_mask)
@@ -164,13 +177,13 @@ class Jaxeract:
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        # Leaves that are None in flat_inputs should be treated as zero in the VJP,
-        # since they correspond to non-differentiable inputs.
-        # none_mask = [v is None for v in flat_inputs.values()]
-        # We remove static and None entries from the VJP inputs
+
         vjp_inputs = [
             p for p, m in zip(flat_inputs, is_static_mask, strict=True) if not m
         ]
+
+        # now we filter for tangents
+        vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
         cotangent_pytree = jax.tree.unflatten(output_pytreedef, cotangents)
         flat_cotangents = _pytree_to_tesseract_flat(
@@ -188,33 +201,35 @@ class Jaxeract:
 
         # JAX expects gradients for all inputs, even non-differentiable ones.
         # Reconstruct the full output tuple in the same order as flat_inputs.
-        # out = []
-        # i = 0  # Index into flat_inputs, none_mask, and is_static_mask
-        # array_idx = 0  # Index into array_args (which excludes static inputs)
-        # for path in flat_inputs:
-        #     if path in out_data:
-        #         # Path has a gradient from the server
-        #         out.append(out_data[path])
-        #     elif none_mask[i] and not is_static_mask[i]:
-        #         # Non-differentiable but non-static input: return zero gradient
-        #         # with the same shape/dtype as the corresponding input array
-        #         out.append(
-        #             jax.numpy.zeros(
-        #                 array_args[array_idx].shape, dtype=array_args[array_idx].dtype
-        #             )
-        #         )
-        #     elif is_static_mask[i]:
-        #         pass
-        #     else:
-        #         raise ValueError(
-        #             f"Missing gradient for input path '{path}' which is not marked as static or non-differentiable."
-        #         )
+        out = []
+        all_idx = 0  # Index into flat_inputs, none_mask, and is_static_mask
+        array_idx = 0  # Index into array_args (which excludes static inputs)
+        tan_idx = 0  # Index into tangents/cotangents (which excludes non-differentiable inputs)
+        for path in flat_inputs:
+            if path in out_data:
+                # Path has a gradient from the server
+                out.append(out_data[path])
+                tan_idx += 1
+            elif (
+                all_idx < len(has_tangent)
+                and not is_static_mask[all_idx]
+                and not has_tangent[tan_idx]
+            ):
+                # Non-differentiable but non-static input: return zero gradient
+                # with the same shape/dtype as the corresponding input array
+                out.append(
+                    jax.numpy.full(
+                        array_args[array_idx].shape,
+                        jax.numpy.nan,
+                        dtype=array_args[array_idx].dtype,
+                    )
+                )
+                tan_idx += 1
 
-        #     # Increment array_idx only for non-static inputs (which appear in array_args)
-        #     if not is_static_mask[i]:
-        #         array_idx += 1
-        #     i += 1
+            # Increment array_idx only for non-static inputs (which appear in array_args)
+            if not is_static_mask[all_idx]:
+                array_idx += 1
 
-        out_data = tuple(jax.tree.flatten(out_data)[0])
+            all_idx += 1
 
-        return out_data
+        return tuple(out)
