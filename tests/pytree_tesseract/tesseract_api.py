@@ -47,7 +47,7 @@ class InputSchema(BaseModel):
 
 class OutputSchema(BaseModel):
     metadata: Array[(2,), Float32] = Field(
-        description="Non-differentiable output: k + m[:2], shape (2,)",
+        description="Non-differentiable output: x[:2] + y[:2], shape (2,)",
     )
     result: Differentiable[Array[(3,), Float32]] = Field(
         description="Complex combination of inputs, shape (3,)",
@@ -116,7 +116,7 @@ def apply_jit(inputs: dict) -> dict:
     ]
 
     return {
-        "metadata": k + m[:2],  # shape (2,)
+        "metadata": x[:2] + y[:2],  # shape (2,), now depends on differentiable inputs
         "result": result,  # shape (3,)
         "result_dict": result_dict,
         "result_list": result_list,

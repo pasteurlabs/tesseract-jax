@@ -54,7 +54,7 @@ def pytree_apply_impl(inputs: dict) -> dict:
     ]
 
     return {
-        "metadata": k + m[:2],  # shape (2,)
+        "metadata": x[:2] + y[:2],  # shape (2,)
         "result": result,  # shape (3,)
         "result_dict": result_dict,
         "result_list": result_list,
@@ -214,34 +214,53 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
     primal, jvp = jax.jvp(f, (diffable_inputs,), (diffable_inputs,))
     primal_raw, jvp_raw = jax.jvp(f_raw, (diffable_inputs,), (diffable_inputs,))
 
-    # Verify results match raw implementation
+    # Verify primal results match raw implementation
     jax.tree.map(
         lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
         primal,
         primal_raw,
     )
+
+    # Verify metadata derivatives are NaN (non-differentiable output)
+    assert jnp.all(jnp.isnan(jvp["metadata"])), "metadata derivatives should be NaN"
+
+    # Verify other output derivatives match raw implementation
+    jvp_without_metadata = {k: v for k, v in jvp.items() if k != "metadata"}
+    jvp_raw_without_metadata = {k: v for k, v in jvp_raw.items() if k != "metadata"}
     jax.tree.map(
         lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
-        jvp,
-        jvp_raw,
+        jvp_without_metadata,
+        jvp_raw_without_metadata,
     )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @DIFFABLE_PATHS_PARAMS
 def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable_paths):
-    """Test the VJP endpoint of pytree_tesseract."""
+    """Test the VJP endpoint of pytree_tesseract.
+
+    Tests two scenarios:
+    1. Normal case: VJP with metadata removed from outputs (closure approach)
+       - Validates that gradients match raw implementation
+    2. Error handling: Verifies that passing a cotangent with wrong tree structure
+       (e.g., adding metadata back in) raises an appropriate ValueError
+    """
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)
+        res = apply_tesseract(pytree_tess, inputs=inputs)
+        # remove metadata from output since it's non-differentiable and will be NaN in JVP/VJP
+        res.pop("metadata")
+        return res
 
     def f_raw(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return pytree_apply_impl(inputs)
+        res = pytree_apply_impl(inputs)
+        res.pop("metadata")
+        return res
 
     if use_jit:
         f = jax.jit(f)
@@ -269,6 +288,15 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
         vjp_raw,
     )
 
+    # Test error handling: cotangent with wrong tree structure should raise ValueError
+    primal_with_metadata = primal.copy()
+    primal_with_metadata["metadata"] = np.array([1.0, 2.0], dtype="float32")
+
+    try:
+        f_vjp(primal_with_metadata)
+    except ValueError as e:
+        assert "unexpected tree structure of argument to vjp function" in str(e).lower()
+
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
@@ -276,7 +304,17 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 def test_pytree_tesseract_jacobian(
     pytree_tess, pytree_tess_inputs, use_jit, jac_direction, diffable_paths
 ):
-    """Test the Jacobian endpoint of pytree_tesseract using jacfwd and jacrev."""
+    """Test the Jacobian endpoint of pytree_tesseract using jacfwd and jacrev.
+
+    Forward mode (jacfwd):
+    - Verifies that metadata derivatives are NaN (non-differentiable output)
+    - Validates that differentiable output Jacobians match raw implementation
+
+    Reverse mode (jacrev):
+    - Tests that excluding metadata from outputs (using closure) produces correct gradients
+    - Demonstrates that including metadata in outputs leads to incorrect gradients (silent failure)
+      due to non-differentiable outputs polluting the backward pass
+    """
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
     )
@@ -285,30 +323,77 @@ def test_pytree_tesseract_jacobian(
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return apply_tesseract(pytree_tess, inputs=inputs)
 
+    def f_closure(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        res = apply_tesseract(pytree_tess, inputs=inputs)
+        res.pop("metadata")
+        return res
+
     def f_raw(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         return pytree_apply_impl(inputs)
 
+    def f_raw_closure(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        res = pytree_apply_impl(inputs)
+        res.pop("metadata")
+        return res
+
     if jac_direction == "fwd":
         f_jac = jax.jacfwd(f)
+        f_jac_closure = jax.jacfwd(f_closure)
         f_jac_raw = jax.jacfwd(f_raw)
+        f_jac_raw_closure = jax.jacfwd(f_raw_closure)
     else:
         f_jac = jax.jacrev(f)
+        f_jac_closure = jax.jacrev(f_closure)
         f_jac_raw = jax.jacrev(f_raw)
+        f_jac_raw_closure = jax.jacrev(f_raw_closure)
 
     if use_jit:
         f_jac = jax.jit(f_jac)
         f_jac_raw = jax.jit(f_jac_raw)
+        f_jac_closure = jax.jit(f_jac_closure)
+        f_jac_raw_closure = jax.jit(f_jac_raw_closure)
 
     jac = f_jac(diffable_inputs)
     jac_raw = f_jac_raw(diffable_inputs)
+    jac_closure = f_jac_closure(diffable_inputs)
+    jac_raw_closure = f_jac_raw_closure(diffable_inputs)
 
-    # Verify results match raw implementation
-    jax.tree.map(
-        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
-        jac,
-        jac_raw,
-    )
+    if jac_direction == "fwd":
+        # Verify metadata Jacobian rows are NaN (non-differentiable output in forward mode)
+        # jac["metadata"] contains derivatives of metadata w.r.t. all inputs
+        def check_nan(x):
+            assert jnp.all(jnp.isnan(x)), (
+                "metadata Jacobian should be NaN in forward mode"
+            )
+
+        jax.tree.map(check_nan, jac["metadata"])
+
+        # Verify other output Jacobians match raw implementation
+        jac_without_metadata = {k: v for k, v in jac.items() if k != "metadata"}
+        jac_raw_without_metadata = {k: v for k, v in jac_raw.items() if k != "metadata"}
+        jax.tree.map(
+            lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+            jac_without_metadata,
+            jac_raw_without_metadata,
+        )
+    else:
+        # Reverse mode - compare all outputs
+        jax.tree.map(
+            lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+            jac_closure,
+            jac_raw_closure,
+        )
+
+        jax.tree.map(
+            # assert non equal when not using closure
+            # This is a silent failure
+            lambda a, b: np.sum(a - b) > 1e-5,
+            jac,
+            jac_raw,
+        )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -331,13 +416,18 @@ def test_pytree_tesseract_loss(
         )
 
         result = pytree_fn(diffable_inputs)["result"]
-        return jnp.sum(result**2)
+        metadata = pytree_fn(diffable_inputs)["metadata"]
+        # test stoping gradients work
+        metadata = jax.lax.stop_gradient(metadata)
+        return jnp.sum(result**2 + metadata.sum())
 
     def loss_fn_raw(diffable_inputs):
         # Raw implementation using pytree_apply_impl
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         result = pytree_apply_impl(inputs)["result"]
-        return jnp.sum(result**2)
+        metadata = pytree_apply_impl(inputs)["metadata"]
+        metadata = jax.lax.stop_gradient(metadata)
+        return jnp.sum(result**2 + metadata.sum())
 
     if use_jit:
         loss_fn = jax.jit(loss_fn)
@@ -418,8 +508,7 @@ def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize("test_mode", ["fwd", "fwd_bwd"])
-def test_tesseract_loss_univariate(univariate_tess, use_jit, test_mode):
+def test_tesseract_loss_univariate(univariate_tess, use_jit):
     """Test Tesseract with loss function, parameterized for JIT and forward/backward modes."""
     x = np.array(1.0, dtype="float64")
     y = np.array(2.0, dtype="float64")
@@ -431,44 +520,42 @@ def test_tesseract_loss_univariate(univariate_tess, use_jit, test_mode):
         f"Forward pass mismatch: {result} vs {expected}"
     )
 
-    if test_mode == "fwd_bwd":
+    def loss_fn(x, y):
+        univariate_fn_x = lambda x: apply_tesseract(
+            univariate_tess,
+            inputs=dict(
+                x=x,
+                y=y,
+            ),
+        )
 
-        def loss_fn(x, y):
-            univariate_fn_x = lambda x: apply_tesseract(
-                univariate_tess,
-                inputs=dict(
-                    x=x,
-                    y=y,
-                ),
-            )
+        c = univariate_fn_x(x)["result"]
 
-            c = univariate_fn_x(x)["result"]
+        return jnp.sum((c) ** 2)
 
-            return jnp.sum((c) ** 2)
+    def loss_fn_raw(x, y):
+        c = rosenbrock(x, y, a=1.0, b=100.0)
+        return jnp.sum((c) ** 2)
 
-        def loss_fn_raw(x, y):
-            c = rosenbrock(x, y, a=1.0, b=100.0)
-            return jnp.sum((c) ** 2)
+    if use_jit:
+        loss_fn = jax.jit(loss_fn)
+        loss_fn_raw = jax.jit(loss_fn_raw)
 
-        if use_jit:
-            loss_fn = jax.jit(loss_fn)
-            loss_fn_raw = jax.jit(loss_fn_raw)
+    # Test loss computation
+    loss = loss_fn(x, y)
+    loss_raw = loss_fn_raw(x, y)
+    assert np.allclose(loss, loss_raw), f"Loss mismatch: {loss} vs {loss_raw}"
 
-        # Test loss computation
-        loss = loss_fn(x, y)
-        loss_raw = loss_fn_raw(x, y)
-        assert np.allclose(loss, loss_raw), f"Loss mismatch: {loss} vs {loss_raw}"
+    # Test gradient computation
+    grad_fn = jax.grad(loss_fn)
+    grad_fn_raw = jax.grad(loss_fn_raw)
 
-        # Test gradient computation
-        grad_fn = jax.grad(loss_fn)
-        grad_fn_raw = jax.grad(loss_fn_raw)
+    if use_jit:
+        grad_fn = jax.jit(grad_fn)
+        grad_fn_raw = jax.jit(grad_fn_raw)
 
-        if use_jit:
-            grad_fn = jax.jit(grad_fn)
-            grad_fn_raw = jax.jit(grad_fn_raw)
+    grad = grad_fn(x, y)
+    grad_raw = grad_fn_raw(x, y)
 
-        grad = grad_fn(x, y)
-        grad_raw = grad_fn_raw(x, y)
-
-        assert grad is not None
-        assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
+    assert grad is not None
+    assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"

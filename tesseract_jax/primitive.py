@@ -82,7 +82,7 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
 
 
-def filter_static_zeros(
+def filter_nontraced_and_zeros(
     flat_args: tuple[ArrayLike | ShapedArray | Any, ...],
     tan_args: tuple[ArrayLike | None, ...] | None = None,
     is_static_mask: tuple[bool, ...] | None = None,
@@ -92,16 +92,7 @@ def filter_static_zeros(
     tuple[_Hashable, ...],
     tuple[bool, ...],
 ]:
-    """Filter for static arguments and Zero tangents/cotangents.
-
-    Args:
-        flat_args: All arguments (arrays + statics)
-        tan_args: Tangent/cotangent arguments. If is_static_mask is provided,
-                  this should only contain tangents for array args (not statics).
-                  Otherwise, it should have the same length as flat_args.
-        is_static_mask: Optional pre-computed static mask. If provided, tan_args
-                       will be expanded to match flat_args length.
-    """
+    """Filter for static arguments and Zero tangents/cotangents."""
     if is_static_mask is None:
         is_static_mask = tuple(
             not isinstance(arg, jax.core.Tracer) for arg in flat_args
@@ -116,20 +107,20 @@ def filter_static_zeros(
             s or z for s, z in zip(is_static_mask, is_zeros_mask, strict=True)
         )
 
-        # Convert traced arrays with Zero tangents to concrete zeros
-        flat_args_converted = []
-        for arg, tan_arg, is_zero in zip(
-            flat_args, tan_args, is_zeros_mask, strict=True
-        ):
-            if is_zero and isinstance(arg, jax.core.Tracer):
-                # This is a traced array with Zero tangent - convert to concrete zero
-                # Use np.zeros (not jnp.zeros_like) to create a concrete array, not a traced one
-                flat_args_converted.append(
-                    np.zeros(tan_arg.aval.shape, dtype=tan_arg.aval.dtype)
-                )
-            else:
-                flat_args_converted.append(arg)
-        flat_args = tuple(flat_args_converted)
+        # # Convert traced arrays with Zero tangents to concrete zeros
+        # flat_args_converted = []
+        # for arg, tan_arg, is_zero in zip(
+        #     flat_args, tan_args, is_zeros_mask, strict=True
+        # ):
+        #     # if is_zero and isinstance(arg, jax.core.Tracer):
+        #     #     # This is a traced array with Zero tangent - convert to concrete zero
+        #     #     # Use np.zeros (not jnp.zeros_like) to create a concrete array, not a traced one
+        #     #     flat_args_converted.append(
+        #     #         np.zeros(tan_arg.aval.shape, dtype=tan_arg.aval.dtype)
+        #     #     )
+        #     # else:
+        #     flat_args_converted.append(arg)
+        # flat_args = tuple(flat_args_converted)
 
         # Remove it from tangents
         tan_args = tuple(
@@ -164,14 +155,6 @@ def tesseract_dispatch_jvp_rule(
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
-    # Check if JVP endpoint is available
-    if "jacobian_vector_product" not in client.available_methods:
-        raise NotImplementedError(
-            f"Jacobian Vector Product (JVP) not implemented for this Tesseract. "
-            f"Available endpoints: {', '.join(client.available_methods)}. "
-            "To use jax.jvp or forward-mode differentiation, implement the 'jacobian_vector_product' endpoint."
-        )
-
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
     #          zero `Zero(AbstractToken)`, i.e. in a JVP or transpose rule
@@ -188,7 +171,7 @@ def tesseract_dispatch_jvp_rule(
     # Filter to update static mask based on Zero tangents
     # Pass is_static_mask so filter_static_zeros knows to expand tan_args
     array_args, filtered_tan_args, new_static_args, new_is_static_mask = (
-        filter_static_zeros(unmasked_args, unmasked_tans, is_static_mask)
+        filter_nontraced_and_zeros(unmasked_args, unmasked_tans, is_static_mask)
     )
 
     # tan_args_ = tuple(
@@ -251,15 +234,6 @@ def tesseract_dispatch_transpose_rule(
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
-
-    # Check if VJP endpoint is available
-    if "vector_jacobian_product" not in client.available_methods:
-        raise NotImplementedError(
-            f"Vector Jacobian Product (VJP) not implemented for this Tesseract. "
-            f"Available endpoints: {', '.join(client.available_methods)}. "
-            "To use jax.grad, jax.vjp, or reverse-mode differentiation, "
-            "implement the 'vector_jacobian_product' endpoint."
-        )
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     args_ = args[:n_primals]
@@ -515,7 +489,9 @@ def apply_tesseract(
     # array_args, static_args = split_args(flat_args, is_static_mask)
     # static_args = tuple(_make_hashable(arg) for arg in static_args)
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    array_args, _, static_args, is_static_mask = filter_static_zeros(tuple(flat_args))
+    array_args, _, static_args, is_static_mask = filter_nontraced_and_zeros(
+        tuple(flat_args)
+    )
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
