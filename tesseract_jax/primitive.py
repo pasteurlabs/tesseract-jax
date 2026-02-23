@@ -83,29 +83,6 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
 
 
-def filter_nontraced(
-    flat_args: tuple[ArrayLike | ShapedArray | Any, ...],
-) -> tuple[
-    tuple[ArrayLike, ...],
-    tuple[_Hashable, ...],
-    tuple[bool, ...],
-]:
-    """Split flat args into array (traced) args and static (non-traced) args."""
-    is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)
-    array_args, static_args = split_args(flat_args, is_static_mask)
-    static_args = tuple(_make_hashable(arg) for arg in static_args)
-    return array_args, static_args, is_static_mask
-
-
-def get_tangent_mask(
-    tan_args: tuple[ArrayLike | None, ...],
-) -> tuple[bool, ...]:
-    """Return a mask over tan_args indicating which have non-Zero tangents."""
-    return tuple(
-        not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
-    )
-
-
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike, ...],
@@ -121,7 +98,7 @@ def tesseract_dispatch_jvp_rule(
     """Defines how to dispatch jvp operation.
 
     Note this function is also called when evaluating a VJP or doing
-    reverse-mode autodiff. JAX implements
+    reverse-mode autodiff.
 
     """
     if eval_func != "apply":
@@ -134,15 +111,20 @@ def tesseract_dispatch_jvp_rule(
     #          it so that it's no longer symbolic
 
     # Compute which primals have non-zero tangents
-    has_tangent = get_tangent_mask(tan_args)
-    tan_args_ = tuple(
-        (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
-        for arg, has_tan in zip(tan_args, has_tangent, strict=True)
+    has_tangent = tuple(
+        not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
+    )
+    # tan_args_ = tuple(
+    #     (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
+    #     for arg, has_tan in zip(tan_args, has_tangent, strict=True)
+    # )
+    non_zero_tan_args = tuple(
+        arg for arg, has_tan in zip(tan_args, has_tangent, strict=True) if has_tan
     )
     # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
         *in_args,
-        *tan_args_,
+        *non_zero_tan_args,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
@@ -187,7 +169,12 @@ def tesseract_dispatch_transpose_rule(
     assert eval_func in ("jacobian_vector_product",)
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
-    args_ = args[:n_primals]
+    primal_args = args[:n_primals]
+
+    # only send args with tangent
+    primal_args = tuple(
+        arg for arg, has_tan in zip(primal_args, has_tangent, strict=True) if has_tan
+    )
 
     cotan_args_ = tuple(
         (
@@ -199,7 +186,7 @@ def tesseract_dispatch_transpose_rule(
     )
 
     vjp = tesseract_dispatch_p.bind(
-        *args_,
+        *primal_args,
         *cotan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
@@ -218,7 +205,7 @@ def tesseract_dispatch_transpose_rule(
     #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
     #       where eqn.invars ends up being longer than cts_out.
 
-    return tuple([None] * len(args_) + list(vjp))
+    return tuple([None] * len(primal_args) + list(vjp))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
@@ -438,7 +425,9 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    array_args, static_args, is_static_mask = filter_nontraced(tuple(flat_args))
+    is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)
+    array_args, static_args = split_args(flat_args, is_static_mask)
+    static_args = tuple(_make_hashable(arg) for arg in static_args)
     has_tangent = (True,) * len(array_args)
 
     if "abstract_eval" in tesseract_client.available_endpoints:
