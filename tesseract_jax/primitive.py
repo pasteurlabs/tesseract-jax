@@ -198,6 +198,15 @@ def tesseract_dispatch_transpose_rule(
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
 
+def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
+    if eval_func not in client.available_methods:
+        raise NotImplementedError(
+            f"Endpoint '{eval_func}' not implemented for this Tesseract. "
+            f"Available endpoints: {', '.join(client.available_methods)}. "
+            f"To use this endpoint, implement the '{eval_func}' endpoint in your Tesseract object."
+        )
+
+
 def tesseract_dispatch(
     *array_args: ArrayLike | ShapedArray | Any,
     static_args: tuple[_Hashable, ...],
@@ -213,6 +222,7 @@ def tesseract_dispatch(
 
     The dispatch that is not lowered is only called in cases where abstract eval is not needed.
     """
+    _raise_if_unimplemented(eval_func, client)
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -249,6 +259,7 @@ def tesseract_dispatch_lowering(
     eval_func: str,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
+    _raise_if_unimplemented(eval_func, client)
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -295,6 +306,8 @@ def tesseract_dispatch_batching(
     eval_func: str,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
+    _raise_if_unimplemented(eval_func, client)
+
     new_args = [
         arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)

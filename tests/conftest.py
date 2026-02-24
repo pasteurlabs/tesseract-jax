@@ -180,6 +180,10 @@ served_univariate_tesseract_raw = make_tesseract_fixture("univariate_tesseract")
 served_nested_tesseract_raw = make_tesseract_fixture("nested_tesseract")
 served_non_abstract_tesseract = make_tesseract_fixture("non_abstract_tesseract")
 served_vectoradd_tesseract = make_tesseract_fixture("vectoradd_tesseract")
+
+# Tesseracts with specific endpoints removed for testing error handling
+served_tesseract_no_jvp = make_tesseract_fixture("univariate_tesseract_no_jvp")
+served_tesseract_no_vjp = make_tesseract_fixture("univariate_tesseract_no_vjp")
 served_pytree_tesseract = make_tesseract_fixture("pytree_tesseract")
 
 

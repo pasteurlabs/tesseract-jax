@@ -1,0 +1,4 @@
+name: "univariate_no_vjp"
+version: "0.1.0"
+description: |
+  Univariate tesseract without vector_jacobian_product, for testing error handling.
