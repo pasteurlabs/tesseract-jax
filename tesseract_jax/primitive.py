@@ -25,6 +25,12 @@ tesseract_dispatch_p.multiple_results = True
 
 
 class _Hashable:
+    """A wrapper class to make non-hashable objects hashable by using their id.
+
+    This is not a proper hash function, as two identical objects with different memory
+    addresses will have different hashes.
+    """
+
     def __init__(self, obj: Any) -> None:
         self.wrapped = obj
 
@@ -53,6 +59,7 @@ def tesseract_dispatch_abstract_eval(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple:
@@ -78,16 +85,22 @@ def tesseract_dispatch_abstract_eval(
 
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
-    tan_args: tuple[ArrayLike, ...],
+    tan_args: tuple[ArrayLike | ad.Zero, ...],
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
-    """Defines how to dispatch jvp operation."""
+    """Defines how to dispatch jvp operation.
+
+    Note this function is also called when evaluating a VJP or doing
+    reverse-mode autodiff.
+
+    """
     if eval_func != "apply":
         raise RuntimeError("Cannot take higher-order derivatives")
 
@@ -97,18 +110,15 @@ def tesseract_dispatch_jvp_rule(
     #          (not in ad.py's backward_pass), you probably want to instantiate
     #          it so that it's no longer symbolic
 
-    # TODO: create a mask for Zero (essentially, jvp_in)? or maybe substitute it
-    #       with something that jax still likes, while not wasting memory and time?
-
-    tan_args_ = tuple(
-        (
-            jax.numpy.zeros_like(arg.aval)
-            if isinstance(arg, jax._src.ad_util.Zero)
-            else arg
-        )
-        for arg in tan_args
+    # Compute which primals have non-zero tangents
+    has_tangent = tuple(
+        not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
     )
-
+    tan_args_ = tuple(
+        (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
+        for arg, has_tan in zip(tan_args, has_tangent, strict=True)
+    )
+    # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
         *in_args,
         *tan_args_,
@@ -117,6 +127,7 @@ def tesseract_dispatch_jvp_rule(
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
         is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="jacobian_vector_product",
     )
@@ -128,6 +139,7 @@ def tesseract_dispatch_jvp_rule(
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
         is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="apply",
     )
@@ -139,13 +151,14 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 
 def tesseract_dispatch_transpose_rule(
-    cotangent: Sequence[ArrayLike],
+    cotangent: Sequence[ArrayLike | ad.Zero],
     *args: ArrayLike,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> tuple[ArrayLike | None, ...]:
@@ -153,7 +166,9 @@ def tesseract_dispatch_transpose_rule(
     assert eval_func in ("jacobian_vector_product",)
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
-    args = args[:n_primals]
+    primal_args = args[:n_primals]
+
+    primal_args = args[:n_primals]
 
     cotan_args_ = tuple(
         (
@@ -165,24 +180,19 @@ def tesseract_dispatch_transpose_rule(
     )
 
     vjp = tesseract_dispatch_p.bind(
-        *args,
+        *primal_args,
         *cotan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
         is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
         client=client,
         eval_func="vector_jacobian_product",
     )
-    # TODO: I'm not sure this makes sense given these docs:
-    #       https://jax.readthedocs.io/en/latest/jax-primitives.html#transposition
-    #       "A tuple with the cotangent of the inputs, with the value None corresponding to the constant arguments"
-    #       ...but if I provide only cotangent, jax complains, and if I investigate its internals,
-    #       I see it chokes on map(partial(write_cotangent, eqn.primitive), eqn.invars, cts_out),
-    #       where eqn.invars ends up being longer than cts_out.
 
-    return tuple([None] * len(args) + list(vjp))
+    return tuple([None] * len(primal_args) + list(vjp))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
@@ -204,6 +214,7 @@ def tesseract_dispatch(
     output_pytreedef: PyTreeDef | None,
     output_avals: tuple[ShapeDtypeStruct, ...] | None,
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -222,6 +233,7 @@ def tesseract_dispatch(
             output_pytreedef,
             output_avals,
             is_static_mask,
+            has_tangent,
         )
         if not isinstance(out, tuple) and output_avals is not None:
             out = (out,)
@@ -242,6 +254,7 @@ def tesseract_dispatch_lowering(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -257,6 +270,7 @@ def tesseract_dispatch_lowering(
             output_pytreedef,
             output_avals,
             is_static_mask,
+            has_tangent,
         )
         if not isinstance(out, tuple):
             out = (out,)
@@ -287,6 +301,7 @@ def tesseract_dispatch_batching(
     output_pytreedef: PyTreeDef,
     output_avals: tuple[ShapeDtypeStruct, ...],
     is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
 ) -> Any:
@@ -310,6 +325,7 @@ def tesseract_dispatch_batching(
             output_pytreedef=output_pytreedef,
             output_avals=output_avals,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func=eval_func,
         )
@@ -329,12 +345,6 @@ def _check_dtype(dtype: Any) -> None:
             "Cannot return 64-bit values when `jax_enable_x64` is disabled. "
             "Try enabling it with `jax.config.update('jax_enable_x64', True)`."
         )
-
-
-def _is_static(x: Any) -> bool:
-    if isinstance(x, jax.core.Tracer):
-        return False
-    return True
 
 
 def _make_hashable(obj: Any) -> _Hashable:
@@ -415,21 +425,15 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    is_static_mask = tuple(_is_static(arg) for arg in flat_args)
+    is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)
     array_args, static_args = split_args(flat_args, is_static_mask)
     static_args = tuple(_make_hashable(arg) for arg in static_args)
+    has_tangent = (True,) * len(array_args)
 
     if "abstract_eval" in tesseract_client.available_endpoints:
         # Get abstract values for outputs, so we can unflatten them later
         output_pytreedef, avals = None, None
-        avals = client.abstract_eval(
-            array_args,
-            static_args,
-            input_pytreedef,
-            output_pytreedef,
-            avals,
-            is_static_mask,
-        )
+        avals = client.abstract_eval(inputs)
 
         is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
         flat_avals, output_pytreedef = jax.tree.flatten(avals, is_leaf=is_aval)
@@ -451,6 +455,7 @@ def apply_tesseract(
             output_pytreedef=output_pytreedef,
             output_avals=flat_avals,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func="apply",
         )
@@ -469,6 +474,7 @@ def apply_tesseract(
             output_pytreedef=None,
             output_avals=None,
             is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
             client=client,
             eval_func="apply",
         )

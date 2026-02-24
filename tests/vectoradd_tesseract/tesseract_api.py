@@ -4,6 +4,7 @@
 
 from typing import Any
 
+import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 
@@ -30,6 +31,21 @@ def abstract_eval(abstract_inputs):
     """Abstract evaluation of the addition operation."""
     return {
         "c": abstract_inputs.a,
+    }
+
+
+def jacobian_vector_product(
+    inputs: InputSchema,
+    jvp_inputs: set[str],
+    jvp_outputs: set[str],
+    tangent_vector: dict[str, Any],
+):
+    """Forward-mode AD for c = a + b.
+
+    Since dc/da = 1 and b is not differentiable, the JVP is just the tangent of a.
+    """
+    return {
+        "c": tangent_vector.get("a", np.zeros_like(inputs.a)),
     }
 
 

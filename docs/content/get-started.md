@@ -70,8 +70,53 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
       apply_tesseract(tess, {"a": {"v": [1.0]}, "b": {"v": [2.0]}})  # ❌ raises an error
       apply_tesseract(tess, {"a": {"v": jnp.array([1.0])}, "b": {"v": jnp.array([2.0])}})  # ✅ works
   ```
-- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined for all operations. This is because JAX mandates abstract evaluation of all operations before they are executed. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
+- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined when used in conjunction with automatic differentiation and JAX transformations. This is because JAX, in these cases, mandates abstract evaluation of all operations before they are executed. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
 
 ```{tip}
 When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
 ```
+
+- **Non-differentiable outputs**: When an output is marked as non-differentiable in the Tesseract API, its behavior differs by differentiation mode.
+
+  In **forward mode (JVP)**, tangents for non-differentiable outputs are `NaN`, which propagates to any downstream computation that depends on them.
+
+  In **reverse mode (VJP)**, non-differentiable outputs are silently excluded from the cotangent sum. If you accidentally leave such an output in the return value and pass a cotangent that includes it, you will get a `ValueError` due to a pytree structure mismatch:
+
+  ```
+  ValueError: unexpected tree structure of argument to vjp function:
+    got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
+  ```
+
+  To compute a VJP correctly when the Tesseract has non-differentiable outputs, exclude them from the return value in a closure:
+
+  ```python
+  def f(inputs):
+      res = apply_tesseract(tess, inputs)
+      res.pop("nondiff_res")  # exclude non-differentiable output
+      return res
+
+  primals, f_vjp = jax.vjp(f, inputs)
+  cotangents = f_vjp(primals)
+  ```
+
+  If you need the *value* of a non-differentiable output as part of a loss, use `jax.lax.stop_gradient` to prevent gradients from flowing through it:
+
+  ```python
+  def loss_fn(inputs):
+      results = apply_tesseract(tess, inputs)
+      y = results["y"]
+      nondiff_res = jax.lax.stop_gradient(results["nondiff_res"])
+      return jnp.sum(y**2 + nondiff_res.sum())
+  ```
+
+- **Non-differentiable inputs**: Requesting gradients with respect to an input that is marked as non-differentiable in the Tesseract API raises an error. Use the `argnums` parameter (or equivalent) to ensure gradient transformations only target differentiable inputs:
+
+  ```python
+  # "a" is differentiable, "b" is not
+  def loss_fn(a, b):
+      c = apply_tesseract(vectoradd_tess, {"a": a, "b": b})["c"]
+      return jnp.sum(c**2)
+
+  jax.grad(loss_fn, argnums=0)(a, b)  # ✅ gradient w.r.t. "a"
+  jax.grad(loss_fn, argnums=1)(a, b)  # ❌ raises an error — "b" is non-differentiable
+  ```
