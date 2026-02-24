@@ -150,7 +150,6 @@ class Jaxeract:
             if path in out_data:
                 out.append(out_data[path])
             else:
-                # Missing paths mean zero gradient
                 out.append(jax.numpy.full_like(aval, jax.numpy.nan))
 
         return tuple(out)
