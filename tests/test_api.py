@@ -399,7 +399,7 @@ def test_pytree_tesseract_jacobian(
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("mode", ["fwd", "rev"])
 @DIFFABLE_PATHS_PARAMS
-def test_pytree_tesseract_loss(
+def test_pytree_tesseract_nondiffable_input(
     pytree_tess, pytree_tess_inputs, use_jit, mode, diffable_paths
 ):
     """Test that non-differentiable inputs in closure don't get included in VJP/JVP for pytree."""
@@ -466,13 +466,13 @@ def test_pytree_tesseract_loss(
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("mode", ["fwd", "rev"])
-def test_tesseract_loss(vectoradd_tess, use_jit, mode):
+def test_vectoradd_tesseract_nondiffable_input(vectoradd_tess, use_jit, mode):
     """Test that non-differentiable inputs in closure don't get included in VJP/JVP."""
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
     b = np.array([4.0, 5.0, 6.0], dtype="float32")
 
     def loss_fn(a, b):
-        vectoradd_fn_a: jax.Callable = lambda a: apply_tesseract(
+        vectoradd_fn_a = lambda a: apply_tesseract(
             vectoradd_tess,
             inputs=dict(
                 a=a,
@@ -482,25 +482,39 @@ def test_tesseract_loss(vectoradd_tess, use_jit, mode):
 
         c = vectoradd_fn_a(a)["c"]
 
-        return jnp.sum((c) ** 2)
+        return jnp.sum(c**2)
+
+    def loss_fn_raw(a, b):
+        # b is non-differentiable; stop_gradient models the same semantics as the Tesseract schema
+        c = a + jax.lax.stop_gradient(b)
+        return jnp.sum(c**2)
 
     if use_jit:
         loss_fn = jax.jit(loss_fn)
+        loss_fn_raw = jax.jit(loss_fn_raw)
 
     if mode == "fwd":
         # Forward mode: JVP
         # Note: 'b' gets passed as a tracer to apply_tesseract.
         # The schema says 'b' is non-differentiable, so it should not be included in jvp_inputs.
         primal, tangent = jax.jvp(loss_fn, (a, b), (a, b))
-        assert primal is not None
-        assert tangent is not None
+        primal_raw, tangent_raw = jax.jvp(loss_fn_raw, (a, b), (a, b))
+
+        np.testing.assert_allclose(primal, primal_raw, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(tangent, tangent_raw, rtol=1e-5, atol=1e-5)
     else:
         # Reverse mode: VJP via grad
         # Note: This should only differentiate w.r.t. the first argument 'a',
         # but 'b' gets passed as a tracer to apply_tesseract.
         # The schema says 'b' is non-differentiable, so it should not be included in vjp_inputs.
         value_and_grad_fn = jax.value_and_grad(loss_fn)
-        assert value_and_grad_fn(a, b) is not None
+        value_and_grad_fn_raw = jax.value_and_grad(loss_fn_raw)
+
+        value, grad = value_and_grad_fn(a, b)
+        value_raw, grad_raw = value_and_grad_fn_raw(a, b)
+
+        np.testing.assert_allclose(value, value_raw, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(grad, grad_raw, rtol=1e-5, atol=1e-5)
 
 
 def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
@@ -508,7 +522,7 @@ def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_tesseract_loss_univariate(univariate_tess, use_jit):
+def test_univariate_tesseract_loss_and_grad(univariate_tess, use_jit):
     """Test Tesseract with loss function, parameterized for JIT and forward/backward modes."""
     x = np.array(1.0, dtype="float64")
     y = np.array(2.0, dtype="float64")

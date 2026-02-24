@@ -85,7 +85,7 @@ def tesseract_dispatch_abstract_eval(
 
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
-    tan_args: tuple[ArrayLike, ...],
+    tan_args: tuple[ArrayLike | ad.Zero, ...],
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
     output_pytreedef: PyTreeDef,
@@ -168,10 +168,7 @@ def tesseract_dispatch_transpose_rule(
     n_primals = len(is_static_mask) - sum(is_static_mask)
     primal_args = args[:n_primals]
 
-    # only send args with tangent
-    primal_args = tuple(
-        arg for arg, has_tan in zip(primal_args, has_tangent, strict=True) if has_tan
-    )
+    primal_args = args[:n_primals]
 
     cotan_args_ = tuple(
         (
