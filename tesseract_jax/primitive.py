@@ -114,17 +114,14 @@ def tesseract_dispatch_jvp_rule(
     has_tangent = tuple(
         not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
     )
-    # tan_args_ = tuple(
-    #     (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
-    #     for arg, has_tan in zip(tan_args, has_tangent, strict=True)
-    # )
-    non_zero_tan_args = tuple(
-        arg for arg, has_tan in zip(tan_args, has_tangent, strict=True) if has_tan
+    tan_args_ = tuple(
+        (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
+        for arg, has_tan in zip(tan_args, has_tangent, strict=True)
     )
     # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
         *in_args,
-        *non_zero_tan_args,
+        *tan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,

@@ -12,6 +12,7 @@ from tesseract_core import Tesseract
 from tesseract_jax.tree_util import (
     PyTree,
     _pytree_to_tesseract_flat,
+    combine_args,
     unflatten_args,
 )
 
@@ -111,14 +112,14 @@ class Jaxeract:
 
         # Expand filtered tangents back to full length using has_tangent:
         # positions where has_tangent=True get the tangent, False gets None
-        # n_zeros = len(primals) - sum(has_tangent)
-        # full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
+        n_zeros = len(primals) - sum(has_tangent)
+        full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
             primals, static_args, input_pytreedef, is_static_mask
         )
         tangent_inputs = unflatten_args(
-            tangents,
+            full_tangents,
             static_args,
             input_pytreedef,
             is_static_mask,
