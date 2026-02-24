@@ -84,7 +84,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 
   ```
   ValueError: unexpected tree structure of argument to vjp function:
-    got PyTreeDef({'O': *, 'result': *}), but expected PyTreeDef({'result': *})
+    got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
   ```
 
   To compute a VJP correctly when the Tesseract has non-differentiable outputs, exclude them from the return value in a closure:
@@ -92,7 +92,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   ```python
   def f(inputs):
       res = apply_tesseract(tess, inputs)
-      res.pop("O")  # exclude non-differentiable output
+      res.pop("nondiff_res")  # exclude non-differentiable output
       return res
 
   primals, f_vjp = jax.vjp(f, inputs)
@@ -105,8 +105,8 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   def loss_fn(inputs):
       results = apply_tesseract(tess, inputs)
       y = results["y"]
-      O = jax.lax.stop_gradient(results["O"])
-      return jnp.sum(y**2 + O.sum())
+      nondiff_res = jax.lax.stop_gradient(results["nondiff_res"])
+      return jnp.sum(y**2 + nondiff_res.sum())
   ```
 
 - **Non-differentiable inputs**: Requesting gradients with respect to an input that is marked as non-differentiable in the Tesseract API raises an error. Use the `argnums` parameter (or equivalent) to ensure gradient transformations only target differentiable inputs:
