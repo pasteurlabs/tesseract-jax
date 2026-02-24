@@ -292,10 +292,8 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
     primal_with_metadata = primal.copy()
     primal_with_metadata["metadata"] = np.array([1.0, 2.0], dtype="float32")
 
-    try:
+    with pytest.raises(ValueError, match=r"(?i)unexpected tree structure"):
         f_vjp(primal_with_metadata)
-    except ValueError as e:
-        assert "unexpected tree structure of argument to vjp function" in str(e).lower()
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
