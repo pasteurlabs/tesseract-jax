@@ -2,46 +2,35 @@
 #    uv export --frozen --color never --no-emit-project --no-hashes
 annotated-types==0.7.0
     # via pydantic
-certifi==2026.1.4
+certifi==2025.1.31
     # via requests
-charset-normalizer==3.4.4
+charset-normalizer==3.4.1
     # via requests
-click==8.3.1
+click==8.1.8
     # via typer
 colorama==0.4.6 ; sys_platform == 'win32'
     # via click
-idna==3.11
+docker==7.1.0
+    # via tesseract-core
+idna==3.10
     # via requests
-jax==0.6.2 ; python_full_version < '3.11'
+jax==0.6.0
     # via tesseract-jax
-jax==0.9.0.1 ; python_full_version >= '3.11'
-    # via tesseract-jax
-jaxlib==0.6.2 ; python_full_version < '3.11'
-    # via jax
-jaxlib==0.9.0.1 ; python_full_version >= '3.11'
+jaxlib==0.6.0
     # via jax
 jinja2==3.1.6
     # via tesseract-core
-markdown-it-py==3.0.0 ; python_full_version < '3.11'
+markdown-it-py==3.0.0
     # via rich
-markdown-it-py==4.0.0 ; python_full_version >= '3.11'
-    # via rich
-markupsafe==3.0.3
+markupsafe==3.0.2
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
-ml-dtypes==0.5.4
+ml-dtypes==0.5.1
     # via
     #   jax
     #   jaxlib
-numpy==2.2.6 ; python_full_version < '3.11'
-    # via
-    #   jax
-    #   jaxlib
-    #   ml-dtypes
-    #   scipy
-    #   tesseract-core
-numpy==2.4.2 ; python_full_version >= '3.11'
+numpy==2.2.4
     # via
     #   jax
     #   jaxlib
@@ -50,43 +39,46 @@ numpy==2.4.2 ; python_full_version >= '3.11'
     #   tesseract-core
 opt-einsum==3.4.0
     # via jax
-pip==26.0.1
+pip==25.0.1
     # via tesseract-core
-pydantic==2.12.5
+pydantic==2.11.0
     # via tesseract-core
-pydantic-core==2.41.5
+pydantic-core==2.33.0
     # via pydantic
-pygments==2.19.2
+pygments==2.19.1
     # via rich
-pyyaml==6.0.3
+pywin32==310 ; sys_platform == 'win32'
+    # via docker
+pyyaml==6.0.2
     # via tesseract-core
-requests==2.32.5
-    # via tesseract-core
-rich==14.3.3
+requests==2.32.3
+    # via
+    #   docker
+    #   tesseract-core
+rich==14.0.0
     # via
     #   tesseract-core
     #   typer
-scipy==1.15.3 ; python_full_version < '3.11'
-    # via
-    #   jax
-    #   jaxlib
-scipy==1.17.1 ; python_full_version >= '3.11'
+scipy==1.15.2
     # via
     #   jax
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==1.4.0
+tesseract-core==0.8.4
     # via tesseract-jax
-typer==0.21.1
+typer==0.15.2
     # via tesseract-core
-typing-extensions==4.15.0
+typing-extensions==4.13.2
     # via
     #   pydantic
     #   pydantic-core
+    #   rich
     #   typer
     #   typing-inspection
-typing-inspection==0.4.2
+typing-inspection==0.4.0
     # via pydantic
-urllib3==2.6.3
-    # via requests
+urllib3==2.4.0
+    # via
+    #   docker
+    #   requests

@@ -24,6 +24,7 @@ docs = [
     "myst-nb",
     "sphinx_copybutton",
     "sphinxext_opengraph",
+    "tesseract-core[runtime]",
 ]
 # TODO: add dev dependencies here *and* in requirements-dev.txt
 dev = [
