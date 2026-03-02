@@ -29,6 +29,7 @@ Example::
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
 
@@ -40,6 +41,19 @@ from jax.interpreters import ad, batching, mlir
 from jax.typing import ArrayLike
 
 T = TypeVar("T")
+
+# Var constructor signature changed across JAX versions:
+#   JAX <=0.9:  Var(aval)
+#   JAX >=0.6:  Var(suffix, aval)
+_var_params = list(inspect.signature(extend.core.Var).parameters)
+
+
+def _make_var(aval: Any):
+    """Create a ``jax.extend.core.Var`` portably across JAX versions."""
+    if len(_var_params) >= 2 and _var_params[0] == "suffix":
+        return extend.core.Var("", aval)
+    return extend.core.Var(aval)
+
 
 # ---------------------------------------------------------------------------
 # Primitive definition
@@ -226,7 +240,7 @@ def _rewrite_jaxpr(
                 ]
                 new_out_vars = list(eqn.outvars)
                 for aval in extra_avals:
-                    new_var = extend.core.Var("", aval)
+                    new_var = _make_var(aval)
                     new_out_vars.append(new_var)
                     extra_outvars.append(new_var)
 
