@@ -22,7 +22,7 @@ jobs:
         # test with *all* supported Python versions
         # python-version: ["3.10", "3.11", "3.12", "3.13"]
 
-        jax-version: [""]
+        jax-version: ["latest"]
         include:
           # test with oldest supported JAX version
           - python-version: "3.10"
@@ -54,8 +54,8 @@ jobs:
         run: |
           uv sync --extra dev --frozen
 
-      - name: Pin oldest supported JAX version
-        if: matrix.jax-version != ''
+      - name: Pin JAX version
+        if: matrix.jax-version != 'latest'
         run: |
           uv pip install jax==${{ matrix.jax-version }}
 

@@ -29,6 +29,7 @@ Example::
 
 from __future__ import annotations
 
+import contextvars
 import inspect
 from collections.abc import Callable, Sequence
 from typing import Any, TypeVar
@@ -150,7 +151,13 @@ batching.primitive_batchers[sow_p] = _sow_batching
 # Treedef storage (populated at trace time, read by ``save_intermediates``)
 # ---------------------------------------------------------------------------
 
-_sow_treedefs: dict[str, jax.tree_util.PyTreeDef] = {}
+# Each ``save_intermediates`` call sets a fresh dict on this ContextVar before
+# tracing.  ``sow`` writes into the current dict during tracing.  This avoids
+# a shared global and makes concurrent / nested ``save_intermediates`` calls
+# safe — each one sees only its own treedefs.
+_sow_treedefs: contextvars.ContextVar[dict[str, jax.tree_util.PyTreeDef] | None] = (
+    contextvars.ContextVar("_sow_treedefs", default=None)
+)
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -182,98 +189,162 @@ def sow(value: T, name: str, *, tag: str = "intermediates") -> T:
         *value*, unchanged.
     """
     flat, treedef = jax.tree.flatten(value)
-    _sow_treedefs[name] = treedef
+    store = _sow_treedefs.get()
+    if store is not None:
+        store[name] = treedef
     results = sow_p.bind(*flat, name=name, tag=tag, mode="primal")
     return jax.tree.unflatten(treedef, results)
+
+
+def _find_nested_jaxpr_param(
+    eqn_params: dict[str, Any],
+) -> str | None:
+    """Return the param key that holds a nested ClosedJaxpr, or None.
+
+    JAX operations like ``pjit`` (from ``jax.jit``), ``while_loop``, and
+    ``cond`` store their body as a *ClosedJaxpr* in the equation's params
+    dict.  This helper identifies which param key (if any) holds such a
+    nested program so we can recurse into it.
+    """
+    for param_name, param_value in eqn_params.items():
+        if hasattr(param_value, "jaxpr") and hasattr(param_value.jaxpr, "eqns"):
+            return param_name
+    return None
 
 
 def _rewrite_jaxpr(
     jaxpr: extend.core.Jaxpr,
     tag: str,
-) -> tuple:
-    """Recursively rewrite a jaxpr to surface sow values as extra outputs.
+) -> tuple[extend.core.Jaxpr, list[tuple[str, str]], list[int]]:
+    """Rewrite a jaxpr so that sow-tagged values appear as extra outputs.
 
-    Walks all equations in *jaxpr*.  For each ``sow_p`` with matching *tag*,
-    its input vars are appended as additional output vars.  For equations
-    that contain sub-jaxprs (e.g. ``pjit``), the rewriting recurses into
-    the sub-jaxpr, and new output variables are created to thread the
-    extra values up to the parent.
+    A *jaxpr* (JAX expression) is JAX's intermediate representation: a
+    list of equations (primitive operations), each consuming and producing
+    typed variables.  ``save_intermediates`` traces the user's function
+    into a jaxpr, then calls this function to modify it before evaluation.
+
+    The rewriting does two things:
+
+    1. **Direct sow equations** --When an equation is a ``sow_p`` call
+       whose ``tag`` matches, its *input* variables (i.e. the values
+       flowing *through* the sow) are appended to the jaxpr's output
+       list.  This makes them available as return values when the jaxpr
+       is later evaluated.
+
+    2. **Nested sub-programs** --Some JAX operations (e.g. ``jax.jit``
+       → ``pjit``) wrap an inner jaxpr.  We recurse into these, and if
+       sow values were found inside, we:
+
+       - Replace the inner jaxpr with the rewritten version (which now
+         has extra outputs).
+       - Create fresh variables in the *parent* jaxpr to receive those
+         extra outputs (and extend ``out_shardings`` / ``out_layouts``
+         metadata so JAX doesn't complain).
+       - Append those fresh variables to the parent's output list,
+         threading the captured values all the way up.
+
+    Args:
+        jaxpr: The JAX expression to rewrite.
+        tag: Only capture sow calls whose ``tag`` parameter equals this.
 
     Returns:
-        A tuple ``(new_jaxpr, sow_keys, sow_counts)`` where *sow_keys*
-        is a list of ``(name, mode)`` pairs and *sow_counts* gives the
-        number of flat values for each key.
+        A tuple of:
+
+        - **rewritten_jaxpr** --The (possibly modified) jaxpr with extra
+          outputs appended.
+        - **found_sow_keys** --A list of ``(name, mode)`` pairs, one per
+          captured sow, in the order they appear.
+        - **flat_counts** --For each entry in *found_sow_keys*, how many
+          flat (leaf) array values it contributes.  A scalar sow has
+          count 1; a pytree sow has count = number of leaves.
     """
-    new_eqns: list = []
-    extra_outvars: list = []
-    sow_keys: list[tuple[str, str]] = []
-    sow_counts: list[int] = []
+    rewritten_eqns: list = []
+    extra_output_vars: list = []
+    found_sow_keys: list[tuple[str, str]] = []
+    flat_counts: list[int] = []
 
     for eqn in jaxpr.eqns:
-        # Look for a sub-jaxpr (pjit, while_loop, cond, etc.)
-        sub_jaxpr_key = None
-        for pk, pv in eqn.params.items():
-            if hasattr(pv, "jaxpr") and hasattr(pv.jaxpr, "eqns"):
-                sub_jaxpr_key = pk
-                break
+        nested_jaxpr_param = _find_nested_jaxpr_param(eqn.params)
 
-        if sub_jaxpr_key is not None:
-            sub_closed = eqn.params[sub_jaxpr_key]
-            new_sub_jaxpr, sub_keys, sub_counts = _rewrite_jaxpr(sub_closed.jaxpr, tag)
+        if nested_jaxpr_param is not None:
+            # --- Recurse into a nested sub-program (e.g. pjit body) ---
+            inner_closed_jaxpr = eqn.params[nested_jaxpr_param]
+            rewritten_inner, inner_keys, inner_counts = _rewrite_jaxpr(
+                inner_closed_jaxpr.jaxpr, tag
+            )
 
-            if sub_keys:
-                new_sub_closed = sub_closed.replace(jaxpr=new_sub_jaxpr)
-                new_params = dict(eqn.params)
-                new_params[sub_jaxpr_key] = new_sub_closed
+            if not inner_keys:
+                # No sow found inside — keep the equation unchanged.
+                rewritten_eqns.append(eqn)
+                continue
 
-                n_extra = len(new_sub_jaxpr.outvars) - len(sub_closed.jaxpr.outvars)
-                if "out_shardings" in new_params:
-                    orig = new_params["out_shardings"]
-                    new_params["out_shardings"] = tuple(orig) + (orig[0],) * n_extra
-                if "out_layouts" in new_params:
-                    orig = new_params["out_layouts"]
-                    new_params["out_layouts"] = tuple(orig) + (None,) * n_extra
+            # The inner jaxpr now has additional outputs.  We need to
+            # update the enclosing equation to match.
+            updated_inner = inner_closed_jaxpr.replace(jaxpr=rewritten_inner)
+            updated_params = dict(eqn.params)
+            updated_params[nested_jaxpr_param] = updated_inner
 
-                extra_avals = [
-                    v.aval
-                    for v in new_sub_jaxpr.outvars[len(sub_closed.jaxpr.outvars) :]
-                ]
-                new_out_vars = list(eqn.outvars)
-                for aval in extra_avals:
-                    new_var = _make_var(aval)
-                    new_out_vars.append(new_var)
-                    extra_outvars.append(new_var)
+            # Some primitives (pjit) carry per-output metadata that
+            # must be extended to cover the new outputs.
+            n_new_outputs = len(rewritten_inner.outvars) - len(
+                inner_closed_jaxpr.jaxpr.outvars
+            )
+            if "out_shardings" in updated_params:
+                orig = updated_params["out_shardings"]
+                updated_params["out_shardings"] = (
+                    tuple(orig) + (orig[0],) * n_new_outputs
+                )
+            if "out_layouts" in updated_params:
+                orig = updated_params["out_layouts"]
+                updated_params["out_layouts"] = tuple(orig) + (None,) * n_new_outputs
 
-                sow_keys.extend(sub_keys)
-                sow_counts.extend(sub_counts)
-                new_eqns.append(eqn.replace(params=new_params, outvars=new_out_vars))
-            else:
-                new_eqns.append(eqn)
+            # Create fresh variables in the parent scope to receive
+            # each new output from the inner jaxpr.
+            new_outputs = rewritten_inner.outvars[
+                len(inner_closed_jaxpr.jaxpr.outvars) :
+            ]
+            new_inner_output_avals = [v.aval for v in new_outputs]
+            expanded_outvars = list(eqn.outvars)
+            for aval in new_inner_output_avals:
+                fresh_var = _make_var(aval)
+                expanded_outvars.append(fresh_var)
+                extra_output_vars.append(fresh_var)
+
+            found_sow_keys.extend(inner_keys)
+            flat_counts.extend(inner_counts)
+            rewritten_eqns.append(
+                eqn.replace(params=updated_params, outvars=expanded_outvars)
+            )
+
         elif eqn.primitive is sow_p and eqn.params.get("tag") == tag:
-            new_eqns.append(eqn)
-            name = eqn.params["name"]
-            mode = eqn.params["mode"]
-            sow_keys.append((name, mode))
-            sow_counts.append(len(eqn.invars))
-            extra_outvars.extend(eqn.invars)
-        else:
-            new_eqns.append(eqn)
+            # --- Direct sow equation: capture its input values ---
+            rewritten_eqns.append(eqn)
+            sow_name = eqn.params["name"]
+            sow_mode = eqn.params["mode"]
+            found_sow_keys.append((sow_name, sow_mode))
+            flat_counts.append(len(eqn.invars))
+            # The sow's *inputs* are the values we want to capture
+            # (sow is identity, so invars == outvars in value).
+            extra_output_vars.extend(eqn.invars)
 
-    if extra_outvars:
-        new_jaxpr = jaxpr.replace(
-            eqns=new_eqns,
-            outvars=list(jaxpr.outvars) + extra_outvars,
+        else:
+            rewritten_eqns.append(eqn)
+
+    if extra_output_vars:
+        rewritten_jaxpr = jaxpr.replace(
+            eqns=rewritten_eqns,
+            outvars=list(jaxpr.outvars) + extra_output_vars,
         )
-        return new_jaxpr, sow_keys, sow_counts
-    return jaxpr, sow_keys, sow_counts
+        return rewritten_jaxpr, found_sow_keys, flat_counts
+    return jaxpr, found_sow_keys, flat_counts
 
 
 def _validate_no_duplicate_sow_names(
-    sow_keys: list[tuple[str, str]],
+    found_sow_keys: list[tuple[str, str]],
 ) -> None:
     """Raise ValueError if a sow name appears more than once for the same mode."""
     seen: dict[str, str] = {}
-    for name, mode in sow_keys:
+    for name, mode in found_sow_keys:
         if name in seen and seen[name] == mode:
             raise ValueError(
                 f"Duplicate sow name {name!r} (mode={mode!r}). "
@@ -317,45 +388,73 @@ def save_intermediates(
     """
 
     def wrapped(*args: Any, **kwargs: Any) -> tuple[Any, dict[str, dict[str, Any]]]:
-        _sow_treedefs.clear()
+        # Give this call its own fresh treedef store.  ``sow`` writes
+        # into it during tracing; we snapshot it afterwards.  Using a
+        # ContextVar means concurrent / nested ``save_intermediates``
+        # calls each get an isolated store.
+        token = _sow_treedefs.set({})
 
+        # Step 1: Trace the function into a jaxpr.  This converts the
+        # Python function into JAX's intermediate representation -- a flat
+        # list of primitive operations with typed variables.  Tracing
+        # also populates the treedef store with the pytree structure of
+        # each sow call (needed later to unflatten captured flat arrays
+        # back into the original pytree shape).
         closed_jaxpr = jax.make_jaxpr(lambda *a: fn(*a, **kwargs))(*args)
-        jaxpr = closed_jaxpr.jaxpr
-        treedefs = dict(_sow_treedefs)
+        original_jaxpr = closed_jaxpr.jaxpr
+        treedefs_snapshot = dict(_sow_treedefs.get())  # type: ignore[arg-type]
 
-        # Recursively rewrite the jaxpr to surface sow values
-        new_jaxpr, sow_keys, sow_counts = _rewrite_jaxpr(jaxpr, tag)
-        _validate_no_duplicate_sow_names(sow_keys)
+        # Restore the previous ContextVar state so we don't leak.
+        _sow_treedefs.reset(token)
 
-        if not sow_keys:
-            result = jax.core.eval_jaxpr(jaxpr, closed_jaxpr.consts, *args)
-            result = result[0] if len(result) == 1 else tuple(result)
+        # Step 2: Rewrite the jaxpr so that sow-tagged values become
+        # additional outputs.  This walks the entire program (including
+        # inside jit boundaries) and appends the sow values to the
+        # output list.
+        rewritten_jaxpr, found_sow_keys, flat_counts = _rewrite_jaxpr(
+            original_jaxpr, tag
+        )
+        _validate_no_duplicate_sow_names(found_sow_keys)
+
+        # No sow calls found -- just evaluate the original program.
+        if not found_sow_keys:
+            flat_results = jax.core.eval_jaxpr(
+                original_jaxpr, closed_jaxpr.consts, *args
+            )
+            result = flat_results[0] if len(flat_results) == 1 else tuple(flat_results)
             return result, {}
 
-        all_results = jax.core.eval_jaxpr(new_jaxpr, closed_jaxpr.consts, *args)
+        # Step 3: Evaluate the rewritten jaxpr.  The result is a flat
+        # list: [original_outputs..., captured_sow_values...].
+        all_flat_results = jax.core.eval_jaxpr(
+            rewritten_jaxpr, closed_jaxpr.consts, *args
+        )
 
-        n_original = len(jaxpr.outvars)
-        original_results = all_results[:n_original]
-        extra_results = all_results[n_original:]
+        # Split into original outputs and captured intermediates.
+        n_original_outputs = len(original_jaxpr.outvars)
+        original_flat_results = all_flat_results[:n_original_outputs]
+        captured_flat_values = all_flat_results[n_original_outputs:]
 
-        # Group by (name, mode) and reconstruct pytrees
+        # Step 4: Group captured flat values by (name, mode) and
+        # reconstruct pytrees where applicable.
         intermediates: dict[str, dict[str, Any]] = {}
-        idx = 0
-        for key, count in zip(sow_keys, sow_counts, strict=True):
-            name, mode = key
-            vals = extra_results[idx : idx + count]
-            treedef = treedefs.get(name)
+        offset = 0
+        for (sow_name, sow_mode), n_leaves in zip(
+            found_sow_keys, flat_counts, strict=True
+        ):
+            leaf_values = captured_flat_values[offset : offset + n_leaves]
+            treedef = treedefs_snapshot.get(sow_name)
             if treedef is not None:
-                value = jax.tree.unflatten(treedef, vals)
+                reconstructed = jax.tree.unflatten(treedef, leaf_values)
             else:
-                value = vals[0] if count == 1 else tuple(vals)
-            intermediates.setdefault(name, {})[mode] = value
-            idx += count
+                reconstructed = leaf_values[0] if n_leaves == 1 else tuple(leaf_values)
+            intermediates.setdefault(sow_name, {})[sow_mode] = reconstructed
+            offset += n_leaves
 
         result = (
-            original_results[0]
-            if len(original_results) == 1
-            else tuple(original_results)
+            original_flat_results[0]
+            if len(original_flat_results) == 1
+            else tuple(original_flat_results)
         )
         return result, intermediates
 
