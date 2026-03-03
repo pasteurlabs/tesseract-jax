@@ -143,3 +143,4 @@ The keys present in each intermediate's dictionary depend on which JAX transform
 | `jax.grad` / `jax.vjp` | `primal`, `cotangent`          |
 | `jax.jvp`            | `primal`, `tangent`              |
 | `jax.jacobian`       | `primal`, `cotangent` (per-column) |
+| `jax.jacfwd`       | `primal`, `tangent` (per-column)   |
