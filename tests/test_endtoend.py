@@ -3,6 +3,7 @@
 
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from jax.typing import ArrayLike
@@ -667,6 +668,57 @@ def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
         _assert_pytree_isequal(result, result_ref)
 
 
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_vectoradd_tesseract_nondiffable_input(served_vectoradd_tesseract, use_jit):
+    vectoradd_tess = Tesseract(served_vectoradd_tesseract)
+    a = np.array([1.0, 2.0, 3.0], dtype="float32")
+    b = np.array([4.0, 5.0, 6.0], dtype="float32")
+
+    # Raw implementation of vector addition
+    def vectoradd_raw(a, b):
+        return a + b
+
+    def loss_fn(a, b):
+        vectoradd_fn_a = lambda a: apply_tesseract(
+            vectoradd_tess,
+            inputs=dict(
+                a=a,
+                b=b,
+            ),
+        )
+
+        c = vectoradd_fn_a(a)["c"]
+
+        return jnp.sum((c) ** 2)
+
+    def loss_fn_raw(a, b):
+        c = vectoradd_raw(a, b)
+        return jnp.sum((c) ** 2)
+
+    if use_jit:
+        loss_fn = jax.jit(loss_fn)
+        loss_fn_raw = jax.jit(loss_fn_raw)
+
+    # Test loss computation
+    loss = loss_fn(a, b)
+    loss_raw = loss_fn_raw(a, b)
+    assert np.allclose(loss, loss_raw), f"Loss mismatch: {loss} vs {loss_raw}"
+
+    # Test gradient computation
+    grad_fn = jax.grad(loss_fn)
+    grad_fn_raw = jax.grad(loss_fn_raw)
+
+    if use_jit:
+        grad_fn = jax.jit(grad_fn)
+        grad_fn_raw = jax.jit(grad_fn_raw)
+
+    grad = grad_fn(a, b)
+    grad_raw = grad_fn_raw(a, b)
+
+    assert grad is not None
+    assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
+
+
 def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
     non_abstract_tess = Tesseract(served_non_abstract_tesseract)
 
@@ -792,7 +844,7 @@ def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+def test_pytree_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
     dict_tess = Tesseract(served_pytree_tesseract)
 
     def f(a):
@@ -807,7 +859,7 @@ def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_j
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+def test_pytree_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
     dict_tess = Tesseract(served_pytree_tesseract)
 
     diffable_inputs = {
@@ -831,7 +883,7 @@ def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
+def test_pytree_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
     dict_tess = Tesseract(served_pytree_tesseract)
 
     diffable_inputs = {
@@ -857,3 +909,58 @@ def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit
         f_vjp = jax.jit(f_vjp)
 
     _ = f_vjp(primal)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_univariate_tesseract_loss_and_grad(served_univariate_tesseract_raw, use_jit):
+    """Test Tesseract with loss function, parameterized for JIT and forward/backward modes."""
+    univariate_tess = Tesseract(served_univariate_tesseract_raw)
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+
+    # First verify forward pass
+    result = apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+    expected = rosenbrock_impl(x, y, a=1.0, b=100.0)
+    assert np.allclose(result, expected), (
+        f"Forward pass mismatch: {result} vs {expected}"
+    )
+
+    def loss_fn(x, y):
+        univariate_fn_x = lambda x: apply_tesseract(
+            univariate_tess,
+            inputs=dict(
+                x=x,
+                y=y,
+            ),
+        )
+
+        c = univariate_fn_x(x)["result"]
+
+        return jnp.sum((c) ** 2)
+
+    def loss_fn_raw(x, y):
+        c = rosenbrock_impl(x, y, a=1.0, b=100.0)
+        return jnp.sum((c) ** 2)
+
+    if use_jit:
+        loss_fn = jax.jit(loss_fn)
+        loss_fn_raw = jax.jit(loss_fn_raw)
+
+    # Test loss computation
+    loss = loss_fn(x, y)
+    loss_raw = loss_fn_raw(x, y)
+    assert np.allclose(loss, loss_raw), f"Loss mismatch: {loss} vs {loss_raw}"
+
+    # Test gradient computation
+    grad_fn = jax.grad(loss_fn)
+    grad_fn_raw = jax.grad(loss_fn_raw)
+
+    if use_jit:
+        grad_fn = jax.jit(grad_fn)
+        grad_fn_raw = jax.jit(grad_fn_raw)
+
+    grad = grad_fn(x, y)
+    grad_raw = grad_fn_raw(x, y)
+
+    assert grad is not None
+    assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
