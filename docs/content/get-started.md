@@ -80,14 +80,14 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 
   In **forward mode (JVP)**, tangents for non-differentiable outputs are `NaN`, which propagates to any downstream computation that depends on them.
 
-  In **reverse mode (VJP)**, non-differentiable outputs are silently excluded from the cotangent sum. If you accidentally leave such an output in the return value and pass a cotangent that includes it, you will get a `ValueError` due to a pytree structure mismatch:
+  In **reverse mode (VJP)**, non-differentiable outputs are silently excluded from the cotangent sum, if combined with cotangent values that only include differentiable outputs a VJP will work as expected. If a non differentiable output is included in the cotangent, you will get a `ValueError` due to a pytree structure mismatch:
 
   ```
   ValueError: unexpected tree structure of argument to vjp function:
     got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
   ```
 
-  To compute a VJP correctly when the Tesseract has non-differentiable outputs, exclude them from the return value in a closure:
+  In some cases the this failure mode is reached because JAX requests the gradients of non-differentiable outputs, in those cases we have to wrap the tesseract in a closure:
 
   ```python
   def f(inputs):
