@@ -133,6 +133,28 @@ result, intermediates = save_intermediates(my_pipeline)(inputs)
 {func}`~tesseract_jax.save_intermediates` should be the **outermost** transformation. It works by rewriting the function's JAX program trace, so it needs to wrap everything else.
 ```
 
+## Sharp edge: cotangent names can be misleading
+
+When using reverse-mode AD (`jax.grad`, `jax.vjp`), the cotangent captured at a `sow` point is the gradient flowing *backwards* through that point. This means the cotangent at `"after_tess1"` is really the gradient arriving *before* `tess1` in the backward pass — i.e., the gradient of the loss with respect to the *output* of `tess1`, not its input.
+
+In a two-step pipeline:
+
+```python
+def my_pipeline(inputs):
+    res = apply_tesseract(tess1, inputs)
+    res = sow(res, "after_tess1")   # between tess1 and tess2
+    res = apply_tesseract(tess2, res)
+    return res["output"].sum()
+
+grads, intermediates = save_intermediates(jax.grad(my_pipeline))(inputs)
+```
+
+The forward pass flows left-to-right: `inputs → tess1 → [sow] → tess2 → loss`
+
+But the backward pass flows right-to-left: `loss → tess2 → [sow] → tess1 → inputs`
+
+So `intermediates["after_tess1"]["cotangent"]` contains the gradient *after* backpropagating through `tess2` but *before* backpropagating through `tess1`. A name like `"between_tess1_and_tess2"` is less ambiguous than `"after_tess1"`, since it describes the *location* in the graph rather than a direction.
+
 ## Summary of captured keys
 
 The keys present in each intermediate's dictionary depend on which JAX transformations are active:

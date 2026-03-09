@@ -273,6 +273,221 @@ class TestSowJacobian:
         assert "squared" in intermediates
 
 
+class TestSowJacfwd:
+    """save_intermediates captures intermediates with jax.jacfwd."""
+
+    @jit_parametrize
+    def test_jacfwd(self, use_jit):
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y
+
+        x = jnp.array([1.0, 2.0])
+        jac, intermediates = save_intermediates(jax.jacfwd(maybe_jit(fn, use_jit)))(x)
+        np.testing.assert_array_equal(jac, jnp.diag(2 * x))
+        assert "squared" in intermediates
+        np.testing.assert_array_equal(intermediates["squared"]["primal"], x**2)
+        # tangent of x^2 w.r.t. basis vectors gives diag(2x)
+        np.testing.assert_array_equal(
+            intermediates["squared"]["tangent"], jnp.diag(2 * x)
+        )
+
+
+class TestSowJacrev:
+    """save_intermediates captures intermediates with jax.jacrev."""
+
+    @jit_parametrize
+    def test_jacrev(self, use_jit):
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y
+
+        x = jnp.array([1.0, 2.0])
+        jac, intermediates = save_intermediates(jax.jacrev(maybe_jit(fn, use_jit)))(x)
+        np.testing.assert_array_equal(jac, jnp.diag(2 * x))
+        assert "squared" in intermediates
+        np.testing.assert_array_equal(intermediates["squared"]["primal"], x**2)
+        # cotangent w.r.t. basis vectors gives identity
+        np.testing.assert_array_equal(intermediates["squared"]["cotangent"], jnp.eye(2))
+
+
+class TestSowVmap:
+    """save_intermediates works with jax.vmap."""
+
+    @jit_parametrize
+    def test_vmap_forward(self, use_jit):
+        """Vmap captures intermediates with an extra batch dimension."""
+
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y.sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        result, intermediates = save_intermediates(jax.vmap(maybe_jit(fn, use_jit)))(x)
+        np.testing.assert_array_equal(result, jnp.array([5.0, 25.0]))
+        np.testing.assert_array_equal(intermediates["squared"]["primal"], x**2)
+
+    @jit_parametrize
+    def test_vmap_grad(self, use_jit):
+        """vmap(grad(fn)) captures batched primals and cotangents."""
+
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y.sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        grad, intermediates = save_intermediates(
+            jax.vmap(jax.grad(maybe_jit(fn, use_jit)))
+        )(x)
+        np.testing.assert_array_equal(grad, 2 * x)
+        np.testing.assert_array_equal(intermediates["squared"]["primal"], x**2)
+        assert "cotangent" in intermediates["squared"]
+
+    @jit_parametrize
+    def test_vmap_pytree(self, use_jit):
+        """Vmap preserves pytree structure in captured intermediates."""
+
+        def fn(x):
+            result = {"a": x, "b": x**2}
+            result = sow(result, "data")
+            return result["a"].sum() + result["b"].sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        result, intermediates = save_intermediates(jax.vmap(maybe_jit(fn, use_jit)))(x)
+        np.testing.assert_array_equal(result, jnp.array([8.0, 32.0]))
+        np.testing.assert_array_equal(intermediates["data"]["primal"]["a"], x)
+        np.testing.assert_array_equal(intermediates["data"]["primal"]["b"], x**2)
+
+    @jit_parametrize
+    def test_vmap_multiple_sows(self, use_jit):
+        """Vmap with multiple sow calls captures all intermediates."""
+
+        def fn(x):
+            y = x**2
+            y = sow(y, "step1")
+            z = y + 1
+            z = sow(z, "step2")
+            return z.sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        result, intermediates = save_intermediates(jax.vmap(maybe_jit(fn, use_jit)))(x)
+        np.testing.assert_array_equal(result, jnp.array([7.0, 27.0]))
+        np.testing.assert_array_equal(intermediates["step1"]["primal"], x**2)
+        np.testing.assert_array_equal(intermediates["step2"]["primal"], x**2 + 1)
+
+    @jit_parametrize
+    def test_grad_of_vmap(self, use_jit):
+        """Grad over vmap(fn).sum() captures intermediates correctly."""
+
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y.sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        grad, intermediates = save_intermediates(
+            jax.grad(lambda x: jax.vmap(maybe_jit(fn, use_jit))(x).sum())
+        )(x)
+        np.testing.assert_array_equal(grad, 2 * x)
+        np.testing.assert_array_equal(intermediates["squared"]["primal"], x**2)
+        assert "cotangent" in intermediates["squared"]
+
+    @jit_parametrize
+    def test_sow_identity_under_vmap(self, use_jit):
+        """Sow acts as identity under vmap without save_intermediates."""
+
+        def fn(x):
+            y = x**2
+            y = sow(y, "squared")
+            return y.sum()
+
+        x = jnp.array([[1.0, 2.0], [3.0, 4.0]])
+        result = jax.vmap(maybe_jit(fn, use_jit))(x)
+        np.testing.assert_array_equal(result, jnp.array([5.0, 25.0]))
+
+
+class TestSowForiLoop:
+    """save_intermediates works with jax.lax.fori_loop."""
+
+    @jit_parametrize
+    def test_fori_loop_forward(self, use_jit):
+        """fori_loop captures sow values stacked across iterations."""
+
+        def fn(x):
+            def body(_, carry):
+                return sow(carry * 2, "step")
+
+            return jax.lax.fori_loop(0, 3, maybe_jit(body, use_jit), x)
+
+        result, intermediates = save_intermediates(fn)(jnp.array(1.0))
+        np.testing.assert_array_equal(result, 8.0)
+        # fori_loop unrolls sow across iterations: [2, 4, 8]
+        np.testing.assert_array_equal(
+            intermediates["step"]["primal"], jnp.array([2.0, 4.0, 8.0])
+        )
+
+    @jit_parametrize
+    def test_fori_loop_grad(self, use_jit):
+        """Grad through fori_loop captures primals and cotangents."""
+
+        def fn(x):
+            def body(_, carry):
+                return sow(carry * 2, "step")
+
+            return jax.lax.fori_loop(0, 3, maybe_jit(body, use_jit), x)
+
+        grad, intermediates = save_intermediates(jax.grad(fn))(jnp.array(1.0))
+        # d/dx of x * 2^3 = 8
+        np.testing.assert_array_equal(grad, 8.0)
+        assert "primal" in intermediates["step"]
+        assert "cotangent" in intermediates["step"]
+
+
+class TestSowScan:
+    """save_intermediates works with jax.lax.scan."""
+
+    @jit_parametrize
+    def test_scan_forward(self, use_jit):
+        """Scan captures sow values stacked across iterations."""
+
+        def fn(x):
+            def body(carry, _):
+                new_carry = carry * 2
+                new_carry = sow(new_carry, "step")
+                return new_carry, new_carry
+
+            final, _ = jax.lax.scan(maybe_jit(body, use_jit), x, jnp.arange(3.0))
+            return final
+
+        result, intermediates = save_intermediates(fn)(jnp.array(1.0))
+        np.testing.assert_array_equal(result, 8.0)
+        np.testing.assert_array_equal(
+            intermediates["step"]["primal"], jnp.array([2.0, 4.0, 8.0])
+        )
+
+    @jit_parametrize
+    def test_scan_grad(self, use_jit):
+        """Grad through scan captures primals and cotangents."""
+
+        def fn(x):
+            def body(carry, _):
+                new_carry = carry * 2
+                new_carry = sow(new_carry, "step")
+                return new_carry, new_carry
+
+            final, _ = jax.lax.scan(maybe_jit(body, use_jit), x, jnp.arange(3.0))
+            return final
+
+        grad, intermediates = save_intermediates(jax.grad(fn))(jnp.array(1.0))
+        np.testing.assert_array_equal(grad, 8.0)
+        assert "primal" in intermediates["step"]
+        assert "cotangent" in intermediates["step"]
+
+
 class TestSowDuplicateName:
     """Duplicate sow names raise ValueError."""
 
@@ -318,7 +533,7 @@ class TestSowIntegration:
     """Integration tests with apply_tesseract."""
 
     def test_pipeline_grad(self, served_univariate_tesseract_raw):
-        tess = Tesseract(served_univariate_tesseract_raw)
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -343,7 +558,7 @@ class TestSowIntegration:
         assert "cotangent" in grad_ints["tess_output"]
 
     def test_pipeline_forward_only(self, served_univariate_tesseract_raw):
-        tess = Tesseract(served_univariate_tesseract_raw)
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -355,3 +570,96 @@ class TestSowIntegration:
         _, intermediates = save_intermediates(pipeline)(x, y)
         assert "output" in intermediates
         assert "primal" in intermediates["output"]
+
+    def test_intermediates_match_tesseract_api(self, served_univariate_tesseract_raw):
+        """Captured primals/tangents/cotangents match direct Tesseract API calls."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        x = jnp.array(2.0)
+        y = jnp.array(3.0)
+
+        def pipeline(x, y):
+            res = apply_tesseract(tess, {"x": x, "y": y})
+            res = sow(res, "tess_output")
+            return res["result"]
+
+        # --- Primals: compare against Tesseract.apply ---
+        _, intermediates = save_intermediates(pipeline)(x, y)
+        apply_ref = tess.apply({"x": float(x), "y": float(y)})
+        np.testing.assert_allclose(
+            intermediates["tess_output"]["primal"]["result"],
+            apply_ref["result"],
+        )
+
+        # --- Cotangents (VJP): compare against Tesseract.vector_jacobian_product ---
+        # Sandwich: sow -> apply_tesseract -> sow
+        # Forward:  inputs -> [sow "before_tess"] -> tess -> [sow "after_tess"] -> loss
+        # Backward: loss -> [sow "after_tess"] -> tess VJP -> [sow "before_tess"] -> inputs
+        def pipeline_vjp(x, y):
+            inputs = sow({"x": x, "y": y}, "before_tess")
+            res = apply_tesseract(tess, inputs)
+            res = sow(res, "after_tess")
+            return res["result"]
+
+        _, intermediates_grad = save_intermediates(jax.grad(pipeline_vjp))(x, y)
+        vjp_ref = tess.vector_jacobian_product(
+            inputs={"x": float(x), "y": float(y)},
+            vjp_inputs=["x", "y"],
+            vjp_outputs=["result"],
+            cotangent_vector={"result": 1.0},
+        )
+        # "after_tess" cotangent is the gradient of the loss w.r.t. the
+        # Tesseract output — i.e. the upstream cotangent *before* the VJP
+        np.testing.assert_allclose(
+            intermediates_grad["after_tess"]["cotangent"]["result"],
+            1.0,
+        )
+        # "before_tess" cotangent is the gradient *after* backpropagating
+        # through the Tesseract — this must match the VJP reference
+        np.testing.assert_allclose(
+            intermediates_grad["before_tess"]["cotangent"]["x"],
+            vjp_ref["x"],
+        )
+        np.testing.assert_allclose(
+            intermediates_grad["before_tess"]["cotangent"]["y"],
+            vjp_ref["y"],
+        )
+        # Primals at both sow points match Tesseract.apply
+        np.testing.assert_allclose(
+            intermediates_grad["before_tess"]["primal"]["x"], float(x)
+        )
+        np.testing.assert_allclose(
+            intermediates_grad["before_tess"]["primal"]["y"], float(y)
+        )
+        np.testing.assert_allclose(
+            intermediates_grad["after_tess"]["primal"]["result"],
+            apply_ref["result"],
+        )
+
+        # --- Tangents (JVP): compare against Tesseract.jacobian_vector_product ---
+        dx, dy = jnp.array(1.0), jnp.array(0.0)
+
+        def pipeline_with_sow(x, y):
+            res = apply_tesseract(tess, {"x": x, "y": y})
+            res = sow(res, "tess_output")
+            return res["result"]
+
+        def pipeline_jvp(x, y):
+            primals, _ = jax.jvp(pipeline_with_sow, (x, y), (dx, dy))
+            return primals
+
+        _, intermediates_jvp = save_intermediates(pipeline_jvp)(x, y)
+        jvp_ref = tess.jacobian_vector_product(
+            inputs={"x": float(x), "y": float(y)},
+            jvp_inputs=["x", "y"],
+            jvp_outputs=["result"],
+            tangent_vector={"x": float(dx), "y": float(dy)},
+        )
+        # sow captures tangents when inside a jvp context
+        np.testing.assert_allclose(
+            intermediates_jvp["tess_output"]["tangent"]["result"],
+            jvp_ref["result"],
+        )
+        np.testing.assert_allclose(
+            intermediates_jvp["tess_output"]["primal"]["result"],
+            apply_ref["result"],
+        )
