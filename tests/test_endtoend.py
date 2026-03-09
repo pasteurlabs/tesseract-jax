@@ -51,7 +51,7 @@ def rosenbrock_impl(x, y, a=1.0, b=100.0):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_univariate_tesseract_apply(served_univariate_tesseract_raw, use_jit):
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
     x, y = np.array(0.0), np.array(0.0)
 
     def f(x, y):
@@ -74,7 +74,7 @@ def test_univariate_tesseract_apply(served_univariate_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_univariate_tesseract_jvp(served_univariate_tesseract_raw, use_jit):
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     # make things callable without keyword args
     def f(x, y):
@@ -108,7 +108,7 @@ def test_univariate_tesseract_jvp(served_univariate_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_univariate_tesseract_vjp(served_univariate_tesseract_raw, use_jit):
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     def f(x, y):
         return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))
@@ -154,7 +154,7 @@ def test_univariate_tesseract_vjp(served_univariate_tesseract_raw, use_jit):
 def test_univariate_tesseract_jacobian(
     served_univariate_tesseract_raw, use_jit, jac_direction
 ):
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     # make things callable without keyword args
     def f(x, y):
@@ -190,7 +190,7 @@ def test_univariate_tesseract_jacobian(
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     # make things callable without keyword args
     def f(x, y):
@@ -278,7 +278,7 @@ def test_nested_tesseract_apply(served_nested_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_jvp(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
     a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
     v, w = (
         np.array([1.0, 2.0, 3.0], dtype="float32"),
@@ -326,7 +326,7 @@ def test_nested_tesseract_jvp(served_nested_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
 
     a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
     v, w = (
@@ -384,7 +384,7 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("jac_direction", ["fwd", "rev"])
 def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_direction):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
     a, b = np.array(1.0, dtype="float32"), np.array(2.0, dtype="float32")
     v, w = (
         np.array([1.0, 2.0, 3.0], dtype="float32"),
@@ -437,7 +437,7 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_dir
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_vmap(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
     b = np.array(2.0, dtype="float32")
     w = np.array([5.0, 7.0, 9.0], dtype="float32")
 
@@ -500,7 +500,7 @@ def test_nested_tesseract_vmap(served_nested_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_fori_loop(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
     b = np.array(2.0, dtype="float32")
     w = np.array([5.0, 7.0, 9.0], dtype="float32")
 
@@ -551,7 +551,7 @@ def test_nested_tesseract_fori_loop(served_nested_tesseract_raw, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_scan(served_nested_tesseract_raw, use_jit):
-    nested_tess = Tesseract(served_nested_tesseract_raw)
+    nested_tess = Tesseract.from_url(served_nested_tesseract_raw)
     b = np.array(2.0, dtype="float32")
     w = np.array([5.0, 7.0, 9.0], dtype="float32")
 
@@ -606,7 +606,7 @@ def test_nested_tesseract_scan(served_nested_tesseract_raw, use_jit):
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_partial_differentiation(served_univariate_tesseract_raw, use_jit):
     """Test that differentiation works correctly in cases where some inputs are constants."""
-    rosenbrock_tess = Tesseract(served_univariate_tesseract_raw)
+    rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
     x, y = np.array(0.0), np.array(0.0)
 
     def f(y):
@@ -633,7 +633,7 @@ def test_partial_differentiation(served_univariate_tesseract_raw, use_jit):
 
 def test_tesseract_as_jax_pytree(served_univariate_tesseract_raw):
     """Test that Tesseract can be used as a JAX PyTree."""
-    tess = Tesseract(served_univariate_tesseract_raw)
+    tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     @jax.jit
     def f(x, y, tess):
@@ -647,7 +647,7 @@ def test_tesseract_as_jax_pytree(served_univariate_tesseract_raw):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
-    non_abstract_tess = Tesseract(served_non_abstract_tesseract)
+    non_abstract_tess = Tesseract.from_url(served_non_abstract_tesseract)
     a = np.array([0.0, 1.0, 2.0], dtype="float32")
 
     def f(a):
@@ -668,7 +668,7 @@ def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
 
 
 def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
-    non_abstract_tess = Tesseract(served_non_abstract_tesseract)
+    non_abstract_tess = Tesseract.from_url(served_non_abstract_tesseract)
 
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
 
@@ -686,7 +686,7 @@ def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
 
 def test_tesseract_no_jvp_apply_and_vjp_work(served_tesseract_no_jvp):
     """Test that tesseract with JVP removed still works for apply and VJP."""
-    tess_no_jvp = Tesseract(served_tesseract_no_jvp)
+    tess_no_jvp = Tesseract.from_url(served_tesseract_no_jvp)
 
     x, y = np.array(0.0), np.array(0.0)
 
@@ -721,7 +721,7 @@ def test_tesseract_no_jvp_apply_and_vjp_work(served_tesseract_no_jvp):
 
 def test_tesseract_no_vjp_apply_and_jvp_work(served_tesseract_no_vjp):
     """Test that tesseract with VJP removed still works for apply and JVP."""
-    tess_no_vjp = Tesseract(served_tesseract_no_vjp)
+    tess_no_vjp = Tesseract.from_url(served_tesseract_no_vjp)
 
     x, y = np.array(0.0), np.array(0.0)
 
@@ -759,7 +759,7 @@ def test_tesseract_no_vjp_apply_and_jvp_work(served_tesseract_no_vjp):
 
 def test_missing_jvp_endpoint_error(served_tesseract_no_jvp):
     """Test that a clear error is raised when JVP endpoint is missing."""
-    tess_no_jvp = Tesseract(served_tesseract_no_jvp)
+    tess_no_jvp = Tesseract.from_url(served_tesseract_no_jvp)
 
     x, y = np.array(0.0), np.array(0.0)
 
@@ -776,7 +776,7 @@ def test_missing_jvp_endpoint_error(served_tesseract_no_jvp):
 
 def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
     """Test that a clear error is raised when VJP endpoint is missing."""
-    tess_no_vjp = Tesseract(served_tesseract_no_vjp)
+    tess_no_vjp = Tesseract.from_url(served_tesseract_no_vjp)
 
     x, y = np.array(0.0), np.array(0.0)
 
@@ -793,7 +793,7 @@ def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     def f(a):
         return apply_tesseract(dict_tess, inputs=a)
@@ -808,7 +808,7 @@ def test_dict_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_j
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     diffable_inputs = {
         "alpha": pytree_tess_inputs["alpha"],
@@ -832,7 +832,7 @@ def test_dict_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     diffable_inputs = {
         "alpha": pytree_tess_inputs["alpha"],
