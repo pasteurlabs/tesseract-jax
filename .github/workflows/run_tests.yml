@@ -74,3 +74,19 @@ jobs:
           slug: pasteurlabs/tesseract-jax
           files: coverage*.xml
           fail_ci_if_error: true
+
+  all-ok:
+    if: always()
+    needs: [tests]
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check for errors
+        run: |
+          if [[ "${{ needs.tests.result }}" != "success" && "${{ needs.tests.result }}" != "skipped" ]]; then
+            echo "Tests failed"
+            exit 1
+          fi
+
+          echo "All tests passed!"
