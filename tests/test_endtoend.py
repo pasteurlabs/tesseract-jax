@@ -336,7 +336,7 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
     )
 
     def f(a, v):
-        return apply_tesseract(
+        res = apply_tesseract(
             nested_tess,
             inputs=dict(
                 scalars={"a": a, "b": b},
@@ -344,6 +344,11 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
                 other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
             ),
         )
+        # stop_gradient on non-diff outputs so JAX produces symbolic zeros for them,
+        # allowing the full primal to be passed back as cotangent to f_vjp
+        res["scalars"]["b"] = jax.lax.stop_gradient(res["scalars"]["b"])
+        res["vectors"]["w"] = jax.lax.stop_gradient(res["vectors"]["w"])
+        return res
 
     if use_jit:
         f = jax.jit(f)
@@ -393,7 +398,7 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_dir
     )
 
     def f(a, v):
-        return apply_tesseract(
+        res = apply_tesseract(
             nested_tess,
             inputs=dict(
                 scalars={"a": a, "b": b},
@@ -401,6 +406,10 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_dir
                 other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
             ),
         )
+        # exclude non-diff outputs so jacrev doesn't receive concrete cotangents for them
+        res["scalars"].pop("b")
+        res["vectors"].pop("w")
+        return res
 
     if jac_direction == "fwd":
         f = jax.jacfwd(f, argnums=(0, 1))
@@ -898,7 +907,11 @@ def test_pytree_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_j
 
     def f(diffable):
         inputs = {**diffable, **non_diffable_inputs}
-        return apply_tesseract(dict_tess, inputs=inputs)
+        res = apply_tesseract(dict_tess, inputs=inputs)
+        # stop_gradient on non-diff output so JAX produces a symbolic zero cotangent,
+        # allowing the full primal to be passed back as cotangent to f_vjp
+        res["metadata"] = jax.lax.stop_gradient(res["metadata"])
+        return res
 
     if use_jit:
         f = jax.jit(f)
