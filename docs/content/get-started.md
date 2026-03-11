@@ -80,33 +80,50 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 
   In **forward mode (JVP)**, tangents for non-differentiable outputs are `NaN`, which propagates to any downstream computation that depends on them.
 
-  In **reverse mode (VJP)**, non-differentiable outputs are silently excluded from the cotangent sum, if combined with cotangent values that only include differentiable outputs a VJP will work as expected. If a non differentiable output is included in the cotangent, you will get a `ValueError` due to a pytree structure mismatch:
+  In **reverse mode (VJP)**, cotangents for non-differentiable outputs must be symbolic zeros — i.e., produced by JAX itself (not manually constructed arrays). Passing any concrete value (including `jnp.zeros_like(...)`) for a non-differentiable output's cotangent raises a `ValueError`. This is intentional: if you see this error, it likely means you forgot to mark an output as `Differentiable[...]` in the Tesseract schema.
 
-  ```
-  ValueError: unexpected tree structure of argument to vjp function:
-    got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
-  ```
+  To handle non-differentiable outputs correctly, use one of these strategies:
 
-  In some cases the this failure mode is reached because JAX requests the gradients of non-differentiable outputs, in those cases we have to wrap the tesseract in a closure:
+  **Pop strategy** — exclude the non-differentiable output from the function return value:
 
   ```python
   def f(inputs):
       res = apply_tesseract(tess, inputs)
-      res.pop("nondiff_res")  # exclude non-differentiable output
+      res.pop("nondiff_res")
       return res
 
   primals, f_vjp = jax.vjp(f, inputs)
   cotangents = f_vjp(primals)
   ```
 
-  If you need the *value* of a non-differentiable output as part of a loss, use `jax.lax.stop_gradient` to prevent gradients from flowing through it:
+  **`has_aux` strategy** — return it as an auxiliary output outside the pytree:
 
   ```python
-  def loss_fn(inputs):
-      results = apply_tesseract(tess, inputs)
-      y = results["y"]
-      nondiff_res = jax.lax.stop_gradient(results["nondiff_res"])
-      return jnp.sum(y**2 + nondiff_res.sum())
+  def f(inputs):
+      res = apply_tesseract(tess, inputs)
+      return res["result"], res["nondiff_res"]  # (differentiable, aux)
+
+  primals, f_vjp, nondiff_res = jax.vjp(f, inputs, has_aux=True)
+  cotangents = f_vjp(primals)
+  ```
+
+  **`stop_gradient` strategy** — wrap the non-differentiable output so JAX produces a symbolic zero cotangent for it automatically:
+
+  ```python
+  def f(inputs):
+      res = apply_tesseract(tess, inputs)
+      res["nondiff_res"] = jax.lax.stop_gradient(res["nondiff_res"])
+      return res
+
+  primals, f_vjp = jax.vjp(f, inputs)
+  cotangents = f_vjp(primals)  # symbolic zero for nondiff_res is produced automatically
+  ```
+
+  Note that the cotangent pytree structure must always match the function's output pytree structure. If you exclude non-differentiable outputs from the return value (e.g. via `pop` or `has_aux`), including them in the cotangent will raise a `ValueError`:
+
+  ```
+  ValueError: unexpected tree structure of argument to vjp function:
+    got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
   ```
 
 - **Non-differentiable inputs**: Requesting gradients with respect to an input that is marked as non-differentiable in the Tesseract API raises an error. Use the `argnums` parameter (or equivalent) to ensure gradient transformations only target differentiable inputs:

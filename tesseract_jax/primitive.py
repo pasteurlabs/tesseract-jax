@@ -16,7 +16,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.tesseract_compat import Jaxeract
-from tesseract_jax.tree_util import combine_args
+from tesseract_jax.tree_util import _pytree_to_tesseract_flat, combine_args
 
 T = TypeVar("T")
 
@@ -168,7 +168,24 @@ def tesseract_dispatch_transpose_rule(
     n_primals = len(is_static_mask) - sum(is_static_mask)
     primal_args = args[:n_primals]
 
-    primal_args = args[:n_primals]
+    # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
+    # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
+    # (e.g. via jax.lax.stop_gradient) or when the output is not used in the loss.
+    # Any other cotangent means the user accidentally included a non-diff output
+    # in the gradient computation, likely due to a missing Differentiable[] annotation.
+    dummy_output = jax.tree.unflatten(output_pytreedef, range(len(output_avals)))
+    flat_output_info = _pytree_to_tesseract_flat(
+        dummy_output, schema_paths=client.differentiable_output_paths
+    )
+    for cotan, (path, is_diff) in zip(cotangent, flat_output_info.items(), strict=True):
+        if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
+            raise ValueError(
+                f"Non-symbolic-zero cotangent passed for non-differentiable output '{path}'. "
+                f"If this output should be differentiable, mark it as "
+                f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
+                f"exclude it from the function return value (using pop or has_aux=True), "
+                f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
+            )
 
     cotan_args_ = tuple(
         (

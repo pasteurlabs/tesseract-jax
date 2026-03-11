@@ -239,21 +239,41 @@ def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable
 def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable_paths):
     """Test the VJP endpoint of pytree_tesseract.
 
-    Tests two scenarios:
-    1. Normal case: VJP with metadata removed from outputs (closure approach)
-       - Validates that gradients match raw implementation
-    2. Error handling: Verifies that passing a cotangent with wrong tree structure
-       (e.g., adding metadata back in) raises an appropriate ValueError
+    Tests three strategies for handling non-differentiable outputs in VJP:
+    1. Pop strategy: remove metadata from the output before calling vjp
+    2. Aux strategy: return metadata as a JAX auxiliary value using has_aux=True
+    3. Stop-gradient strategy: wrap metadata in stop_gradient so JAX produces ad.Zero
+       cotangent automatically, allowing the full primal to be passed as cotangent
+    Also tests error handling: passing a non-symbolic-zero cotangent for a
+    non-differentiable output raises a ValueError.
     """
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
     )
 
-    def f(diffable_inputs):
+    def f_aux(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        res = apply_tesseract(pytree_tess, inputs=inputs)
+        # remove metadata from output since it's non-differentiable and will be NaN in JVP/VJP
+        return (res["result"], res["result_dict"], res["result_list"]), res["metadata"]
+
+    def f_pop(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
         res = apply_tesseract(pytree_tess, inputs=inputs)
         # remove metadata from output since it's non-differentiable and will be NaN in JVP/VJP
         res.pop("metadata")
+        return res
+
+    def f_full(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        res = apply_tesseract(pytree_tess, inputs=inputs)
+        return res  # keep metadata in output (used for error testing below)
+
+    def f_stop_grad(diffable_inputs):
+        inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
+        res = apply_tesseract(pytree_tess, inputs=inputs)
+        # stop_gradient makes JAX produce ad.Zero cotangent for metadata automatically
+        res["metadata"] = jax.lax.stop_gradient(res["metadata"])
         return res
 
     def f_raw(diffable_inputs):
@@ -263,37 +283,84 @@ def test_pytree_tesseract_vjp(pytree_tess, pytree_tess_inputs, use_jit, diffable
         return res
 
     if use_jit:
-        f = jax.jit(f)
+        f_pop = jax.jit(f_pop)
+        f_aux = jax.jit(f_aux)
+        f_stop_grad = jax.jit(f_stop_grad)
         f_raw = jax.jit(f_raw)
 
-    (primal, f_vjp) = jax.vjp(f, diffable_inputs)
+    (primal_pop, f_vjp_pop) = jax.vjp(f_pop, diffable_inputs)
+    (primal_aux, f_vjp_aux, _aux_metadata) = jax.vjp(
+        f_aux, diffable_inputs, has_aux=True
+    )
+    (primal_stop, f_vjp_stop) = jax.vjp(f_stop_grad, diffable_inputs)
     (primal_raw, f_vjp_raw) = jax.vjp(f_raw, diffable_inputs)
+    (primal_full, f_vjp_full) = jax.vjp(f_full, diffable_inputs)
 
     if use_jit:
-        f_vjp = jax.jit(f_vjp)
+        f_vjp_pop = jax.jit(f_vjp_pop)
+        f_vjp_aux = jax.jit(f_vjp_aux)
+        f_vjp_stop = jax.jit(f_vjp_stop)
         f_vjp_raw = jax.jit(f_vjp_raw)
 
-    vjp = f_vjp(primal)
+    vjp_pop = f_vjp_pop(primal_pop)
+    # f_aux returns a tuple (result, result_dict, result_list); use matching cotangent
+    cotangent_for_aux = (
+        primal_pop["result"],
+        primal_pop["result_dict"],
+        primal_pop["result_list"],
+    )
+    vjp_aux = f_vjp_aux(cotangent_for_aux)
+    # stop_gradient makes JAX produce ad.Zero for metadata's cotangent automatically,
+    # so the full primal (including non-zero metadata) can be passed directly
+    vjp_stop = f_vjp_stop(primal_stop)
     vjp_raw = f_vjp_raw(primal_raw)
 
     # Verify results match raw implementation
     jax.tree.map(
         lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
-        primal,
+        primal_pop,
         primal_raw,
     )
     jax.tree.map(
         lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
-        vjp,
+        vjp_pop,
         vjp_raw,
     )
 
+    # Verify aux strategy gives same differentiable primals and gradients as pop strategy
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        primal_aux,
+        (primal_pop["result"], primal_pop["result_dict"], primal_pop["result_list"]),
+    )
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        vjp_aux,
+        vjp_pop,
+    )
+
+    # Verify stop-gradient strategy gives same gradients as pop strategy
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
+        vjp_stop,
+        vjp_pop,
+    )
+
     # Test error handling: cotangent with wrong tree structure should raise ValueError
-    primal_with_metadata = primal.copy()
+    primal_with_metadata = primal_pop.copy()
     primal_with_metadata["metadata"] = np.array([1.0, 2.0], dtype="float32")
 
     with pytest.raises(ValueError, match=r"(?i)unexpected tree structure"):
-        f_vjp(primal_with_metadata)
+        f_vjp_pop(primal_with_metadata)
+
+    # Test error handling: any non-symbolic-zero cotangent for a non-diff output raises.
+    # This includes both zeros (jnp.zeros_like) and non-zeros — only ad.Zero (from
+    # stop_gradient or unused outputs) is accepted.
+    with pytest.raises(ValueError, match=r"(?i)non-symbolic-zero"):
+        f_vjp_full({**primal_full, "metadata": jnp.zeros_like(primal_full["metadata"])})
+
+    with pytest.raises(ValueError, match=r"(?i)non-symbolic-zero"):
+        f_vjp_full({**primal_full, "metadata": jnp.ones_like(primal_full["metadata"])})
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
@@ -310,8 +377,8 @@ def test_pytree_tesseract_jacobian(
 
     Reverse mode (jacrev):
     - Tests that excluding metadata from outputs (using closure) produces correct gradients
-    - Demonstrates that including metadata in outputs leads to incorrect gradients (silent failure)
-      due to non-differentiable outputs polluting the backward pass
+    - Demonstrates that including metadata in outputs raises a ValueError (non-diff output
+      must be excluded via pop/has_aux or wrapped with stop_gradient)
     """
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
@@ -349,17 +416,19 @@ def test_pytree_tesseract_jacobian(
         f_jac_raw_closure = jax.jacrev(f_raw_closure)
 
     if use_jit:
-        f_jac = jax.jit(f_jac)
-        f_jac_raw = jax.jit(f_jac_raw)
         f_jac_closure = jax.jit(f_jac_closure)
         f_jac_raw_closure = jax.jit(f_jac_raw_closure)
+        if jac_direction == "fwd":
+            f_jac = jax.jit(f_jac)
+            f_jac_raw = jax.jit(f_jac_raw)
 
-    jac = f_jac(diffable_inputs)
-    jac_raw = f_jac_raw(diffable_inputs)
     jac_closure = f_jac_closure(diffable_inputs)
     jac_raw_closure = f_jac_raw_closure(diffable_inputs)
 
     if jac_direction == "fwd":
+        jac = f_jac(diffable_inputs)
+        jac_raw = f_jac_raw(diffable_inputs)
+
         # Verify metadata Jacobian rows are NaN (non-differentiable output in forward mode)
         # jac["metadata"] contains derivatives of metadata w.r.t. all inputs
         def check_nan(x):
@@ -378,19 +447,17 @@ def test_pytree_tesseract_jacobian(
             jac_raw_without_metadata,
         )
     else:
-        # Reverse mode - compare all outputs
+        # Reverse mode: jacrev on f (which returns metadata) raises ValueError because
+        # jacrev probes each output with a concrete unit cotangent, triggering the
+        # non-symbolic-zero cotangent check for the non-diff metadata output.
+        with pytest.raises(ValueError, match=r"(?i)non-symbolic-zero"):
+            f_jac(diffable_inputs)
+
+        # Correct approach: use closure (pop) to exclude metadata from the output
         jax.tree.map(
             lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-5),
             jac_closure,
             jac_raw_closure,
-        )
-
-        jax.tree.map(
-            # assert non equal when not using closure
-            # This is a silent failure
-            lambda a, b: np.sum(a - b) > 1e-5,
-            jac,
-            jac_raw,
         )
 
 
