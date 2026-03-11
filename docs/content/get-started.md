@@ -76,64 +76,83 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
 ```
 
-- **Non-differentiable outputs**: When an output is marked as non-differentiable in the Tesseract API, its behavior differs by differentiation mode.
+- **Non-differentiable outputs**: When an output is not marked as `Differentiable[...]` in the Tesseract schema, Tesseract-JAX makes the problem explicit rather than silently producing wrong gradients:
 
-  In **forward mode (JVP)**, tangents for non-differentiable outputs are `NaN`, which propagates to any downstream computation that depends on them.
+  - **Forward mode** (`jax.jvp`, `jax.jacfwd`): the tangent for the non-differentiable output is `NaN`, which propagates to any downstream computation that depends on it.
+  - **Reverse mode** (`jax.vjp`, `jax.grad`, `jax.jacrev`): passing any concrete value as the cotangent for a non-differentiable output raises a `ValueError`. Only a *symbolic zero* produced by JAX itself is accepted. If you see this error, it most likely means you forgot to annotate an output as `Differentiable[...]` in the Tesseract schema.
 
-  In **reverse mode (VJP)**, cotangents for non-differentiable outputs must be symbolic zeros — i.e., produced by JAX itself (not manually constructed arrays). Passing any concrete value (including `jnp.zeros_like(...)`) for a non-differentiable output's cotangent raises a `ValueError`. This is intentional: if you see this error, it likely means you forgot to mark an output as `Differentiable[...]` in the Tesseract schema.
+  In both modes, you can use one of these strategies to exclude or insulate the non-differentiable output from gradient computation:
 
-  To handle non-differentiable outputs correctly, use one of these strategies:
-
-  **Pop strategy** — exclude the non-differentiable output from the function return value:
+  **Pop** — remove it from the return value before differentiation:
 
   ```python
   def f(inputs):
       res = apply_tesseract(tess, inputs)
       res.pop("nondiff_res")
       return res
-
-  primals, f_vjp = jax.vjp(f, inputs)
-  cotangents = f_vjp(primals)
   ```
 
-  **`has_aux` strategy** — return it as an auxiliary output outside the pytree:
+  **`has_aux`** — return it as an auxiliary value outside the differentiated pytree:
 
   ```python
   def f(inputs):
       res = apply_tesseract(tess, inputs)
-      return res["result"], res["nondiff_res"]  # (differentiable, aux)
+      return res["result"], res["nondiff_res"]  # (differentiable outputs, aux)
 
   primals, f_vjp, nondiff_res = jax.vjp(f, inputs, has_aux=True)
-  cotangents = f_vjp(primals)
   ```
 
-  **`stop_gradient` strategy** — wrap the non-differentiable output so JAX produces a symbolic zero cotangent for it automatically:
+  **`stop_gradient`** — keep it in the return value but block gradient flow through it. In forward mode this produces a zero tangent instead of `NaN`; in reverse mode it produces a symbolic zero cotangent so no error is raised:
 
   ```python
   def f(inputs):
       res = apply_tesseract(tess, inputs)
       res["nondiff_res"] = jax.lax.stop_gradient(res["nondiff_res"])
       return res
-
-  primals, f_vjp = jax.vjp(f, inputs)
-  cotangents = f_vjp(primals)  # symbolic zero for nondiff_res is produced automatically
   ```
 
-  Note that the cotangent pytree structure must always match the function's output pytree structure. If you exclude non-differentiable outputs from the return value (e.g. via `pop` or `has_aux`), including them in the cotangent will raise a `ValueError`:
+  Note that the cotangent/tangent pytree structure must always match the function's output structure. If you exclude outputs via `pop` or `has_aux`, including them in the cotangent raises a `ValueError`:
 
   ```
   ValueError: unexpected tree structure of argument to vjp function:
     got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
   ```
 
-- **Non-differentiable inputs**: Requesting gradients with respect to an input that is marked as non-differentiable in the Tesseract API raises an error. Use the `argnums` parameter (or equivalent) to ensure gradient transformations only target differentiable inputs:
+- **Non-differentiable inputs**: When an input is not marked as `Differentiable[...]` in the Tesseract schema, differentiating with respect to it raises a `ValueError` in both forward and reverse mode. If you see this error, it likely means you forgot to annotate an input as `Differentiable[...]`, or you are accidentally including a non-differentiable input in your differentiation.
+
+  - **Forward mode** (`jax.jvp`, `jax.jacfwd`): providing a non-symbolic-zero tangent for a non-differentiable input raises a `ValueError`.
+  - **Reverse mode** (`jax.vjp`, `jax.grad`, `jax.jacrev`): requesting a gradient with respect to a non-differentiable input raises a `ValueError`.
+
+  In both modes, use one of these strategies to exclude non-differentiable inputs from gradient computation:
+
+  **Closure** — capture non-differentiable inputs outside the differentiated function:
 
   ```python
-  # "a" is differentiable, "b" is not
-  def loss_fn(a, b):
-      c = apply_tesseract(vectoradd_tess, {"a": a, "b": b})["c"]
+  # "b" is non-differentiable according to the Tesseract schema
+  def loss_fn(a):
+      c = apply_tesseract(tess, {"a": a, "b": b})["c"]  # b captured from outer scope
       return jnp.sum(c**2)
 
-  jax.grad(loss_fn, argnums=0)(a, b)  # ✅ gradient w.r.t. "a"
-  jax.grad(loss_fn, argnums=1)(a, b)  # ❌ raises an error — "b" is non-differentiable
+  jax.grad(loss_fn)(a)  # ✅ only differentiates w.r.t. "a"
+  ```
+
+  **`argnums`** — explicitly select which arguments to differentiate:
+
+  ```python
+  def loss_fn(a, b):
+      c = apply_tesseract(tess, {"a": a, "b": b})["c"]
+      return jnp.sum(c**2)
+
+  jax.grad(loss_fn, argnums=0)(a, b)  # ✅ only differentiates w.r.t. "a"
+  ```
+
+  **`stop_gradient`** — apply `jax.lax.stop_gradient` to the non-differentiable input inside the function, before passing it to `apply_tesseract`. This converts it to a concrete value, so no tangent reaches the primitive boundary:
+
+  ```python
+  def loss_fn(a, b):
+      b = jax.lax.stop_gradient(b)
+      c = apply_tesseract(tess, {"a": a, "b": b})["c"]
+      return jnp.sum(c**2)
+
+  jax.grad(loss_fn)(a, b)  # ✅ stop_gradient prevents b from being differentiated
   ```

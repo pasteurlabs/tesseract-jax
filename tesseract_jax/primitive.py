@@ -16,7 +16,11 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.tesseract_compat import Jaxeract
-from tesseract_jax.tree_util import _pytree_to_tesseract_flat, combine_args
+from tesseract_jax.tree_util import (
+    _pytree_to_tesseract_flat,
+    combine_args,
+    unflatten_args,
+)
 
 T = TypeVar("T")
 
@@ -114,6 +118,32 @@ def tesseract_dispatch_jvp_rule(
     has_tangent = tuple(
         not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
     )
+
+    # Raise if a non-symbolic-zero tangent is provided for a non-differentiable input.
+    _tangents_for_check = tuple(
+        t if h else None for t, h in zip(tan_args, has_tangent, strict=True)
+    )
+    _tangent_inputs = unflatten_args(
+        _tangents_for_check,
+        static_args,
+        input_pytreedef,
+        is_static_mask,
+        remove_static_args=True,
+    )
+    _flat_tangents = _pytree_to_tesseract_flat(
+        _tangent_inputs, schema_paths=client.differentiable_input_paths
+    )
+    for path, val in _flat_tangents.items():
+        if val is None:
+            raise ValueError(
+                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
+                f"If this input should be differentiable, mark it as "
+                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
+                f"exclude it from the differentiated function's argument list "
+                f"(using a closure or the `argnums` parameter), or apply "
+                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
+            )
+
     tan_args_ = tuple(
         (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
         for arg, has_tan in zip(tan_args, has_tangent, strict=True)
@@ -185,6 +215,30 @@ def tesseract_dispatch_transpose_rule(
                 f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
                 f"exclude it from the function return value (using pop or has_aux=True), "
                 f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
+            )
+
+    # Raise if a gradient is requested for a non-differentiable input.
+    _primal_inputs = unflatten_args(
+        primal_args, static_args, input_pytreedef, is_static_mask
+    )
+    _flat_inputs = _pytree_to_tesseract_flat(
+        _primal_inputs, schema_paths=client.differentiable_input_paths
+    )
+    _non_static_paths = [
+        p for p, m in zip(_flat_inputs, is_static_mask, strict=True) if not m
+    ]
+    _vjp_inputs_with_tangent = [
+        p for p, h in zip(_non_static_paths, has_tangent, strict=True) if h
+    ]
+    for path in _vjp_inputs_with_tangent:
+        if _flat_inputs[path] is None:
+            raise ValueError(
+                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
+                f"If this input should be differentiable, mark it as "
+                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
+                f"exclude it from the differentiated function's argument list "
+                f"(using a closure or the `argnums` parameter), or apply "
+                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
             )
 
     cotan_args_ = tuple(

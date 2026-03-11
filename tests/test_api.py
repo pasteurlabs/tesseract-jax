@@ -532,54 +532,69 @@ def test_pytree_tesseract_nondiffable_input(
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize("mode", ["fwd", "rev"])
 def test_vectoradd_tesseract_nondiffable_input(vectoradd_tess, use_jit, mode):
-    """Test that non-differentiable inputs in closure don't get included in VJP/JVP."""
+    """Test handling of non-differentiable inputs.
+
+    Correct strategies (closure, argnums, stop_gradient) produce correct gradients.
+    Providing a tangent/gradient for a non-differentiable input raises ValueError.
+    """
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
     b = np.array([4.0, 5.0, 6.0], dtype="float32")
 
+    # Closure strategy: b is captured from outer scope, not a function argument
+    def loss_fn_closure(a):
+        return jnp.sum(apply_tesseract(vectoradd_tess, inputs=dict(a=a, b=b))["c"] ** 2)
+
+    # stop_gradient strategy: b is an argument but stop_gradient blocks its tangent
+    def loss_fn_stop_grad(a, b):
+        b = jax.lax.stop_gradient(b)
+        return jnp.sum(apply_tesseract(vectoradd_tess, inputs=dict(a=a, b=b))["c"] ** 2)
+
+    # loss_fn takes both a and b as arguments (used for error testing below)
     def loss_fn(a, b):
-        vectoradd_fn_a = lambda a: apply_tesseract(
-            vectoradd_tess,
-            inputs=dict(
-                a=a,
-                b=b,
-            ),
-        )
+        return jnp.sum(apply_tesseract(vectoradd_tess, inputs=dict(a=a, b=b))["c"] ** 2)
 
-        c = vectoradd_fn_a(a)["c"]
-
-        return jnp.sum(c**2)
-
-    def loss_fn_raw(a, b):
-        # b is non-differentiable; stop_gradient models the same semantics as the Tesseract schema
-        c = a + jax.lax.stop_gradient(b)
+    def loss_fn_raw(a):
+        c = a + b  # b treated as constant (same semantics as non-diff schema)
         return jnp.sum(c**2)
 
     if use_jit:
-        loss_fn = jax.jit(loss_fn)
+        loss_fn_closure = jax.jit(loss_fn_closure)
+        loss_fn_stop_grad = jax.jit(loss_fn_stop_grad)
         loss_fn_raw = jax.jit(loss_fn_raw)
 
     if mode == "fwd":
-        # Forward mode: JVP
-        # Note: 'b' gets passed as a tracer to apply_tesseract.
-        # The schema says 'b' is non-differentiable, so it should not be included in jvp_inputs.
-        primal, tangent = jax.jvp(loss_fn, (a, b), (a, b))
-        primal_raw, tangent_raw = jax.jvp(loss_fn_raw, (a, b), (a, b))
-
+        # Closure strategy: only provide tangent for a
+        primal, tangent = jax.jvp(loss_fn_closure, (a,), (a,))
+        primal_raw, tangent_raw = jax.jvp(loss_fn_raw, (a,), (a,))
         np.testing.assert_allclose(primal, primal_raw, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(tangent, tangent_raw, rtol=1e-5, atol=1e-5)
+
+        # stop_gradient strategy: b has stop_gradient applied before apply_tesseract
+        primal_sg, tangent_sg = jax.jvp(loss_fn_stop_grad, (a, b), (a, b))
+        np.testing.assert_allclose(primal_sg, primal_raw, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(tangent_sg, tangent_raw, rtol=1e-5, atol=1e-5)
+
+        # Error: providing a non-symbolic-zero tangent for non-diff b raises ValueError
+        with pytest.raises(ValueError, match=r"(?i)non-symbolic-zero tangent"):
+            jax.jvp(loss_fn, (a, b), (a, b))
     else:
-        # Reverse mode: VJP via grad
-        # Note: This should only differentiate w.r.t. the first argument 'a',
-        # but 'b' gets passed as a tracer to apply_tesseract.
-        # The schema says 'b' is non-differentiable, so it should not be included in vjp_inputs.
-        value_and_grad_fn = jax.value_and_grad(loss_fn)
+        # Closure strategy: only differentiate w.r.t. a
+        value_and_grad_fn = jax.value_and_grad(loss_fn_closure)
         value_and_grad_fn_raw = jax.value_and_grad(loss_fn_raw)
 
-        value, grad = value_and_grad_fn(a, b)
-        value_raw, grad_raw = value_and_grad_fn_raw(a, b)
-
+        value, grad = value_and_grad_fn(a)
+        value_raw, grad_raw = value_and_grad_fn_raw(a)
         np.testing.assert_allclose(value, value_raw, rtol=1e-5, atol=1e-5)
         np.testing.assert_allclose(grad, grad_raw, rtol=1e-5, atol=1e-5)
+
+        # stop_gradient strategy: b has stop_gradient applied, argnums covers both
+        value_sg, grad_sg = jax.value_and_grad(loss_fn_stop_grad)(a, b)
+        np.testing.assert_allclose(value_sg, value_raw, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(grad_sg, grad_raw, rtol=1e-5, atol=1e-5)
+
+        # Error: requesting gradient for non-diff b raises ValueError
+        with pytest.raises(ValueError, match=r"(?i)non-symbolic-zero tangent"):
+            jax.value_and_grad(loss_fn, argnums=1)(a, b)
 
 
 def rosenbrock(x: float, y: float, a: float = 1.0, b: float = 100.0) -> float:

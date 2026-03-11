@@ -108,7 +108,11 @@ class Jaxeract:
         """Call the Tesseract's jvp endpoint with the given arguments."""
         n_primals = len(is_static_mask) - sum(is_static_mask)
         primals = array_args[:n_primals]
-        tangents = array_args[n_primals:]  # only non-zero tangents
+        # array_args[n_primals:] contains ALL tangents (zeroed for has_tangent=False).
+        # Filter to only the has_tangent=True ones before calling combine_args, which
+        # expects exactly sum(has_tangent) tangents.
+        all_tangents = array_args[n_primals:]
+        tangents = tuple(t for t, h in zip(all_tangents, has_tangent, strict=True) if h)
 
         # Expand filtered tangents back to full length using has_tangent:
         # positions where has_tangent=True get the tangent, False gets None
