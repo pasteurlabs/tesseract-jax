@@ -651,5 +651,4 @@ def test_univariate_tesseract_loss_and_grad(univariate_tess, use_jit):
     grad = grad_fn(x, y)
     grad_raw = grad_fn_raw(x, y)
 
-    assert grad is not None
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"

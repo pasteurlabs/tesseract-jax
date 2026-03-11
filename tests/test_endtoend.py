@@ -724,7 +724,6 @@ def test_vectoradd_tesseract_nondiffable_input(served_vectoradd_tesseract, use_j
     grad = grad_fn(a, b)
     grad_raw = grad_fn_raw(a, b)
 
-    assert grad is not None
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
 
 
@@ -975,5 +974,4 @@ def test_univariate_tesseract_loss_and_grad(served_univariate_tesseract_raw, use
     grad = grad_fn(x, y)
     grad_raw = grad_fn_raw(x, y)
 
-    assert grad is not None
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
