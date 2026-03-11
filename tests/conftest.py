@@ -45,12 +45,15 @@ def make_tesseract_fixture(folder_name):
     """
 
     @pytest.fixture(scope="session")
-    def served_tesseract():
+    def served_tesseract(tmp_path_factory):
         port = find_free_port()
         timeout = 10
 
+        output_dir = tmp_path_factory.mktemp(f"tesseract_output_{folder_name}")
+
         env = os.environ.copy()
         env["TESSERACT_API_PATH"] = str(here / folder_name / "tesseract_api.py")
+        env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
 
         # Start the server as a subprocess
         process = subprocess.Popen(

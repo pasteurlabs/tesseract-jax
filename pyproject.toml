@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.10"
 # TODO: add your dependencies here *and* in requirements.txt
 dependencies = [
-    "jax",
+    "jax>=0.5.1",
     "tesseract-core",
 ]
 dynamic = ["version"]
@@ -24,6 +24,7 @@ docs = [
     "myst-nb",
     "sphinx_copybutton",
     "sphinxext_opengraph",
+    "tesseract-core[runtime]",
 ]
 # TODO: add dev dependencies here *and* in requirements-dev.txt
 dev = [
