@@ -857,3 +857,112 @@ def test_dict_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit
         f_vjp = jax.jit(f_vjp)
 
     _ = f_vjp(primal)
+
+
+class TestNonArrayInputCoercion:
+    """Test that non-array inputs (scalars, lists) are automatically coerced to arrays."""
+
+    def test_python_float_inputs(self, served_univariate_tesseract_raw):
+        """Test that Python floats are automatically converted to arrays."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        result = apply_tesseract(tess, {"x": 0.0, "y": 0.0})
+        result_ref = apply_tesseract(tess, {"x": np.array(0.0), "y": np.array(0.0)})
+        _assert_pytree_isequal(result, result_ref)
+
+    def test_python_int_inputs(self, served_univariate_tesseract_raw):
+        """Test that Python ints are automatically converted to arrays."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        result = apply_tesseract(tess, {"x": 0, "y": 0})
+        result_ref = apply_tesseract(tess, {"x": np.array(0.0), "y": np.array(0.0)})
+        _assert_pytree_isequal(result, result_ref)
+
+    def test_mixed_scalar_and_array_inputs(self, served_univariate_tesseract_raw):
+        """Test mixing Python scalars with arrays."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        result = apply_tesseract(tess, {"x": 0.0, "y": np.array(0.0)})
+        result_ref = apply_tesseract(tess, {"x": np.array(0.0), "y": np.array(0.0)})
+        _assert_pytree_isequal(result, result_ref)
+
+    def test_nested_scalar_inputs(self, served_nested_tesseract_raw):
+        """Test that scalars in nested schemas are coerced to arrays."""
+        tess = Tesseract.from_url(served_nested_tesseract_raw)
+        v = np.array([1.0, 2.0, 3.0], dtype="float32")
+        w = np.array([5.0, 7.0, 9.0], dtype="float32")
+
+        # Python floats for scalar array fields
+        result = apply_tesseract(
+            tess,
+            {
+                "scalars": {"a": 1.0, "b": 2.0},
+                "vectors": {"v": v, "w": w},
+                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+            },
+        )
+        # Reference with proper arrays
+        result_ref = apply_tesseract(
+            tess,
+            {
+                "scalars": {
+                    "a": np.array(1.0, dtype="float32"),
+                    "b": np.array(2.0, dtype="float32"),
+                },
+                "vectors": {"v": v, "w": w},
+                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+            },
+        )
+        _assert_pytree_isequal(result, result_ref)
+
+    def test_list_inputs_for_vector_fields(self, served_nested_tesseract_raw):
+        """Test that Python lists are coerced to arrays for vector fields."""
+        tess = Tesseract.from_url(served_nested_tesseract_raw)
+
+        result = apply_tesseract(
+            tess,
+            {
+                "scalars": {"a": 1.0, "b": 2.0},
+                "vectors": {"v": [1.0, 2.0, 3.0], "w": [5.0, 7.0, 9.0]},
+                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+            },
+        )
+        result_ref = apply_tesseract(
+            tess,
+            {
+                "scalars": {
+                    "a": np.array(1.0, dtype="float32"),
+                    "b": np.array(2.0, dtype="float32"),
+                },
+                "vectors": {
+                    "v": np.array([1.0, 2.0, 3.0], dtype="float32"),
+                    "w": np.array([5.0, 7.0, 9.0], dtype="float32"),
+                },
+                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+            },
+        )
+        _assert_pytree_isequal(result, result_ref, rtol=1e-5, atol=1e-5)
+
+    def test_jit_with_scalar_inputs(self, served_univariate_tesseract_raw):
+        """Test that scalar inputs work correctly under jit."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+
+        @jax.jit
+        def f(x, y):
+            return apply_tesseract(tess, {"x": x, "y": y})
+
+        # Scalars should work after coercion to arrays
+        result = f(np.array(0.0), np.array(0.0))
+        expected = rosenbrock_impl(0.0, 0.0)
+        np.testing.assert_array_equal(result["result"], expected)
+
+    def test_grad_with_coerced_non_diff_inputs(self, served_univariate_tesseract_raw):
+        """Test that grad works when non-differentiable inputs are Python scalars."""
+        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+
+        def f(x, y):
+            # a and b are non-differentiable Python floats
+            return apply_tesseract(tess, {"x": x, "y": y, "a": 1.0, "b": 100.0})[
+                "result"
+            ]
+
+        x, y = np.array(0.0), np.array(0.0)
+        grad = jax.grad(f, argnums=0)(x, y)
+        np.testing.assert_allclose(grad, -2.0, rtol=1e-5)
