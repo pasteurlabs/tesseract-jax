@@ -40,6 +40,8 @@ extensions = [
     "sphinx_autodoc_typehints",
     # Copy button for code blocks
     "sphinx_copybutton",
+    # Collapsible dropdowns and other UI components
+    "sphinx_design",
     # OpenGraph metadata for social media sharing
     "sphinxext.opengraph",
 ]
