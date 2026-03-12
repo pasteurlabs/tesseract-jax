@@ -1,4 +1,33 @@
-# Differentiation
+# Input/Output Schemas
+
+Every Tesseract defines its interface through Pydantic `BaseModel` classes (`InputSchema` and `OutputSchema`). These schemas describe the structure, shapes, and dtypes of all array fields, and crucially, which fields are **differentiable**.
+
+## The `Differentiable[...]` annotation
+
+Fields wrapped with `Differentiable[...]` participate in automatic differentiation. Fields without it are treated as constants by JAX's AD machinery, even if their values change between calls.
+
+```python
+from pydantic import BaseModel
+from tesseract_core.runtime import Array, Differentiable, Float32
+
+class InputSchema(BaseModel):
+    x: Differentiable[Array[(3,), Float32]]   # differentiable
+    label: Array[(1,), Float32]               # non-differentiable
+
+class OutputSchema(BaseModel):
+    loss: Differentiable[Array[(), Float32]]  # differentiable
+    metadata: Array[(4,), Float32]            # non-differentiable
+```
+
+Fields can be arbitrarily nested (dicts, lists, and nested models). `Differentiable[...]` applies per-leaf:
+
+```python
+class InputSchema(BaseModel):
+    params: dict[str, Differentiable[Array[(None,), Float32]]]  # all leaves differentiable
+    config: dict[str, Array[(None,), Float32]]                  # all leaves non-differentiable
+```
+
+When `apply_tesseract` is called inside a JAX differentiation context, Tesseract-JAX inspects these annotations to determine which inputs to request tangents/cotangents for, and which outputs to return derivatives of.
 
 ## Non-differentiable inputs
 
@@ -11,7 +40,7 @@ In both modes, use one of these strategies to exclude non-differentiable inputs 
 
 ::::{dropdown} Strategies for handling non-differentiable inputs
 
-**Closure** — capture non-differentiable inputs outside the differentiated function:
+**Closure:** capture non-differentiable inputs outside the differentiated function:
 
 ```python
 # "b" is non-differentiable according to the Tesseract schema
@@ -22,7 +51,7 @@ def loss_fn(a):
 jax.grad(loss_fn)(a)  # ✅ only differentiates w.r.t. "a"
 ```
 
-**`argnums`** — explicitly select which arguments to differentiate:
+**`argnums`:** explicitly select which arguments to differentiate:
 
 ```python
 def loss_fn(a, b):
@@ -32,7 +61,11 @@ def loss_fn(a, b):
 jax.grad(loss_fn, argnums=0)(a, b)  # ✅ only differentiates w.r.t. "a"
 ```
 
-**`stop_gradient`** — apply `jax.lax.stop_gradient` to the non-differentiable input inside the function, before passing it to `apply_tesseract`. This converts it to a concrete value, so no tangent reaches the primitive boundary:
+**`stop_gradient`:** apply `jax.lax.stop_gradient` to the non-differentiable input inside the function, before passing it to `apply_tesseract`. This converts it to a concrete value, so no tangent reaches the primitive boundary:
+
+```{warning}
+`stop_gradient` changes the mathematical result of differentiation. Only use it if you are confident that gradient contributions through that path are genuinely undesirable or negligible. It is not a safe no-op.
+```
 
 ```python
 def loss_fn(a, b):
@@ -42,6 +75,7 @@ def loss_fn(a, b):
 
 jax.grad(loss_fn)(a, b)  # ✅ stop_gradient prevents b from being differentiated
 ```
+
 
 ::::
 
@@ -57,7 +91,7 @@ In both modes, you can use one of these strategies to exclude or insulate the no
 
 ::::{dropdown} Strategies for handling non-differentiable outputs
 
-**Pop** — remove it from the return value before differentiation:
+**Pop:** remove it from the return value before differentiation:
 
 ```python
 def f(inputs):
@@ -66,7 +100,7 @@ def f(inputs):
     return res
 ```
 
-**`has_aux`** — return it as an auxiliary value outside the differentiated pytree:
+**`has_aux`:** return it as an auxiliary value outside the differentiated pytree:
 
 ```python
 def f(inputs):
@@ -76,7 +110,11 @@ def f(inputs):
 primals, f_vjp, nondiff_res = jax.vjp(f, inputs, has_aux=True)
 ```
 
-**`stop_gradient`** — keep it in the return value but block gradient flow through it. In forward mode this produces a zero tangent instead of `NaN`; in reverse mode it produces a symbolic zero cotangent so no error is raised:
+**`stop_gradient`:** keep it in the return value but block gradient flow through it. In forward mode this produces a zero tangent instead of `NaN`; in reverse mode it produces a symbolic zero cotangent so no error is raised:
+
+```{warning}
+`stop_gradient` changes the mathematical result of differentiation. Only use it if you are confident that gradient contributions through that path are genuinely undesirable or negligible. It is not a safe no-op.
+```
 
 ```python
 def f(inputs):
