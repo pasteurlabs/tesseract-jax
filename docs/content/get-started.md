@@ -77,4 +77,4 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 ```
 
 
-- **Non-differentiable inputs/outputs**: Differentiating through inputs or outputs not marked as `Differentiable[...]` in the Tesseract schema can raise a `ValueError` or produces `NaN` tangents. See the [Handling Differentiability](handling-differentiability.md) page for details and workarounds.
+- **Non-differentiable inputs/outputs**: Differentiating through inputs or outputs not marked as `Differentiable[...]` in the Tesseract schema can raise a `ValueError` or produce `NaN` tangents. See the [Handling Differentiability](handling-differentiability.md) page for details and workarounds.
