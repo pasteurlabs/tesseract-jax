@@ -1,4 +1,4 @@
-# Input/Output Schemas
+# Handling Differentiability
 
 Every Tesseract defines its interface through Pydantic `BaseModel` classes (`InputSchema` and `OutputSchema`). These schemas describe the structure, shapes, and dtypes of all array fields, and crucially, which fields are **differentiable**.
 
