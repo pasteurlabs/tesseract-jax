@@ -23,6 +23,7 @@ docs = [
     "furo",
     "myst-nb",
     "sphinx_copybutton",
+    "sphinx_design",
     "sphinxext_opengraph",
     "tesseract-core[runtime]",
 ]
