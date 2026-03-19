@@ -159,3 +159,9 @@ def pytree_tess_inputs() -> dict:
 def vectoradd_tess() -> Tesseract:
     """Load vectoradd_tesseract directly from the API file."""
     return Tesseract.from_tesseract_api("tests/vectoradd_tesseract/tesseract_api.py")
+
+
+@pytest.fixture
+def static_input_tess() -> Tesseract:
+    """Load static_input_tesseract directly from the API file."""
+    return Tesseract.from_tesseract_api("tests/static_input_tesseract/tesseract_api.py")
