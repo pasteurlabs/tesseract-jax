@@ -3,7 +3,12 @@
 
 """Tesseract with a static (non-array) int input for regression testing.
 
-y = scale * sum(x^2 + y^2), where scale is a plain int (static input).
+result = scale * sum(a^2 + z^2), where scale is a plain int (static input).
+
+Field names are chosen so that the static field ("scale") sorts alphabetically
+between the two array fields ("a" < "scale" < "z"). This matters because JAX
+flattens dicts in sorted key order, so the static input ends up *between* the
+array inputs in the flat list, which is the layout that can trigger index bugs.
 """
 
 import jax
@@ -13,9 +18,9 @@ from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 
 
 class InputSchema(BaseModel):
-    x: Differentiable[Array[(None,), Float32]]
-    y: Differentiable[Array[(None,), Float32]]
+    a: Differentiable[Array[(None,), Float32]]
     scale: int = Field(default=1)
+    z: Differentiable[Array[(None,), Float32]]
 
 
 class OutputSchema(BaseModel):
@@ -23,7 +28,7 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return OutputSchema(result=inputs.scale * jnp.sum(inputs.x**2 + inputs.y**2))
+    return OutputSchema(result=inputs.scale * jnp.sum(inputs.a**2 + inputs.z**2))
 
 
 def abstract_eval(abstract_inputs):
@@ -31,10 +36,10 @@ def abstract_eval(abstract_inputs):
 
 
 def vector_jacobian_product(inputs, vjp_inputs, vjp_outputs, cotangent_vector):
-    def f(x, y):
-        return inputs.scale * jnp.sum(x**2 + y**2)
+    def f(a, z):
+        return inputs.scale * jnp.sum(a**2 + z**2)
 
-    _, vjp_fn = jax.vjp(f, inputs.x, inputs.y)
-    dx, dy = vjp_fn(cotangent_vector["result"])
-    all_grads = {"x": dx, "y": dy}
+    _, vjp_fn = jax.vjp(f, inputs.a, inputs.z)
+    da, dz = vjp_fn(cotangent_vector["result"])
+    all_grads = {"a": da, "z": dz}
     return {k: all_grads[k] for k in vjp_inputs if k in all_grads}

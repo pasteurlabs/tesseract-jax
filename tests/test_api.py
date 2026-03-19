@@ -654,37 +654,28 @@ def test_univariate_tesseract_loss_and_grad(univariate_tess, use_jit):
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
 
 
-@pytest.mark.parametrize("use_jit", [True, False])
-def test_vmap_grad_with_static_input(static_input_tess, use_jit):
-    """Regression test: vmap(grad) with a static (non-array) input.
+def test_vjp_with_static_input_between_arrays(static_input_tess):
+    """Regression test: VJP with a static input that sorts between array inputs.
 
-    When a Tesseract has a static input (e.g. int), the VJP reconstruction
-    loop must index has_tangent with tan_idx (tangent-only counter), not
-    all_idx (which counts all flat inputs including static ones). Using
-    all_idx causes an out-of-bounds or mismatched-output error under
-    jax.vmap(jax.grad(...)).
+    When a Tesseract has a static input whose name sorts alphabetically
+    between two array inputs (e.g. "a" < "scale" < "z"), the static entry
+    sits between the arrays in JAX's flat input list. The VJP output
+    reconstruction loop must bounds-check correctly to avoid index errors.
 
-    See: bug.py for the original reproducer.
+    See https://github.com/pasteurlabs/tesseract-jax/pull/159 for details on the original bug.
     """
 
-    def loss(x, y):
-        out = apply_tesseract(static_input_tess, {"x": x, "y": y, "scale": 2})
+    def loss(a, z):
+        out = apply_tesseract(static_input_tess, {"a": a, "z": z, "scale": 2})
         return out["result"]
 
-    def loss_raw(x, y):
-        return 2.0 * jnp.sum(x**2 + y**2)
+    def loss_raw(a, z):
+        return 2.0 * jnp.sum(a**2 + z**2)
 
-    x_batch = np.ones((3, 4), dtype="float32")
-    y_batch = np.ones((3, 4), dtype="float32")
+    a = np.ones(4, dtype="float32")
+    z = np.ones(4, dtype="float32")
 
-    grad_fn = jax.vmap(jax.grad(loss))
-    grad_fn_raw = jax.vmap(jax.grad(loss_raw))
-
-    if use_jit:
-        grad_fn = jax.jit(grad_fn)
-        grad_fn_raw = jax.jit(grad_fn_raw)
-
-    grad = grad_fn(x_batch, y_batch)
-    grad_raw = grad_fn_raw(x_batch, y_batch)
+    grad = jax.jit(jax.grad(loss, argnums=0))(a, z)
+    grad_raw = jax.jit(jax.grad(loss_raw, argnums=0))(a, z)
 
     np.testing.assert_allclose(grad, grad_raw, rtol=1e-5)
