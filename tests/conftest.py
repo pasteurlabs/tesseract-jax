@@ -25,6 +25,7 @@ def get_tesseract_folders():
         "non_abstract_tesseract",
         "vectoradd_tesseract",
         "pytree_tesseract",
+        "batched_tesseract",
         # Add more as needed
     ]
     return tesseract_folders
@@ -100,6 +101,7 @@ served_vectoradd_tesseract = make_tesseract_fixture("vectoradd_tesseract")
 served_tesseract_no_jvp = make_tesseract_fixture("univariate_tesseract_no_jvp")
 served_tesseract_no_vjp = make_tesseract_fixture("univariate_tesseract_no_vjp")
 served_pytree_tesseract = make_tesseract_fixture("pytree_tesseract")
+served_batched_tesseract = make_tesseract_fixture("batched_tesseract")
 
 
 @pytest.fixture

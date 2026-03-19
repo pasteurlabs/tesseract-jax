@@ -66,6 +66,8 @@ def tesseract_dispatch_abstract_eval(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
@@ -98,6 +100,8 @@ def tesseract_dispatch_jvp_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -160,6 +164,8 @@ def tesseract_dispatch_jvp_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="jacobian_vector_product",
+        vectorized=vectorized,
+        _batched=_batched,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -172,6 +178,8 @@ def tesseract_dispatch_jvp_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="apply",
+        vectorized=vectorized,
+        _batched=_batched,
     )
 
     return tuple(res), tuple(jvp)
@@ -191,6 +199,8 @@ def tesseract_dispatch_transpose_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -261,6 +271,8 @@ def tesseract_dispatch_transpose_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="vector_jacobian_product",
+        vectorized=vectorized,
+        _batched=_batched,
     )
 
     return tuple([None] * len(primal_args) + list(vjp))
@@ -288,6 +300,8 @@ def tesseract_dispatch(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> Any:
     """Defines how to dispatch lowering the computation.
 
@@ -295,8 +309,18 @@ def tesseract_dispatch(
     """
     _raise_if_unimplemented(eval_func, client)
 
+    def _expand_batch(x: Any) -> Any:
+        return jnp.expand_dims(x, axis=0) if hasattr(x, "shape") else x
+
+    def _squeeze_batch(x: Any) -> Any:
+        return x[0] if hasattr(x, "shape") else x
+
     def _dispatch(*args: ArrayLike) -> Any:
+        if vectorized and not _batched:
+            args = tuple(_expand_batch(a) for a in args)
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        if vectorized and not _batched:
+            static_args_ = tuple(_expand_batch(a) for a in static_args_)
         out = getattr(client, eval_func)(
             args,
             static_args_,
@@ -308,6 +332,11 @@ def tesseract_dispatch(
         )
         if not isinstance(out, tuple) and output_avals is not None:
             out = (out,)
+        if vectorized and not _batched:
+            if isinstance(out, tuple):
+                out = tuple(_squeeze_batch(o) for o in out)
+            else:
+                out = jax.tree.map(_squeeze_batch, out)
         return out
 
     result = _dispatch(*array_args)
@@ -328,12 +357,21 @@ def tesseract_dispatch_lowering(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
     _raise_if_unimplemented(eval_func, client)
 
+    def _expand_batch(x: Any) -> Any:
+        return np.expand_dims(x, axis=0) if hasattr(x, "shape") else x
+
     def _dispatch(*args: ArrayLike) -> Any:
+        if vectorized and not _batched:
+            args = tuple(_expand_batch(a) for a in args)
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        if vectorized and not _batched:
+            static_args_ = tuple(_expand_batch(a) for a in static_args_)
         out = getattr(client, eval_func)(
             args,
             static_args_,
@@ -345,6 +383,8 @@ def tesseract_dispatch_lowering(
         )
         if not isinstance(out, tuple):
             out = (out,)
+        if vectorized and not _batched:
+            out = tuple(o[0] for o in out)
         return out
 
     result, _, keepalive = mlir.emit_python_callback(
@@ -375,6 +415,8 @@ def tesseract_dispatch_batching(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vectorized: bool = False,
+    _batched: bool = False,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
@@ -383,6 +425,41 @@ def tesseract_dispatch_batching(
         arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
     ]
+
+    if vectorized:
+        # In vectorized mode, pass the stacked inputs directly to the Tesseract.
+        # The Tesseract is expected to handle the extra leading batch dimension.
+        batch_size = next(
+            arg.shape[0]
+            for arg, ax in zip(new_args, axes, strict=True)
+            if ax is not batching.not_mapped
+        )
+        # Broadcast unbatched args to have the same leading batch dimension
+        new_args = [
+            jnp.broadcast_to(arg, (batch_size, *arg.shape))
+            if ax is batching.not_mapped
+            else arg
+            for arg, ax in zip(new_args, axes, strict=True)
+        ]
+        # Compute batched output avals (prepend batch dim)
+        batched_output_avals = tuple(
+            ShapeDtypeStruct(shape=(batch_size, *aval.shape), dtype=aval.dtype)
+            for aval in output_avals
+        )
+        outvals = tesseract_dispatch_p.bind(
+            *new_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=batched_output_avals,
+            is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
+            client=client,
+            eval_func=eval_func,
+            vectorized=vectorized,
+            _batched=True,
+        )
+        return tuple(outvals), (0,) * len(outvals)
 
     is_batched_mask = [d is not batching.not_mapped for d in axes]
     unbatched_args, batched_args = split_args(new_args, is_batched_mask)
@@ -399,6 +476,7 @@ def tesseract_dispatch_batching(
             has_tangent=has_tangent,
             client=client,
             eval_func=eval_func,
+            vectorized=vectorized,
         )
 
     outvals = jax.lax.map(_batch_fun, batched_args)
@@ -429,6 +507,8 @@ def _unpack_hashable(obj: _Hashable) -> Any:
 def apply_tesseract(
     tesseract_client: Tesseract,
     inputs: Any,
+    *,
+    vectorized: bool = False,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -462,6 +542,15 @@ def apply_tesseract(
     Args:
         tesseract_client: The Tesseract object to apply.
         inputs: The inputs to apply to the Tesseract object.
+        vectorized: If True, the Tesseract is assumed to support an additional
+            leading batch dimension on all array inputs and outputs. A singleton
+            batch axis is prepended to all inputs before calling the Tesseract,
+            and stripped from the outputs. Under ``jax.vmap``, the batched
+            inputs are passed directly to the Tesseract in a single call
+            (with the vmap batch axis as the leading dimension) instead of being
+            serialized one element at a time via ``jax.lax.map``. This can be
+            significantly faster for Tesseracts that natively support batched
+            evaluation.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -529,6 +618,7 @@ def apply_tesseract(
             has_tangent=has_tangent,
             client=client,
             eval_func="apply",
+            vectorized=vectorized,
         )
 
         # Unflatten the output
@@ -548,6 +638,7 @@ def apply_tesseract(
             has_tangent=has_tangent,
             client=client,
             eval_func="apply",
+            vectorized=vectorized,
         )
 
         # Unflatten the output
