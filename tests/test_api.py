@@ -660,14 +660,9 @@ def test_vjp_with_static_input_between_arrays(static_input_tess):
     When a Tesseract has a static input whose name sorts alphabetically
     between two array inputs (e.g. "a" < "scale" < "z"), the static entry
     sits between the arrays in JAX's flat input list. The VJP output
-    reconstruction loop must bounds-check has_tangent with tan_idx (which
-    counts only non-static inputs), not all_idx (which counts all inputs
-    including static ones). Using all_idx causes the loop to skip emitting
-    a zero-gradient output, producing too few callback results.
+    reconstruction loop must bounds-check correctly to avoid index errors.
 
-    Trigger: jit makes both arrays tracers, grad(argnums=0) gives a zero
-    tangent for the second array -> has_tangent=(True, False) with the
-    static input in between -> all_idx outruns has_tangent's length.
+    See https://github.com/pasteurlabs/tesseract-jax/pull/159 for details on the original bug.
     """
 
     def loss(a, z):

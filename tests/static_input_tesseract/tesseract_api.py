@@ -8,8 +8,7 @@ result = scale * sum(a^2 + z^2), where scale is a plain int (static input).
 Field names are chosen so that the static field ("scale") sorts alphabetically
 between the two array fields ("a" < "scale" < "z"). This matters because JAX
 flattens dicts in sorted key order, so the static input ends up *between* the
-array inputs in the flat list, which is the layout that triggers the VJP
-index bug.
+array inputs in the flat list, which is the layout that can trigger index bugs.
 """
 
 import jax
