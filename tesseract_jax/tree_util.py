@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, TypeAlias
 
 import jax.tree
@@ -72,16 +72,18 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _merge_path(explicit_path: str, array_paths: list[str]) -> tuple[str, bool]:
+def _merge_path(
+    explicit_path: str, array_paths: Iterable[str]
+) -> tuple[str, str | None]:
     """Merges and formats explicit path with array paths containing templates.
 
-    Returns a tuple of (formatted_path, matched) where matched indicates whether
-    the path matched any template in array_paths.
+    Returns a tuple of (formatted_path, matched_template) where matched_template
+    is the template string that matched, or None if no template matched.
 
     Examples:
-        _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', True)
-        _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', True)
-        _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', False)
+        _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
+        _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
+        _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
     """
     explicit_parts = explicit_path.split(".")
     for array_path in array_paths:
@@ -103,9 +105,9 @@ def _merge_path(explicit_path: str, array_paths: list[str]) -> tuple[str, bool]:
                 break
 
         if matched:
-            return ".".join(result_parts), True
+            return ".".join(result_parts), array_path
 
-    return explicit_path, False
+    return explicit_path, None
 
 
 def _pytree_to_tesseract_flat(
@@ -143,10 +145,10 @@ def _pytree_to_tesseract_flat(
         # remove leading dot
         tesseract_path = tesseract_path.lstrip(".")
 
-        tesseract_path, is_differentiable = _merge_path(
-            tesseract_path, list(schema_paths.keys()) if schema_paths else []
+        tesseract_path, matched_template = _merge_path(
+            tesseract_path, schema_paths or []
         )
 
-        flat_dict[tesseract_path] = val if is_differentiable else None
+        flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict
