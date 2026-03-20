@@ -55,6 +55,7 @@ class TestVectoraddApi:
 
     @pytest.fixture(autouse=True)
     def setup_inputs(self, vectoradd_tesseract_api, array_size):
+        jax.clear_caches()
         self.tess = vectoradd_tesseract_api
         self.a_v = create_test_array(array_size)
         self.b_v = create_test_array(array_size)
@@ -122,6 +123,7 @@ class TestVectoraddApiJacobian:
 
     @pytest.fixture(autouse=True)
     def setup_inputs(self, vectoradd_tesseract_api, jac_array_size):
+        jax.clear_caches()
         self.tess = vectoradd_tesseract_api
         self.a_v = create_test_array(jac_array_size)
         self.b_v = create_test_array(jac_array_size)

@@ -34,7 +34,8 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 def test_noop_api_cast_float64(benchmark, noop_tesseract_api, array_size):
     """Benchmark jitted apply with float64 input (expects float32)."""
-    inputs = {"data": create_test_array(array_size, dtype=jnp.float64)}
+    jax.clear_caches()
+    inputs = {"data": create_test_array(array_size, dtype="float64")}
     fn = jax.jit(lambda: apply_tesseract(noop_tesseract_api, inputs))
     fn()
     benchmark(fn)
@@ -42,6 +43,7 @@ def test_noop_api_cast_float64(benchmark, noop_tesseract_api, array_size):
 
 def test_noop_api_cast_int32(benchmark, noop_tesseract_api, array_size):
     """Benchmark jitted apply with int32 input (expects float32)."""
+    jax.clear_caches()
     inputs = {"data": jnp.ones(array_size, dtype=jnp.int32)}
     fn = jax.jit(lambda: apply_tesseract(noop_tesseract_api, inputs))
     fn()

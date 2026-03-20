@@ -37,6 +37,7 @@ class TestNoopApi:
 
     @pytest.fixture(autouse=True)
     def setup_inputs(self, noop_tesseract_api, array_size):
+        jax.clear_caches()
         self.tess = noop_tesseract_api
         arr = create_test_array(array_size)
         self.inputs = {"data": arr}
