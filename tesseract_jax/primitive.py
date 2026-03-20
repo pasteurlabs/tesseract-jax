@@ -426,6 +426,81 @@ def _unpack_hashable(obj: _Hashable) -> Any:
     return obj.wrapped
 
 
+def _is_array_schema(prop_schema: dict) -> bool:
+    """Check if a schema property describes an array type."""
+    if "array_flags" in prop_schema:
+        return True
+    props = prop_schema.get("properties", {})
+    obj_type = props.get("object_type", {})
+    return obj_type.get("const") == "array"
+
+
+def _resolve_ref(ref: str, all_schemas: dict) -> dict:
+    """Resolve a $ref string like '#/components/schemas/Foo' to its schema dict."""
+    # ref format: "#/components/schemas/SchemaName"
+    parts = ref.lstrip("#/").split("/")
+    # We only have the schemas dict, so extract the schema name
+    return all_schemas[parts[-1]]
+
+
+def _coerce_inputs_to_arrays(inputs: Any, input_schema: dict, all_schemas: dict) -> Any:
+    """Recursively coerce non-array inputs to JAX arrays where the schema expects arrays.
+
+    Walks the input data alongside the OpenAPI schema. When a leaf field is expected
+    to be an array (detected via array_flags or object_type), non-array values
+    (Python scalars, lists, etc.) are converted to JAX arrays via jnp.asarray().
+    """
+    if not isinstance(inputs, dict):
+        return inputs
+
+    properties = input_schema.get("properties", {})
+    if not properties:
+        return inputs
+
+    result = {}
+    for key, value in inputs.items():
+        if key not in properties:
+            result[key] = value
+            continue
+
+        prop_schema = properties[key]
+
+        # Resolve $ref if present
+        if "$ref" in prop_schema:
+            prop_schema = _resolve_ref(prop_schema["$ref"], all_schemas)
+
+        if _is_array_schema(prop_schema):
+            # This field should be an array - coerce if needed
+            if not isinstance(value, (jnp.ndarray, np.ndarray, jc.Tracer)):
+                try:
+                    result[key] = jnp.asarray(value)
+                except (TypeError, ValueError):
+                    result[key] = value
+            else:
+                result[key] = value
+        elif prop_schema.get("type") == "object" or "properties" in prop_schema:
+            # Nested object - recurse
+            result[key] = _coerce_inputs_to_arrays(value, prop_schema, all_schemas)
+        elif prop_schema.get("type") == "array" and "items" in prop_schema:
+            # Schema-level array (list of items) - check if items are arrays
+            items_schema = prop_schema["items"]
+            if "$ref" in items_schema:
+                items_schema = _resolve_ref(items_schema["$ref"], all_schemas)
+            if _is_array_schema(items_schema) and isinstance(value, (list, tuple)):
+                result[key] = type(value)(
+                    jnp.asarray(v)
+                    if not isinstance(v, (jnp.ndarray, np.ndarray, jc.Tracer))
+                    else v
+                    for v in value
+                )
+            else:
+                result[key] = value
+        else:
+            result[key] = value
+
+    return result
+
+
 def apply_tesseract(
     tesseract_client: Tesseract,
     inputs: Any,
@@ -435,6 +510,9 @@ def apply_tesseract(
     This function is fully traceable and can be used in JAX transformations like
     jit, grad, etc. It will automatically dispatch to the appropriate Tesseract
     endpoint based on the requested operation.
+
+    Non-array inputs (such as Python floats, ints, or lists) are automatically
+    converted to JAX arrays where the Tesseract's input schema expects arrays.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -448,6 +526,10 @@ def apply_tesseract(
         >>> # Apply the Tesseract object to the inputs
         >>> # (this calls tesseract_client.apply under the hood)
         >>> apply_tesseract(tesseract_client, inputs)
+        {'result': Array(100., dtype=float64)}
+        >>>
+        >>> # Scalar values are automatically converted to arrays
+        >>> apply_tesseract(tesseract_client, {"x": 1.0, "y": 2.0})
         {'result': Array(100., dtype=float64)}
         >>>
         >>> # Compute the gradient of the outputs with respect to the inputs
@@ -471,6 +553,11 @@ def apply_tesseract(
             "The first argument must be a Tesseract object. "
             f"Got {type(tesseract_client)} instead."
         )
+
+    # Coerce non-array inputs (scalars, lists) to JAX arrays where the schema expects them
+    all_schemas = tesseract_client.openapi_schema["components"]["schemas"]
+    input_schema = all_schemas.get("Apply_InputSchema", {})
+    inputs = _coerce_inputs_to_arrays(inputs, input_schema, all_schemas)
 
     has_func_transformation = False
 
