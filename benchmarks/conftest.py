@@ -27,7 +27,7 @@ VECTORADD_TESSERACT_PATH = (
 DEFAULT_ARRAY_SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000]
 
 # Smaller sizes for jacobian benchmarks (jacrev/jacfwd produce NxN matrices).
-DEFAULT_JAC_ARRAY_SIZES = [100, 1_000, 10_000]
+DEFAULT_JAC_ARRAY_SIZES = [10, 100]
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
