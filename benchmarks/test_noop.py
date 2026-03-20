@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import jax
 import pytest
-from conftest import DEFAULT_ARRAY_SIZES, create_test_array
+from conftest import DEFAULT_ARRAY_SIZES, MAX_VMAP_ARRAY_SIZE, create_test_array
 
 from tesseract_jax import apply_tesseract
 
@@ -67,7 +67,9 @@ class TestNoopApi:
 
         benchmark(do_compile)
 
-    def test_noop_api_vmap(self, benchmark):
+    def test_noop_api_vmap(self, benchmark, array_size):
         """Benchmark vmap (batch_size=10) via from_tesseract_api."""
+        if array_size > MAX_VMAP_ARRAY_SIZE:
+            pytest.skip(f"array_size {array_size} exceeds vmap limit")
         fn = jax.vmap(lambda data: apply_tesseract(self.tess, {"data": data}))
         benchmark(fn, self.batched_inputs["data"])

@@ -19,7 +19,12 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import DEFAULT_ARRAY_SIZES, DEFAULT_JAC_ARRAY_SIZES, create_test_array
+from conftest import (
+    DEFAULT_ARRAY_SIZES,
+    DEFAULT_JAC_ARRAY_SIZES,
+    MAX_VMAP_ARRAY_SIZE,
+    create_test_array,
+)
 
 from tesseract_jax import apply_tesseract
 
@@ -107,8 +112,10 @@ class TestVectoraddApi:
 
         benchmark(do_vjp)
 
-    def test_vectoradd_api_vmap(self, benchmark):
+    def test_vectoradd_api_vmap(self, benchmark, array_size):
         """Benchmark vmap (batch_size=10) via from_tesseract_api."""
+        if array_size > MAX_VMAP_ARRAY_SIZE:
+            pytest.skip(f"array_size {array_size} exceeds vmap limit")
         a_v_batch = create_test_array(10 * len(self.a_v)).reshape(10, len(self.a_v))
         b_v_batch = create_test_array(10 * len(self.b_v)).reshape(10, len(self.b_v))
 
