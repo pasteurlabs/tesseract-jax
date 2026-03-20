@@ -45,7 +45,7 @@ jobs:
 
       - name: Run benchmarks on current commit
         run: |
-          uv run --no-sync pytest benchmarks/ \
+          uv run --no-sync pytest benchmarks/ -v \
             --benchmark-json current_benchmarks.json
 
       - name: Check out baseline branch
