@@ -70,24 +70,3 @@ class TestNoopApi:
         """Benchmark vmap (batch_size=10) via from_tesseract_api."""
         fn = jax.vmap(lambda data: apply_tesseract(self.tess, {"data": data}))
         benchmark(fn, self.batched_inputs["data"])
-
-
-class TestNoopDocker:
-    """Benchmarks for noop Tesseract via from_image."""
-
-    @pytest.fixture(autouse=True)
-    def setup_inputs(self, noop_tesseract_docker, array_size):
-        self.tess = noop_tesseract_docker
-        self.inputs = {"data": create_test_array(array_size)}
-
-    @pytest.mark.docker
-    def test_noop_docker_apply_eager(self, benchmark):
-        """Benchmark eager apply (no JIT) via from_image."""
-        benchmark(apply_tesseract, self.tess, self.inputs)
-
-    @pytest.mark.docker
-    def test_noop_docker_apply_jit(self, benchmark):
-        """Benchmark jitted apply (warm cache) via from_image."""
-        fn = jax.jit(lambda: apply_tesseract(self.tess, self.inputs))
-        fn()
-        benchmark(fn)

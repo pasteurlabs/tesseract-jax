@@ -24,7 +24,6 @@ VECTORADD_TESSERACT_PATH = (
     / "vectoradd_jax"
     / "tesseract_api.py"
 )
-VECTORADD_TESSERACT_DIR = VECTORADD_TESSERACT_PATH.parent
 
 # Default array sizes when --array-sizes is not specified.
 DEFAULT_ARRAY_SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000]
@@ -98,7 +97,7 @@ def vectoradd_tesseract_api(tmp_path_factory):
     return Tesseract.from_tesseract_api(VECTORADD_TESSERACT_PATH, output_path=tmpdir)
 
 
-# --- Docker image fixtures ---
+# --- Docker fixtures ---
 
 
 def _build_tesseract_image(tesseract_dir: Path, image_name: str) -> str:
@@ -120,31 +119,11 @@ def noop_tesseract_image() -> str:
     return _build_tesseract_image(NOOP_TESSERACT_DIR, "benchmark-noop:latest")
 
 
-@pytest.fixture(scope="session")
-def vectoradd_tesseract_image() -> str:
-    """Build the vectoradd tesseract image once per session."""
-    return _build_tesseract_image(VECTORADD_TESSERACT_DIR, "vectoradd_jax:latest")
-
-
-# --- Docker container fixtures ---
-
-
 @pytest.fixture(scope="module")
 def noop_tesseract_docker(tmp_path_factory, noop_tesseract_image):
     """Create a containerized noop Tesseract instance."""
     tmpdir = tmp_path_factory.mktemp("noop_docker")
     cm = Tesseract.from_image(noop_tesseract_image, output_path=tmpdir)
-    tesseract = cm.__enter__()
-    tesseract.health()
-    yield tesseract
-    cm.__exit__(None, None, None)
-
-
-@pytest.fixture(scope="module")
-def vectoradd_tesseract_docker(tmp_path_factory, vectoradd_tesseract_image):
-    """Create a containerized vectoradd Tesseract instance."""
-    tmpdir = tmp_path_factory.mktemp("vectoradd_docker")
-    cm = Tesseract.from_image(vectoradd_tesseract_image, output_path=tmpdir)
     tesseract = cm.__enter__()
     tesseract.health()
     yield tesseract
