@@ -45,7 +45,7 @@ jobs:
 
       - name: Run benchmarks on current commit
         run: |
-          uv run --no-sync pytest benchmarks/ -v \
+          uv run --no-sync pytest benchmarks/ \
             --benchmark-json current_benchmarks.json
 
       - name: Check out baseline branch
@@ -66,6 +66,7 @@ jobs:
         if: github.event_name == 'pull_request'
         working-directory: baseline
         run: |
+          mkdir -p benchmarks
           cp -r ../benchmarks/* benchmarks/
 
       - name: Run benchmarks on baseline
