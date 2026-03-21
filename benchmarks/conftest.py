@@ -121,11 +121,11 @@ def noop_tesseract_image():
 
 
 @pytest.fixture(scope="module")
-def noop_tesseract_docker(tmp_path_factory, noop_tesseract_image):
-    """Create a containerized noop Tesseract instance."""
+def noop_tesseract_http(tmp_path_factory, noop_tesseract_image):
+    """Create a containerized noop Tesseract instance via HTTP."""
     from tesseract_core import Tesseract
 
-    tmpdir = tmp_path_factory.mktemp("noop_docker")
+    tmpdir = tmp_path_factory.mktemp("noop_http")
     cm = Tesseract.from_image(noop_tesseract_image, output_path=tmpdir)
     tesseract = cm.__enter__()
     tesseract.health()

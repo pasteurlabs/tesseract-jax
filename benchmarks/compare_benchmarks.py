@@ -28,9 +28,8 @@ def _short_name(bench: dict) -> str:
 
     Maps pytest-benchmark names like:
         "test_noop_api_apply[1,000]"          -> "noop_api/apply_1,000"
-        "test_noop_docker_jit[10,000]"        -> "noop_docker/jit_10,000"
+        "test_noop_http_jit[10,000]"          -> "noop_http/jit_10,000"
         "test_vectoradd_api_jvp[100,000]"     -> "vectoradd_api/jvp_100,000"
-        "test_vectoradd_docker_jacrev[1,000]" -> "vectoradd_docker/jacrev_1,000"
         "test_noop_cast_float64[1,000]"       -> "noop_cast/float64_1,000"
         "test_vectoradd_cast_int32[1,000]"    -> "vectoradd_cast/int32_1,000"
     """
@@ -42,11 +41,11 @@ def _short_name(bench: dict) -> str:
 
     func, params = m.group(1), m.group(2)
 
-    # Pattern: tesseract_mode_operation (e.g., noop_api_apply, vectoradd_docker_jvp)
+    # Pattern: tesseract_mode_operation (e.g., noop_api_apply, noop_http_apply_jit)
     # Split into (tesseract_mode, operation)
     parts = func.split("_")
 
-    # Handle known tesseract names (noop, vectoradd) and modes (api, docker, cast)
+    # Handle known tesseract names (noop, vectoradd) and modes (api, http, cast)
     if len(parts) >= 3:
         # Try to find the mode separator
         if parts[0] == "noop":
