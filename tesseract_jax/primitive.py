@@ -443,12 +443,45 @@ def _resolve_ref(ref: str, all_schemas: dict) -> dict:
     return all_schemas[parts[-1]]
 
 
-def _coerce_inputs_to_arrays(inputs: Any, input_schema: dict, all_schemas: dict) -> Any:
-    """Recursively coerce non-array inputs to JAX arrays where the schema expects arrays.
+def _is_scalar(value: Any) -> bool:
+    """Check if a value is a Python or NumPy scalar."""
+    return isinstance(value, (int, float, complex, bool, np.number, np.bool_))
+
+
+def _coerce_array_input(value: Any, field_name: str) -> Any:
+    """Validate and coerce a single value that the schema expects to be an array.
+
+    Accepts scalars (int, float, etc.), JAX/NumPy arrays, and any object implementing
+    the ``__array__`` protocol. Raises ``TypeError`` for Python sequences and other
+    unsupported types.
+    """
+    if isinstance(value, (jnp.ndarray, np.ndarray, jc.Tracer)):
+        return value
+    if _is_scalar(value) or hasattr(value, "__array__"):
+        return jnp.asarray(value)
+    if isinstance(value, (list, tuple)):
+        raise TypeError(
+            f"Input '{field_name}' expects an array, but got {type(value).__name__}. "
+            f"Please convert it to a JAX or NumPy array first, e.g. "
+            f"jnp.array({field_name}) or np.array({field_name})."
+        )
+    raise TypeError(
+        f"Input '{field_name}' expects an array, but got {type(value).__name__}. "
+        f"Accepted types are: JAX/NumPy arrays or scalars (int, float, bool, complex)."
+    )
+
+
+def _validate_and_coerce_inputs(
+    inputs: Any, input_schema: dict, all_schemas: dict
+) -> Any:
+    """Recursively validate and coerce inputs to JAX arrays where the schema expects arrays.
 
     Walks the input data alongside the OpenAPI schema. When a leaf field is expected
-    to be an array (detected via array_flags or object_type), non-array values
-    (Python scalars, lists, etc.) are converted to JAX arrays via jnp.asarray().
+    to be an array (detected via array_flags or object_type):
+    - Values implementing the ``__array__`` protocol (numpy/jax arrays) are converted
+      via ``jnp.asarray()``.
+    - Python scalars (int, float, bool, complex) are converted via ``jnp.asarray()``.
+    - Python sequences (list, tuple) and other types are rejected with a ``TypeError``.
     """
     if not isinstance(inputs, dict):
         return inputs
@@ -470,28 +503,18 @@ def _coerce_inputs_to_arrays(inputs: Any, input_schema: dict, all_schemas: dict)
             prop_schema = _resolve_ref(prop_schema["$ref"], all_schemas)
 
         if _is_array_schema(prop_schema):
-            # This field should be an array - coerce if needed
-            if not isinstance(value, (jnp.ndarray, np.ndarray, jc.Tracer)):
-                try:
-                    result[key] = jnp.asarray(value)
-                except (TypeError, ValueError):
-                    result[key] = value
-            else:
-                result[key] = value
+            result[key] = _coerce_array_input(value, key)
         elif prop_schema.get("type") == "object" or "properties" in prop_schema:
             # Nested object - recurse
-            result[key] = _coerce_inputs_to_arrays(value, prop_schema, all_schemas)
+            result[key] = _validate_and_coerce_inputs(value, prop_schema, all_schemas)
         elif prop_schema.get("type") == "array" and "items" in prop_schema:
-            # Schema-level array (list of items) - check if items are arrays
+            # Schema-level array (list of items) - validate items
             items_schema = prop_schema["items"]
             if "$ref" in items_schema:
                 items_schema = _resolve_ref(items_schema["$ref"], all_schemas)
             if _is_array_schema(items_schema) and isinstance(value, (list, tuple)):
                 result[key] = type(value)(
-                    jnp.asarray(v)
-                    if not isinstance(v, (jnp.ndarray, np.ndarray, jc.Tracer))
-                    else v
-                    for v in value
+                    _coerce_array_input(v, f"{key}[{i}]") for i, v in enumerate(value)
                 )
             else:
                 result[key] = value
@@ -511,8 +534,10 @@ def apply_tesseract(
     jit, grad, etc. It will automatically dispatch to the appropriate Tesseract
     endpoint based on the requested operation.
 
-    Non-array inputs (such as Python floats, ints, or lists) are automatically
-    converted to JAX arrays where the Tesseract's input schema expects arrays.
+    Scalar inputs (such as Python floats and ints) and objects implementing the
+    ``__array__`` protocol are automatically converted to JAX arrays where the
+    Tesseract's input schema expects arrays. Python sequences (lists, tuples) are
+    rejected with a ``TypeError`` — convert them explicitly via ``jnp.array()``.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -554,10 +579,10 @@ def apply_tesseract(
             f"Got {type(tesseract_client)} instead."
         )
 
-    # Coerce non-array inputs (scalars, lists) to JAX arrays where the schema expects them
+    # Validate and coerce scalar / array-like inputs to JAX arrays where the schema expects them
     all_schemas = tesseract_client.openapi_schema["components"]["schemas"]
     input_schema = all_schemas.get("Apply_InputSchema", {})
-    inputs = _coerce_inputs_to_arrays(inputs, input_schema, all_schemas)
+    inputs = _validate_and_coerce_inputs(inputs, input_schema, all_schemas)
 
     has_func_transformation = False
 

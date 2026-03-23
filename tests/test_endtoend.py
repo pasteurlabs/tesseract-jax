@@ -1030,33 +1030,19 @@ class TestNonArrayInputCoercion:
         )
         _assert_pytree_isequal(result, result_ref)
 
-    def test_list_inputs_for_vector_fields(self, served_nested_tesseract_raw):
-        """Test that Python lists are coerced to arrays for vector fields."""
+    def test_list_inputs_rejected_for_vector_fields(self, served_nested_tesseract_raw):
+        """Test that Python lists are rejected with a helpful error for array fields."""
         tess = Tesseract.from_url(served_nested_tesseract_raw)
 
-        result = apply_tesseract(
-            tess,
-            {
-                "scalars": {"a": 1.0, "b": 2.0},
-                "vectors": {"v": [1.0, 2.0, 3.0], "w": [5.0, 7.0, 9.0]},
-                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
-            },
-        )
-        result_ref = apply_tesseract(
-            tess,
-            {
-                "scalars": {
-                    "a": np.array(1.0, dtype="float32"),
-                    "b": np.array(2.0, dtype="float32"),
+        with pytest.raises(TypeError, match="expects an array, but got list"):
+            apply_tesseract(
+                tess,
+                {
+                    "scalars": {"a": 1.0, "b": 2.0},
+                    "vectors": {"v": [1.0, 2.0, 3.0], "w": [5.0, 7.0, 9.0]},
+                    "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
                 },
-                "vectors": {
-                    "v": np.array([1.0, 2.0, 3.0], dtype="float32"),
-                    "w": np.array([5.0, 7.0, 9.0], dtype="float32"),
-                },
-                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
-            },
-        )
-        _assert_pytree_isequal(result, result_ref, rtol=1e-5, atol=1e-5)
+            )
 
     def test_jit_with_scalar_inputs(self, served_univariate_tesseract_raw):
         """Test that scalar inputs work correctly under jit."""
