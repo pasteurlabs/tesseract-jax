@@ -214,7 +214,7 @@ class Jaxeract:
                 out.append(out_data[path])
                 tan_idx += 1
             elif (
-                all_idx < len(has_tangent)
+                tan_idx < len(has_tangent)
                 and not is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):

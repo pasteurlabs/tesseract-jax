@@ -679,7 +679,7 @@ def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_vectoradd_tesseract_nondiffable_input(served_vectoradd_tesseract, use_jit):
-    vectoradd_tess = Tesseract(served_vectoradd_tesseract)
+    vectoradd_tess = Tesseract.from_url(served_vectoradd_tesseract)
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
     b = np.array([4.0, 5.0, 6.0], dtype="float32")
 
@@ -853,7 +853,7 @@ def test_missing_vjp_endpoint_error(served_tesseract_no_vjp):
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_pytree_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     def f(a):
         return apply_tesseract(dict_tess, inputs=a)
@@ -868,7 +868,7 @@ def test_pytree_tesseract_apply(served_pytree_tesseract, pytree_tess_inputs, use
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_pytree_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     diffable_inputs = {
         "alpha": pytree_tess_inputs["alpha"],
@@ -892,7 +892,7 @@ def test_pytree_tesseract_jvp(served_pytree_tesseract, pytree_tess_inputs, use_j
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_pytree_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_jit):
-    dict_tess = Tesseract(served_pytree_tesseract)
+    dict_tess = Tesseract.from_url(served_pytree_tesseract)
 
     diffable_inputs = {
         "alpha": pytree_tess_inputs["alpha"],
@@ -926,7 +926,7 @@ def test_pytree_tesseract_vjp(served_pytree_tesseract, pytree_tess_inputs, use_j
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_univariate_tesseract_loss_and_grad(served_univariate_tesseract_raw, use_jit):
     """Test Tesseract with loss function, parameterized for JIT and forward/backward modes."""
-    univariate_tess = Tesseract(served_univariate_tesseract_raw)
+    univariate_tess = Tesseract.from_url(served_univariate_tesseract_raw)
     x = np.array(1.0, dtype="float64")
     y = np.array(2.0, dtype="float64")
 

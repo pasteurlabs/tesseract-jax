@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import os
 import socket
 import subprocess
@@ -18,100 +19,188 @@ here = Path(__file__).parent
 jax.config.update("jax_enable_x64", True)
 
 
-def get_tesseract_folders():
-    tesseract_folders = [
-        "univariate_tesseract",
-        "nested_tesseract",
-        "non_abstract_tesseract",
-        "vectoradd_tesseract",
-        "pytree_tesseract",
-        # Add more as needed
-    ]
-    return tesseract_folders
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def find_free_port():
+def _find_free_port():
     """Find a free port to use for the test server."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("localhost", 0))
         return s.getsockname()[1]
 
 
-def make_tesseract_fixture(folder_name):
-    """Factory function to create tesseract fixtures for different folders.
+def _strip_functions_from_api(source: str, func_names: set[str]) -> str:
+    """Return *source* with top-level function definitions in *func_names* removed."""
+    tree = ast.parse(source)
+    # Collect line ranges (1-indexed) of functions to remove
+    remove_ranges: list[tuple[int, int]] = []
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in func_names and node.end_lineno is not None:
+                remove_ranges.append((node.lineno, node.end_lineno))
 
-    This fixture serves a Tesseract via `tesseract-runtime` for the specified folder.
-    This way, we can test with real Tesseracts without a running Docker daemon.
-    """
+    if not remove_ranges:
+        return source
 
-    @pytest.fixture(scope="session")
-    def served_tesseract(tmp_path_factory):
-        port = find_free_port()
-        timeout = 10
-
-        output_dir = tmp_path_factory.mktemp(f"tesseract_output_{folder_name}")
-
-        env = os.environ.copy()
-        env["TESSERACT_API_PATH"] = str(here / folder_name / "tesseract_api.py")
-        env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
-
-        # Start the server as a subprocess
-        process = subprocess.Popen(
-            [
-                "tesseract-runtime",
-                "serve",
-                "--host",
-                "localhost",
-                "--port",
-                str(port),
-            ],
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-
-        try:
-            start_time = time.time()
-            while True:
-                try:
-                    requests.get(f"http://localhost:{port}/health")
-                    break
-                except requests.exceptions.ConnectionError as exc:
-                    if time.time() - start_time > timeout:
-                        raise TimeoutError(
-                            f"Tesseract for {folder_name} did not start in time"
-                        ) from exc
-                    time.sleep(0.1)
-
-            yield f"http://localhost:{port}"
-        finally:
-            process.terminate()
-            process.communicate()
-
-    return served_tesseract
+    lines = source.splitlines(keepends=True)
+    keep: list[str] = []
+    for i, line in enumerate(lines, start=1):
+        if not any(start <= i <= end for start, end in remove_ranges):
+            keep.append(line)
+    return "".join(keep)
 
 
-served_univariate_tesseract_raw = make_tesseract_fixture("univariate_tesseract")
-served_nested_tesseract_raw = make_tesseract_fixture("nested_tesseract")
-served_non_abstract_tesseract = make_tesseract_fixture("non_abstract_tesseract")
-served_vectoradd_tesseract = make_tesseract_fixture("vectoradd_tesseract")
+def _serve_tesseract(tmp_path_factory, api_path: str | Path, *, name: str):
+    """Start a tesseract-runtime server and yield its URL."""
+    port = _find_free_port()
+    timeout = 10
 
-# Tesseracts with specific endpoints removed for testing error handling
-served_tesseract_no_jvp = make_tesseract_fixture("univariate_tesseract_no_jvp")
-served_tesseract_no_vjp = make_tesseract_fixture("univariate_tesseract_no_vjp")
-served_pytree_tesseract = make_tesseract_fixture("pytree_tesseract")
+    output_dir = tmp_path_factory.mktemp(f"tesseract_output_{name}")
+
+    env = os.environ.copy()
+    env["TESSERACT_API_PATH"] = str(api_path)
+    env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
+
+    process = subprocess.Popen(
+        [
+            "tesseract-runtime",
+            "serve",
+            "--host",
+            "localhost",
+            "--port",
+            str(port),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        start_time = time.time()
+        while True:
+            try:
+                requests.get(f"http://localhost:{port}/health")
+                break
+            except requests.exceptions.ConnectionError as exc:
+                if time.time() - start_time > timeout:
+                    raise TimeoutError(
+                        f"Tesseract {name!r} did not start in time"
+                    ) from exc
+                time.sleep(0.1)
+
+        yield f"http://localhost:{port}"
+    finally:
+        process.terminate()
+        process.communicate()
+
+
+def _load_tesseract(folder_name: str) -> Tesseract:
+    """Load a Tesseract directly from a test API file."""
+    return Tesseract.from_tesseract_api(f"tests/{folder_name}/tesseract_api.py")
+
+
+# ---------------------------------------------------------------------------
+# Served fixtures  (session-scoped, start a tesseract-runtime process)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def served_univariate_tesseract_raw(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "univariate_tesseract" / "tesseract_api.py",
+        name="univariate",
+    )
+
+
+@pytest.fixture(scope="session")
+def served_nested_tesseract_raw(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "nested_tesseract" / "tesseract_api.py",
+        name="nested",
+    )
+
+
+@pytest.fixture(scope="session")
+def served_non_abstract_tesseract(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "non_abstract_tesseract" / "tesseract_api.py",
+        name="non_abstract",
+    )
+
+
+@pytest.fixture(scope="session")
+def served_vectoradd_tesseract(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "vectoradd_tesseract" / "tesseract_api.py",
+        name="vectoradd",
+    )
+
+
+@pytest.fixture(scope="session")
+def served_pytree_tesseract(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "pytree_tesseract" / "tesseract_api.py",
+        name="pytree",
+    )
+
+
+# Tesseracts with specific endpoints removed — generated dynamically from
+# the base univariate_tesseract so we don't need separate directories.
+
+
+@pytest.fixture(scope="session")
+def served_tesseract_no_jvp(tmp_path_factory):
+    source = (here / "univariate_tesseract" / "tesseract_api.py").read_text()
+    stripped = _strip_functions_from_api(source, {"jacobian_vector_product"})
+    api_file = tmp_path_factory.mktemp("univariate_no_jvp") / "tesseract_api.py"
+    api_file.write_text(stripped)
+    yield from _serve_tesseract(tmp_path_factory, api_file, name="univariate_no_jvp")
+
+
+@pytest.fixture(scope="session")
+def served_tesseract_no_vjp(tmp_path_factory):
+    source = (here / "univariate_tesseract" / "tesseract_api.py").read_text()
+    stripped = _strip_functions_from_api(source, {"vector_jacobian_product"})
+    api_file = tmp_path_factory.mktemp("univariate_no_vjp") / "tesseract_api.py"
+    api_file.write_text(stripped)
+    yield from _serve_tesseract(tmp_path_factory, api_file, name="univariate_no_vjp")
+
+
+# ---------------------------------------------------------------------------
+# Direct-load fixtures  (function-scoped, no server needed)
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def pytree_tess() -> Tesseract:
-    """Load pytree_tesseract directly from the API file."""
-    return Tesseract.from_tesseract_api("tests/pytree_tesseract/tesseract_api.py")
+    return _load_tesseract("pytree_tesseract")
 
 
 @pytest.fixture
 def univariate_tess() -> Tesseract:
-    """Load univariate_tesseract directly from the API file."""
-    return Tesseract.from_tesseract_api("tests/univariate_tesseract/tesseract_api.py")
+    return _load_tesseract("univariate_tesseract")
+
+
+@pytest.fixture
+def vectoradd_tess() -> Tesseract:
+    return _load_tesseract("vectoradd_tesseract")
+
+
+@pytest.fixture
+def static_input_tess() -> Tesseract:
+    return _load_tesseract("static_input_tesseract")
+
+
+# ---------------------------------------------------------------------------
+# Shared test inputs
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -141,7 +230,7 @@ def pytree_tess_inputs() -> dict:
         [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0], dtype="float32"
     )  # shape (12,) non-differentiable
 
-    inputs = {
+    return {
         "alpha": {
             "x": x,
             "y": y,
@@ -151,11 +240,3 @@ def pytree_tess_inputs() -> dict:
         "epsilon": {"k": k, "m": m},
         "zeta": [z0, z1],
     }
-
-    return inputs
-
-
-@pytest.fixture
-def vectoradd_tess() -> Tesseract:
-    """Load vectoradd_tesseract directly from the API file."""
-    return Tesseract.from_tesseract_api("tests/vectoradd_tesseract/tesseract_api.py")
