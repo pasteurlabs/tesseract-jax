@@ -4,6 +4,7 @@
 from collections.abc import Sequence
 from typing import Any, TypeVar
 
+import jax
 import jax.core as jc
 import jax.numpy as jnp
 import jax.tree
@@ -436,10 +437,13 @@ def _is_array_schema(prop_schema: dict) -> bool:
 
 
 def _resolve_ref(ref: str, all_schemas: dict) -> dict:
-    """Resolve a $ref string like '#/components/schemas/Foo' to its schema dict."""
-    # ref format: "#/components/schemas/SchemaName"
+    """Resolve a $ref string like '#/components/schemas/Foo' to its schema dict.
+
+    OpenAPI schemas use JSON References to avoid duplication. Nested or shared types
+    in the Tesseract input schema are expressed as ``{"$ref": "#/components/schemas/Name"}``,
+    and this helper dereferences them so we can inspect the actual schema properties.
+    """
     parts = ref.lstrip("#/").split("/")
-    # We only have the schemas dict, so extract the schema name
     return all_schemas[parts[-1]]
 
 
@@ -455,7 +459,7 @@ def _coerce_array_input(value: Any, field_name: str) -> Any:
     the ``__array__`` protocol. Raises ``TypeError`` for Python sequences and other
     unsupported types.
     """
-    if isinstance(value, (jnp.ndarray, np.ndarray, jc.Tracer)):
+    if isinstance(value, (jax.Array, np.ndarray, jc.Tracer)):
         return value
     if _is_scalar(value) or hasattr(value, "__array__"):
         return jnp.asarray(value)
