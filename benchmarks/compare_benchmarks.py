@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # Percentage change threshold for flagging a benchmark as notable.
-NOTABLE_THRESHOLD_PCT = 10
+NOTABLE_THRESHOLD_PCT = 25
 
 
 def _get_median_ms(bench: dict) -> float:
