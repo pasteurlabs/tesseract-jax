@@ -243,6 +243,58 @@ def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
+def test_univariate_tesseract_vmap_vectorized(served_batched_tesseract, use_jit):
+    batched_tess = Tesseract.from_url(served_batched_tesseract)
+
+    def f(x, y):
+        return apply_tesseract(batched_tess, inputs=dict(x=x, y=y))["result"]
+
+    # add one batch dimension
+    for axes in [(0, 0), (0, None), (None, 0)]:
+        x = np.arange(3, dtype="float64") if axes[0] is not None else np.array(0.0)
+        y = np.arange(3, dtype="float64") if axes[1] is not None else np.array(0.0)
+        f_vmapped = jax.vmap(f, in_axes=axes)
+        raw_vmapped = jax.vmap(rosenbrock_impl, in_axes=axes)
+
+        if use_jit:
+            f_vmapped = jax.jit(f_vmapped)
+            raw_vmapped = jax.jit(raw_vmapped)
+
+        result = f_vmapped(x, y)
+        result_raw = raw_vmapped(x, y)
+
+        _assert_pytree_isequal(result, result_raw)
+
+        # add an additional batch dimension (nested vmap)
+        for extra_dim in [0, 1, -1]:
+            if axes[0] is not None:
+                x = np.arange(6, dtype="float64").reshape(2, 3)
+            if axes[1] is not None:
+                y = np.arange(6, dtype="float64").reshape(2, 3)
+
+            additional_axes = tuple(
+                extra_dim if ax is not None else None for ax in axes
+            )
+
+            for out_axis in [0, 1, -1]:
+                f_vmappedtwice = jax.vmap(
+                    f_vmapped, in_axes=additional_axes, out_axes=out_axis
+                )
+                raw_vmappedtwice = jax.vmap(
+                    raw_vmapped, in_axes=additional_axes, out_axes=out_axis
+                )
+
+                if use_jit:
+                    f_vmappedtwice = jax.jit(f_vmappedtwice)
+                    raw_vmappedtwice = jax.jit(raw_vmappedtwice)
+
+                result = f_vmappedtwice(x, y)
+                result_raw = raw_vmappedtwice(x, y)
+
+                _assert_pytree_isequal(result, result_raw)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
 def test_nested_tesseract_apply(served_nested_tesseract_raw, use_jit):
     nested_tess = Tesseract.from_tesseract_api(
         "tests/nested_tesseract/tesseract_api.py"

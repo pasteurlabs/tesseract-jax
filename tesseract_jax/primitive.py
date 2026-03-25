@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
+from itertools import compress
 from typing import Any, TypeVar
 
 import jax
@@ -18,6 +19,7 @@ from tesseract_core import Tesseract
 
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
+    _merge_path,
     _pytree_to_tesseract_flat,
     combine_args,
     unflatten_args,
@@ -270,6 +272,11 @@ def tesseract_dispatch_transpose_rule(
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
 
+def _is_ellipsis_template(template: str | None, diff_paths: dict[str, Any]) -> bool:
+    """Check if a matched schema template has ellipsis shape (no "shape" key)."""
+    return template is not None and "shape" not in diff_paths[template]
+
+
 def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
     if eval_func not in client.available_methods:
         raise NotImplementedError(
@@ -385,7 +392,76 @@ def tesseract_dispatch_batching(
         for arg, ax in zip(array_args, axes, strict=True)
     ]
 
-    is_batched_mask = [d is not batching.not_mapped for d in axes]
+    is_batched_mask = [ax is not batching.not_mapped for ax in axes]
+
+    # --- Auto-vectorization check (trace time, no stored state) ---
+    n_primals = len(is_static_mask) - sum(is_static_mask)
+
+    # Determine which primal args need to support a batch dimension
+    if eval_func == "jacobian_vector_product":
+        needs_ellipsis = [
+            b_p or b_t
+            for b_p, b_t in zip(
+                is_batched_mask[:n_primals], is_batched_mask[n_primals:], strict=True
+            )
+        ]
+    else:
+        needs_ellipsis = is_batched_mask[:n_primals]
+
+    if eval_func == "vector_jacobian_product" and any(is_batched_mask[n_primals:]):
+        # Tesseracts don't accept batched cotangent vectors
+        can_vectorize = False
+    else:
+        # Match each primal arg to its differentiable schema template.
+        # A field has "ellipsis" shape if its template has no "shape" key.
+        diff_paths = client.differentiable_input_paths
+        dummy_tree = jax.tree.unflatten(input_pytreedef, range(len(is_static_mask)))
+        flat_info = _pytree_to_tesseract_flat(dummy_tree, schema_paths=diff_paths)
+        primal_info = compress(flat_info.items(), (not s for s in is_static_mask))
+        primal_templates = [
+            _merge_path(path, diff_paths)[1] if val is not None else None
+            for path, val in primal_info
+        ]
+        is_ellipsis = [_is_ellipsis_template(t, diff_paths) for t in primal_templates]
+
+        # All args that need batching must be ellipsis-shaped
+        can_vectorize = all(
+            e for e, needed in zip(is_ellipsis, needs_ellipsis, strict=True) if needed
+        )
+
+    if can_vectorize:
+        batch_size = next(
+            arg.shape[0]
+            for arg, batched in zip(new_args, is_batched_mask, strict=True)
+            if batched
+        )
+
+        # JVP: broadcast primal/tangent to match if batch dims differ
+        if eval_func == "jacobian_vector_product":
+            for i in range(n_primals):
+                if is_batched_mask[i] != is_batched_mask[i + n_primals]:
+                    new_args[i], new_args[i + n_primals] = jnp.broadcast_arrays(
+                        new_args[i], new_args[i + n_primals]
+                    )
+
+        batched_output_avals = tuple(
+            ShapeDtypeStruct(shape=(batch_size, *aval.shape), dtype=aval.dtype)
+            for aval in output_avals
+        )
+        outvals = tesseract_dispatch_p.bind(
+            *new_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=batched_output_avals,
+            is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
+            client=client,
+            eval_func=eval_func,
+        )
+        return tuple(outvals), (0,) * len(outvals)
+
+    # Sequential fallback
     unbatched_args, batched_args = split_args(new_args, is_batched_mask)
 
     def _batch_fun(batched_args: tuple):

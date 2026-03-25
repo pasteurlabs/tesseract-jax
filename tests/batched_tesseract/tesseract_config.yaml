@@ -1,0 +1,4 @@
+name: "batched"
+version: "0.1.0"
+description: |
+  Unit tesseract that evaluates the rosenbrock function with a leading batch dimension.

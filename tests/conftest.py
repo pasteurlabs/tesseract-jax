@@ -151,6 +151,15 @@ def served_pytree_tesseract(tmp_path_factory):
     )
 
 
+@pytest.fixture(scope="session")
+def served_batched_tesseract(tmp_path_factory):
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "batched_tesseract" / "tesseract_api.py",
+        name="batched",
+    )
+
+
 # Tesseracts with specific endpoints removed — generated dynamically from
 # the base univariate_tesseract so we don't need separate directories.
 
