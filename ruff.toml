@@ -44,6 +44,7 @@ ignore = [
 [lint.extend-per-file-ignores]
 # Ignore missing docstrings and type annotations for selected directories
 "tests/*" = ["D101", "D102", "D103", "ANN"]
+"benchmarks/*" = ["D101", "D102", "D103", "D106", "ANN"]
 "examples/*" = ["D101", "D102", "D103", "ANN"]
 
 [lint.pydocstyle]
