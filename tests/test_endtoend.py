@@ -1048,3 +1048,71 @@ def test_univariate_tesseract_loss_and_grad(served_univariate_tesseract_raw, use
     grad_raw = grad_fn_raw(x, y)
 
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_scalar_inputs_coerced_to_arrays(served_univariate_tesseract_raw, use_jit):
+    """Test that Python scalars (float, int) are automatically converted to arrays."""
+    tess = Tesseract.from_url(served_univariate_tesseract_raw)
+
+    def f(inputs):
+        return apply_tesseract(tess, inputs)
+
+    if use_jit:
+        f = jax.jit(f)
+
+    # Python floats
+    result = f({"x": 0.0, "y": 0.0})
+    result_ref = apply_tesseract(tess, {"x": np.array(0.0), "y": np.array(0.0)})
+    _assert_pytree_isequal(result, result_ref)
+
+    # Python ints
+    result = f({"x": 0, "y": 0})
+    _assert_pytree_isequal(result, result_ref)
+
+    # Mixed scalar and array
+    result = f({"x": 0.0, "y": np.array(0.0)})
+    _assert_pytree_isequal(result, result_ref)
+
+
+def test_nested_scalar_inputs_coerced(served_nested_tesseract_raw):
+    """Test that scalars in nested schemas are coerced to arrays."""
+    tess = Tesseract.from_url(served_nested_tesseract_raw)
+    v = np.array([1.0, 2.0, 3.0], dtype="float32")
+    w = np.array([5.0, 7.0, 9.0], dtype="float32")
+
+    result = apply_tesseract(
+        tess,
+        {
+            "scalars": {"a": 1.0, "b": 2.0},
+            "vectors": {"v": v, "w": w},
+            "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+        },
+    )
+    result_ref = apply_tesseract(
+        tess,
+        {
+            "scalars": {
+                "a": np.array(1.0, dtype="float32"),
+                "b": np.array(2.0, dtype="float32"),
+            },
+            "vectors": {"v": v, "w": w},
+            "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+        },
+    )
+    _assert_pytree_isequal(result, result_ref)
+
+
+def test_list_inputs_rejected_for_array_fields(served_nested_tesseract_raw):
+    """Test that Python lists are rejected with a helpful error for array fields."""
+    tess = Tesseract.from_url(served_nested_tesseract_raw)
+
+    with pytest.raises(TypeError, match="expects an array, but got list"):
+        apply_tesseract(
+            tess,
+            {
+                "scalars": {"a": 1.0, "b": 2.0},
+                "vectors": {"v": [1.0, 2.0, 3.0], "w": [5.0, 7.0, 9.0]},
+                "other_stuff": {"s": "hello", "i": 3, "f": 2.718},
+            },
+        )
