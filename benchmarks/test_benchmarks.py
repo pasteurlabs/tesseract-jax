@@ -87,16 +87,18 @@ class TestVectoraddApi:
         self.a_v = create_test_array(array_size)
         self.b_v = create_test_array(array_size)
 
-    def test_vectoradd_api_vjp(self, benchmark):
-        """Benchmark reverse-mode AD (vjp) w.r.t. a.v via from_tesseract_api."""
+    def test_vectoradd_api_partial_vjp(self, benchmark):
+        """Benchmark reverse-mode AD (vjp) of vector_add.result w.r.t. a.v."""
         b_v = self.b_v
         a_v = self.a_v
+        cotangent = jnp.ones_like(a_v)
 
         def fn(a_v):
-            return apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            return out["vector_add"]["result"]
 
         def do_vjp():
-            primals, vjp_fn = jax.vjp(fn, a_v)
-            return vjp_fn(primals)
+            _, vjp_fn = jax.vjp(fn, a_v)
+            return vjp_fn(cotangent)
 
         benchmark(do_vjp)
