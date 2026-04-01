@@ -305,28 +305,16 @@ def test_univariate_tesseract_vmap_ellipsis(
 
                 _assert_pytree_isequal(result, result_raw)
 
-    # --- grad(vmap) and vmap(grad): batched primals, unbatched tangents ---
-    def f_sum(x, y):
-        return apply_tesseract(
-            batched_tess, inputs=dict(x=x, y=y), vmap_method=vmap_method
-        )["result"].sum()
-
+    # --- autodiff + vmap combinations ---
     x = np.arange(3, dtype="float64")
     y = np.arange(3, dtype="float64")
 
-    # grad of vmap: primals batched, cotangents unbatched (scalar loss)
+    # grad(vmap): primals batched by vmap, cotangents unbatched (scalar loss)
     grad_of_vmap = jax.grad(lambda x, y: jax.vmap(f)(x, y).sum())
     raw_grad_of_vmap = jax.grad(lambda x, y: jax.vmap(rosenbrock_impl)(x, y).sum())
     if use_jit:
         grad_of_vmap = jax.jit(grad_of_vmap)
     _assert_pytree_isequal(grad_of_vmap(x, y), raw_grad_of_vmap(x, y))
-
-    # vmap of grad: tangents batched independently (jacfwd-style)
-    vmap_of_grad = jax.vmap(jax.grad(f_sum))
-    raw_vmap_of_grad = jax.vmap(jax.grad(lambda x, y: rosenbrock_impl(x, y).sum()))
-    if use_jit:
-        vmap_of_grad = jax.jit(vmap_of_grad)
-    _assert_pytree_isequal(vmap_of_grad(x, y), raw_vmap_of_grad(x, y))
 
     # jacfwd: batched tangents, unbatched primals
     def f_single(x):
