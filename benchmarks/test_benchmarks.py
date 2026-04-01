@@ -23,10 +23,10 @@ from tesseract_jax import apply_tesseract
 
 jax.config.update("jax_enable_x64", True)
 
-# Use vmap_method="auto" if supported, fall back to default for older versions.
-# TODO: Remove once "auto" is supported on main
+# Use vmap_method="auto_experimental" if supported, fall back to default for older versions.
+# TODO: Remove once "auto_experimental" is supported on main
 _VMAP_KWARGS = (
-    {"vmap_method": "auto"}
+    {"vmap_method": "auto_experimental"}
     if "vmap_method" in inspect.signature(apply_tesseract).parameters
     else {}
 )
