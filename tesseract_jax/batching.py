@@ -22,7 +22,9 @@ from tesseract_jax.tree_util import (
     split_args,
 )
 
-VmapMethod = Literal["sequential", "auto", "expand_dims", "broadcast_all"]
+VmapMethod = (
+    Literal["sequential", "auto_experimental", "expand_dims", "broadcast_all"] | None
+)
 
 
 def _get_batch_size(new_args: list, is_batched_mask: list[bool]) -> int:
@@ -225,7 +227,7 @@ def broadcast_all(
     )
 
 
-def auto(
+def auto_experimental(
     new_args: list,
     is_batched_mask: list[bool],
     *,
@@ -243,9 +245,9 @@ def auto(
     """Auto-detect whether to vectorize based on the schema.
 
     Inspects the differentiable input schema at trace time: if all batched primal
-    args have ellipsis shape (``Array[..., dtype]``), sends a single Tesseract call
-    with the batch dimension and unbatched args passed through unchanged (the
-    Tesseract handles broadcasting). Otherwise falls back to sequential.
+    args have ellipsis shape (``Array[..., dtype]``), adds a leading ``(1,)``
+    dimension to unbatched args and sends a single batched Tesseract call.
+    Otherwise falls back to sequential.
     """
     kwargs = dict(
         static_args=static_args,
@@ -295,6 +297,11 @@ def auto(
     )
 
     if can_vectorize:
+        # expand_dims on unbatched args to avoid incorrect broadcasting under nested vmap
+        new_args = [
+            arg if batched else jnp.expand_dims(arg, 0)
+            for arg, batched in zip(new_args, is_batched_mask, strict=True)
+        ]
         return _dispatch_vectorized(
             new_args, is_batched_mask, batch_size, n_primals, **kwargs
         )
@@ -302,9 +309,19 @@ def auto(
     return sequential(new_args, is_batched_mask, **kwargs)
 
 
+def _raise_not_implemented(*args: Any, **kwargs: Any) -> None:
+    raise NotImplementedError(
+        "vmap/jacobian is not supported with vmap_method=None. "
+        "Pass vmap_method='sequential', 'expand_dims', 'broadcast_all', or 'auto_experimental' "
+        "to apply_tesseract to enable vmap support. "
+        "See https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/vmap-methods.html"
+    )
+
+
 VMAP_METHOD_DISPATCH: dict[VmapMethod, Any] = {
+    None: _raise_not_implemented,
     "sequential": sequential,
-    "auto": auto,
+    "auto_experimental": auto_experimental,
     "expand_dims": expand_dims,
     "broadcast_all": broadcast_all,
 }

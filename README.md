@@ -61,7 +61,7 @@ jax.grad(vector_sum)(x, y) # 🎉
    y = jnp.ones((1000,))
 
    def vector_sum(x, y):
-       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}})
+       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}}, vmap_method="sequential")
        return res["vector_add"]["result"].sum()
 
    vector_sum(x, y) # success!
@@ -72,6 +72,12 @@ jax.grad(vector_sum)(x, y) # 🎉
 
    vector_sum_grad = jax.grad(vector_sum)
    vector_sum_grad(x, y)
+
+   # vmap requires an explicit vmap_method — "sequential" is safe but slow
+   # while "auto_experimental" or "expand_dims" is more efficient for Tesseracts that support batching.
+   # See https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/vmap-methods.html
+   vector_sum_vmap = jax.vmap(vector_sum)
+   vector_sum_vmap(x.reshape(10, 100), y.reshape(10, 100))
    ```
 
 > [!TIP]

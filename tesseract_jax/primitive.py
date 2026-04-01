@@ -56,7 +56,7 @@ def tesseract_dispatch_abstract_eval(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
@@ -89,7 +89,7 @@ def tesseract_dispatch_jvp_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -185,7 +185,7 @@ def tesseract_dispatch_transpose_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -284,7 +284,7 @@ def tesseract_dispatch(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch lowering the computation.
 
@@ -325,7 +325,7 @@ def tesseract_dispatch_lowering(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
     _raise_if_unimplemented(eval_func, client)
@@ -373,7 +373,7 @@ def tesseract_dispatch_batching(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
@@ -526,7 +526,7 @@ def apply_tesseract(
     tesseract_client: Tesseract,
     inputs: Any,
     *,
-    vmap_method: VmapMethod = "sequential",
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -569,18 +569,25 @@ def apply_tesseract(
     Args:
         tesseract_client: The Tesseract object to apply.
         inputs: The inputs to apply to the Tesseract object.
-        vmap_method: Strategy for handling ``jax.vmap`` batching.
+        vmap_method: Strategy for handling ``jax.vmap`` batching. Must be set
+            explicitly when using ``jax.vmap``; raises ``NotImplementedError``
+            if ``jax.vmap`` is applied with the default ``None``.
 
-            ``"sequential"`` (default)
+            ``None`` (default)
+                No vmap support. Raises ``NotImplementedError`` if ``jax.vmap``
+                is applied. All other JAX transforms (jit, grad) work normally.
+
+            ``"sequential"``
                 Calls the Tesseract once per batch element via ``jax.lax.map``.
                 Safe for all Tesseracts regardless of schema.
 
-            ``"auto"``
-                Inspects the differentiable input schema at trace time. When
-                all batched differentiable inputs use ``Array[..., dtype]``
-                (ellipsis shape), sends a single call with the batch dimension
-                and passes unbatched args through unchanged (the Tesseract
-                handles broadcasting). Falls back to sequential otherwise.
+            ``"auto_experimental"``
+                Experimental. Inspects the differentiable input schema at trace
+                time. When all batched differentiable inputs use
+                ``Array[..., dtype]`` (ellipsis shape), adds a leading ``(1,)``
+                dim to unbatched args and sends a single batched call. Falls
+                back to sequential otherwise. Only considers differentiable
+                inputs; non-differentiable array inputs are not yet supported.
 
             ``"expand_dims"``
                 Adds a leading ``(1,)`` dimension to every unbatched array arg

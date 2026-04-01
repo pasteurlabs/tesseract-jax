@@ -159,7 +159,9 @@ def test_univariate_tesseract_jacobian(
 
     # make things callable without keyword args
     def f(x, y):
-        return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))["result"]
+        return apply_tesseract(
+            rosenbrock_tess, inputs=dict(x=x, y=y), vmap_method="auto_experimental"
+        )["result"]
 
     if jac_direction == "fwd":
         f = jax.jacfwd(f, argnums=(0, 1))
@@ -190,7 +192,7 @@ def test_univariate_tesseract_jacobian(
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-@pytest.mark.parametrize("vmap_method", ["sequential", "auto"])
+@pytest.mark.parametrize("vmap_method", ["sequential", "auto_experimental"])
 def test_univariate_tesseract_vmap_unbatched(
     served_univariate_tesseract_raw, use_jit, vmap_method
 ):
@@ -249,7 +251,7 @@ def test_univariate_tesseract_vmap_unbatched(
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize(
-    "vmap_method", ["sequential", "auto", "expand_dims", "broadcast_all"]
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
 )
 def test_univariate_tesseract_vmap_ellipsis(
     served_batched_tesseract, use_jit, vmap_method
@@ -277,33 +279,25 @@ def test_univariate_tesseract_vmap_ellipsis(
 
         _assert_pytree_isequal(result, result_raw)
 
-        # add an additional batch dimension (nested vmap)
-        for extra_dim in [0, 1, -1]:
-            if axes[0] is not None:
-                x = np.arange(6, dtype="float64").reshape(2, 3)
-            if axes[1] is not None:
-                y = np.arange(6, dtype="float64").reshape(2, 3)
+    # nested vmap: inner batches x, outer batches y (different variables, different shapes)
+    # Expected output shape: (2, 4, 3) = (outer_y, inner_x, element)
+    x_nested = np.arange(12, dtype="float64").reshape(4, 3)
+    y_nested = np.arange(6, dtype="float64").reshape(2, 3)
 
-            additional_axes = tuple(
-                extra_dim if ax is not None else None for ax in axes
-            )
+    f_inner = jax.vmap(f, in_axes=(0, None))  # batch over x: (4,3) -> 4 calls with (3,)
+    f_outer = jax.vmap(f_inner, in_axes=(None, 0))  # batch over y: (2,3) -> 2 calls
 
-            for out_axis in [0, 1, -1]:
-                f_vmappedtwice = jax.vmap(
-                    f_vmapped, in_axes=additional_axes, out_axes=out_axis
-                )
-                raw_vmappedtwice = jax.vmap(
-                    raw_vmapped, in_axes=additional_axes, out_axes=out_axis
-                )
+    raw_inner = jax.vmap(rosenbrock_impl, in_axes=(0, None))
+    raw_outer = jax.vmap(raw_inner, in_axes=(None, 0))
 
-                if use_jit:
-                    f_vmappedtwice = jax.jit(f_vmappedtwice)
-                    raw_vmappedtwice = jax.jit(raw_vmappedtwice)
+    if use_jit:
+        f_outer = jax.jit(f_outer)
+        raw_outer = jax.jit(raw_outer)
 
-                result = f_vmappedtwice(x, y)
-                result_raw = raw_vmappedtwice(x, y)
-
-                _assert_pytree_isequal(result, result_raw)
+    result = f_outer(x_nested, y_nested)
+    result_raw = raw_outer(x_nested, y_nested)
+    assert result.shape == (2, 4, 3)
+    _assert_pytree_isequal(result, result_raw)
 
     # --- autodiff + vmap combinations ---
     x = np.arange(3, dtype="float64")
@@ -331,7 +325,7 @@ def test_univariate_tesseract_vmap_ellipsis(
 
 @pytest.mark.parametrize("use_jit", [True, False])
 @pytest.mark.parametrize(
-    "vmap_method", ["sequential", "auto", "expand_dims", "broadcast_all"]
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
 )
 def test_vmap_primitive_numerics_not_batched(use_jit, vmap_method):
     """Primitive float/int inputs remain static under all vmap methods."""
@@ -376,6 +370,7 @@ def test_nested_tesseract_apply(served_nested_tesseract_raw, use_jit):
                 "vectors": {"v": v, "w": w},
                 "other_stuff": {"s": s, "i": i, "f": 2.718},
             },
+            vmap_method="auto_experimental",
         )
 
     if use_jit:
@@ -458,6 +453,7 @@ def test_nested_tesseract_vjp(served_nested_tesseract_raw, use_jit):
                 vectors={"v": v, "w": w},
                 other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
             ),
+            vmap_method="auto_experimental",
         )
         # stop_gradient on non-diff outputs so JAX produces symbolic zeros for them,
         # allowing the full primal to be passed back as cotangent to f_vjp
@@ -520,6 +516,7 @@ def test_nested_tesseract_jacobian(served_nested_tesseract_raw, use_jit, jac_dir
                 vectors={"v": v, "w": w},
                 other_stuff={"s": "hey!", "i": 1234, "f": 2.718},
             ),
+            vmap_method="auto_experimental",
         )
         # exclude non-diff outputs so jacrev doesn't receive concrete cotangents for them
         res["scalars"].pop("b")
@@ -574,6 +571,7 @@ def test_nested_tesseract_vmap(served_nested_tesseract_raw, use_jit):
                 "vectors": {"v": v, "w": w},
                 "other_stuff": {"s": s, "i": i, "f": 2.718},
             },
+            vmap_method="auto_experimental",
         )
 
     def f_raw(a, v, s, i):
@@ -637,6 +635,7 @@ def test_nested_tesseract_fori_loop(served_nested_tesseract_raw, use_jit):
                 "vectors": {"v": v, "w": w},
                 "other_stuff": {"s": s, "i": i, "f": 2.718},
             },
+            vmap_method="auto_experimental",
         )
 
     def f_raw(a, v, s, i):
@@ -688,6 +687,7 @@ def test_nested_tesseract_scan(served_nested_tesseract_raw, use_jit):
                 "vectors": {"v": v, "w": w},
                 "other_stuff": {"s": s, "i": i, "f": 2.718},
             },
+            vmap_method="auto_experimental",
         )
 
     def f_raw(a, v, s, i):

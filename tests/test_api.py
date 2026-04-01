@@ -386,11 +386,15 @@ def test_pytree_tesseract_jacobian(
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)
+        return apply_tesseract(
+            pytree_tess, inputs=inputs, vmap_method="auto_experimental"
+        )
 
     def f_closure(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        res = apply_tesseract(pytree_tess, inputs=inputs)
+        res = apply_tesseract(
+            pytree_tess, inputs=inputs, vmap_method="auto_experimental"
+        )
         res.pop("metadata")
         return res
 
