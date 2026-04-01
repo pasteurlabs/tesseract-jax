@@ -1,0 +1,4 @@
+name: "mixed_input"
+version: "0.1.0"
+description: |
+  Unit tesseract with ellipsis arrays and primitive float inputs.
