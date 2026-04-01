@@ -6,11 +6,11 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 
 
 class InputSchema(BaseModel):
-    data: Differentiable[Array[(..., None), Float32]]
+    data: Differentiable[Array[..., Float32]]
 
 
 class OutputSchema(BaseModel):
-    result: Differentiable[Array[(..., None), Float32]]
+    result: Differentiable[Array[..., Float32]]
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
