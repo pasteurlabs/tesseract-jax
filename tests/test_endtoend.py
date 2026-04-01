@@ -190,12 +190,17 @@ def test_univariate_tesseract_jacobian(
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
+@pytest.mark.parametrize("vmap_method", ["sequential", "auto"])
+def test_univariate_tesseract_vmap_unbatched(
+    served_univariate_tesseract_raw, use_jit, vmap_method
+):
     rosenbrock_tess = Tesseract.from_url(served_univariate_tesseract_raw)
 
     # make things callable without keyword args
     def f(x, y):
-        return apply_tesseract(rosenbrock_tess, inputs=dict(x=x, y=y))["result"]
+        return apply_tesseract(
+            rosenbrock_tess, inputs=dict(x=x, y=y), vmap_method=vmap_method
+        )["result"]
 
     # add one batch dimension
     for axes in [(0, 0), (0, None), (None, 0)]:
@@ -243,11 +248,18 @@ def test_univariate_tesseract_vmap(served_univariate_tesseract_raw, use_jit):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_univariate_tesseract_vmap_vectorized(served_batched_tesseract, use_jit):
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto", "expand_dims", "broadcast_all"]
+)
+def test_univariate_tesseract_vmap_ellipsis(
+    served_batched_tesseract, use_jit, vmap_method
+):
     batched_tess = Tesseract.from_url(served_batched_tesseract)
 
     def f(x, y):
-        return apply_tesseract(batched_tess, inputs=dict(x=x, y=y))["result"]
+        return apply_tesseract(
+            batched_tess, inputs=dict(x=x, y=y), vmap_method=vmap_method
+        )["result"]
 
     # add one batch dimension
     for axes in [(0, 0), (0, None), (None, 0)]:

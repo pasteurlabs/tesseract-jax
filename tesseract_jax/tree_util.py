@@ -1,11 +1,22 @@
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, TypeVar
 
 import jax.tree
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 
+T = TypeVar("T")
 PyTree: TypeAlias = Any
+
+
+def split_args(
+    flat_args: Sequence[T], mask: Sequence[bool]
+) -> tuple[tuple[T, ...], tuple[T, ...]]:
+    """Split a flat argument tuple according to mask (mask_False, mask_True)."""
+    lists: tuple[list, list] = ([], [])
+    for a, m in zip(flat_args, mask, strict=True):
+        lists[m].append(a)
+    return tuple(tuple(args) for args in lists)
 
 
 def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tuple:
