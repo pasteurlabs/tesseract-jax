@@ -76,16 +76,14 @@ def loss_fn(a, b):
 jax.grad(loss_fn)(a, b)  # ✅ stop_gradient prevents b from being differentiated
 ```
 
-
 ::::
-
 
 ## Non-differentiable outputs
 
 When an output is not marked as `Differentiable[...]` in the Tesseract schema, Tesseract-JAX makes the problem explicit rather than silently producing wrong gradients:
 
 - **Forward mode** (`jax.jvp`, `jax.jacfwd`): the tangent for the non-differentiable output is `NaN`, which propagates to any downstream computation that depends on it. A `ValueError` is not raised here because the JVP rule is executed before any post-processing (such as `pop` or `stop_gradient`) can discard the output.
-- **Reverse mode** (`jax.vjp`, `jax.grad`, `jax.jacrev`): passing any concrete value as the cotangent for a non-differentiable output raises a `ValueError`. Only a *symbolic zero* `jax._src.ad_util.Zero` is accepted. If you see this error, it most likely means you forgot to annotate an output as `Differentiable[...]` in the Tesseract schema.
+- **Reverse mode** (`jax.vjp`, `jax.grad`, `jax.jacrev`): passing any concrete value as the cotangent for a non-differentiable output raises a `ValueError`. Only a _symbolic zero_ `jax._src.ad_util.Zero` is accepted. If you see this error, it most likely means you forgot to annotate an output as `Differentiable[...]` in the Tesseract schema.
 
 In both modes, you can use one of these strategies to exclude or insulate the non-differentiable output from gradient computation:
 

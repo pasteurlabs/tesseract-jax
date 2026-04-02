@@ -23,7 +23,7 @@ All notable changes to this project will be documented in this file.
 - Divergence free /= incompressibility (#21)
 - Use has_side_effect=True in FFI calls (#44)
 - Update version in vectoradd_jax example to not result in invalid docker tag (#71)
-- *(deps)* Use jnp.moveaxis instead of jax.batching.moveaxis (#72)
+- _(deps)_ Use jnp.moveaxis instead of jax.batching.moveaxis (#72)
 - Broken link in docs (#76)
 
 ### Documentation

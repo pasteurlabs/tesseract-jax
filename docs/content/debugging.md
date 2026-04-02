@@ -135,7 +135,7 @@ result, intermediates = save_intermediates(my_pipeline)(inputs)
 
 ## Sharp edge: cotangent names can be misleading
 
-When using reverse-mode AD (`jax.grad`, `jax.vjp`), the cotangent captured at a `sow` point is the gradient flowing *backwards* through that point. This means the cotangent at `"after_tess1"` is really the gradient arriving *before* `tess1` in the backward pass — i.e., the gradient of the loss with respect to the *output* of `tess1`, not its input.
+When using reverse-mode AD (`jax.grad`, `jax.vjp`), the cotangent captured at a `sow` point is the gradient flowing _backwards_ through that point. This means the cotangent at `"after_tess1"` is really the gradient arriving _before_ `tess1` in the backward pass — i.e., the gradient of the loss with respect to the _output_ of `tess1`, not its input.
 
 In a two-step pipeline:
 
@@ -153,16 +153,16 @@ The forward pass flows left-to-right: `inputs → tess1 → [sow] → tess2 → 
 
 But the backward pass flows right-to-left: `loss → tess2 → [sow] → tess1 → inputs`
 
-So `intermediates["after_tess1"]["cotangent"]` contains the gradient *after* backpropagating through `tess2` but *before* backpropagating through `tess1`. A name like `"between_tess1_and_tess2"` is less ambiguous than `"after_tess1"`, since it describes the *location* in the graph rather than a direction.
+So `intermediates["after_tess1"]["cotangent"]` contains the gradient _after_ backpropagating through `tess2` but _before_ backpropagating through `tess1`. A name like `"between_tess1_and_tess2"` is less ambiguous than `"after_tess1"`, since it describes the _location_ in the graph rather than a direction.
 
 ## Summary of captured keys
 
 The keys present in each intermediate's dictionary depend on which JAX transformations are active:
 
-| Transformation       | Keys captured                    |
-|-----------------------|----------------------------------|
-| Plain call            | `primal`                         |
-| `jax.grad` / `jax.vjp` | `primal`, `cotangent`          |
-| `jax.jvp`            | `primal`, `tangent`              |
-| `jax.jacobian`       | `primal`, `cotangent` (per-column) |
-| `jax.jacfwd`       | `primal`, `tangent` (per-column)   |
+| Transformation         | Keys captured                      |
+| ---------------------- | ---------------------------------- |
+| Plain call             | `primal`                           |
+| `jax.grad` / `jax.vjp` | `primal`, `cotangent`              |
+| `jax.jvp`              | `primal`, `tangent`                |
+| `jax.jacobian`         | `primal`, `cotangent` (per-column) |
+| `jax.jacfwd`           | `primal`, `tangent` (per-column)   |
