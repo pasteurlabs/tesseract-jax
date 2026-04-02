@@ -40,7 +40,7 @@ For more detailed installation instructions, please refer to the [Tesseract Core
    y = jnp.ones((1000,))
 
    def vector_sum(x, y):
-       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}})
+       res = apply_tesseract(t, {"a": {"v": x}, "b": {"v": y}}, vmap_method="sequential")
        return res["vector_add"]["result"].sum()
 
    vector_sum(x, y) # success!
@@ -51,7 +51,16 @@ For more detailed installation instructions, please refer to the [Tesseract Core
 
    vector_sum_grad = jax.grad(vector_sum)
    vector_sum_grad(x, y)
+
+   # vmap requires an explicit vmap_method — "sequential" is safe but slow
+   # while "auto_experimental" or "expand_dims" is more efficient for Tesseracts that support batching.
+   vector_sum_vmap = jax.vmap(vector_sum)
+   vector_sum_vmap(x.reshape(10, 100), y.reshape(10, 100))
    ```
+
+```{seealso}
+See [Batching strategies for jax.vmap](vmap-methods.md) for a guide on selecting the appropriate `vmap_method`.
+```
 
 ```{tip}
 Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for ways to use Tesseract-JAX.

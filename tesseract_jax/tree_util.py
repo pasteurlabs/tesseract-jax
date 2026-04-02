@@ -1,11 +1,22 @@
-from collections.abc import Sequence
-from typing import Any, TypeAlias
+from collections.abc import Iterable, Sequence
+from typing import Any, TypeAlias, TypeVar
 
 import jax.tree
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 
+T = TypeVar("T")
 PyTree: TypeAlias = Any
+
+
+def split_args(
+    flat_args: Sequence[T], mask: Sequence[bool]
+) -> tuple[tuple[T, ...], tuple[T, ...]]:
+    """Split a flat argument tuple according to mask (mask_False, mask_True)."""
+    lists: tuple[list, list] = ([], [])
+    for a, m in zip(flat_args, mask, strict=True):
+        lists[m].append(a)
+    return tuple(tuple(args) for args in lists)
 
 
 def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tuple:
@@ -72,16 +83,18 @@ def _prune_nones(tree: PyTree) -> PyTree:
         return tree
 
 
-def _merge_path(explicit_path: str, array_paths: list[str]) -> tuple[str, bool]:
+def _merge_path(
+    explicit_path: str, array_paths: Iterable[str]
+) -> tuple[str, str | None]:
     """Merges and formats explicit path with array paths containing templates.
 
-    Returns a tuple of (formatted_path, matched) where matched indicates whether
-    the path matched any template in array_paths.
+    Returns a tuple of (formatted_path, matched_template) where matched_template
+    is the template string that matched, or None if no template matched.
 
     Examples:
-        _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', True)
-        _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', True)
-        _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', False)
+        _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
+        _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
+        _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
     """
     explicit_parts = explicit_path.split(".")
     for array_path in array_paths:
@@ -103,9 +116,9 @@ def _merge_path(explicit_path: str, array_paths: list[str]) -> tuple[str, bool]:
                 break
 
         if matched:
-            return ".".join(result_parts), True
+            return ".".join(result_parts), array_path
 
-    return explicit_path, False
+    return explicit_path, None
 
 
 def _pytree_to_tesseract_flat(
@@ -143,10 +156,10 @@ def _pytree_to_tesseract_flat(
         # remove leading dot
         tesseract_path = tesseract_path.lstrip(".")
 
-        tesseract_path, is_differentiable = _merge_path(
-            tesseract_path, list(schema_paths.keys()) if schema_paths else []
+        tesseract_path, matched_template = _merge_path(
+            tesseract_path, schema_paths or []
         )
 
-        flat_dict[tesseract_path] = val if is_differentiable else None
+        flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict

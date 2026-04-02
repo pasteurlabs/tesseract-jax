@@ -12,6 +12,8 @@ Measures execution time for noop and vectoradd_jax Tesseracts:
 
 from __future__ import annotations
 
+import inspect
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -20,6 +22,14 @@ from conftest import DEFAULT_ARRAY_SIZES, MAX_VMAP_ARRAY_SIZE, create_test_array
 from tesseract_jax import apply_tesseract
 
 jax.config.update("jax_enable_x64", True)
+
+# Use vmap_method="auto_experimental" if supported, fall back to default for older versions.
+# TODO: Remove once "auto_experimental" is supported on main
+_VMAP_KWARGS = (
+    {"vmap_method": "auto_experimental"}
+    if "vmap_method" in inspect.signature(apply_tesseract).parameters
+    else {}
+)
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -73,7 +83,9 @@ class TestNoopApi:
         """Benchmark vmap (batch_size=10) via from_tesseract_api."""
         if array_size > MAX_VMAP_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds vmap limit")
-        fn = jax.vmap(lambda data: apply_tesseract(self.tess, {"data": data}))
+        fn = jax.vmap(
+            lambda data: apply_tesseract(self.tess, {"data": data}, **_VMAP_KWARGS)
+        )
         benchmark(fn, self.batched_inputs["data"])
 
 

@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
-from typing import Any, TypeVar
+from typing import Any
 
 import jax
 import jax.core as jc
@@ -16,14 +16,13 @@ from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
+from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
-    combine_args,
+    split_args,
     unflatten_args,
 )
-
-T = TypeVar("T")
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
@@ -46,16 +45,6 @@ class _Hashable:
             return id(self.wrapped)
 
 
-def split_args(
-    flat_args: Sequence[T], mask: Sequence[bool]
-) -> tuple[tuple[T, ...], tuple[T, ...]]:
-    """Split a flat argument tuple according to mask (mask_False, mask_True)."""
-    lists = ([], [])
-    for a, m in zip(flat_args, mask, strict=True):
-        lists[m].append(a)
-    return tuple(tuple(args) for args in lists)
-
-
 @tesseract_dispatch_p.def_abstract_eval
 def tesseract_dispatch_abstract_eval(
     *array_args: ArrayLike | ShapedArray,
@@ -67,6 +56,7 @@ def tesseract_dispatch_abstract_eval(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
@@ -99,6 +89,7 @@ def tesseract_dispatch_jvp_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -161,6 +152,7 @@ def tesseract_dispatch_jvp_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="jacobian_vector_product",
+        vmap_method=vmap_method,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -173,6 +165,7 @@ def tesseract_dispatch_jvp_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="apply",
+        vmap_method=vmap_method,
     )
 
     return tuple(res), tuple(jvp)
@@ -192,6 +185,7 @@ def tesseract_dispatch_transpose_rule(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -262,6 +256,7 @@ def tesseract_dispatch_transpose_rule(
         has_tangent=has_tangent,
         client=client,
         eval_func="vector_jacobian_product",
+        vmap_method=vmap_method,
     )
 
     return tuple([None] * len(primal_args) + list(vjp))
@@ -289,6 +284,7 @@ def tesseract_dispatch(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch lowering the computation.
 
@@ -329,6 +325,7 @@ def tesseract_dispatch_lowering(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
     _raise_if_unimplemented(eval_func, client)
@@ -376,6 +373,7 @@ def tesseract_dispatch_batching(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
@@ -384,27 +382,23 @@ def tesseract_dispatch_batching(
         arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
     ]
+    is_batched_mask = [ax is not batching.not_mapped for ax in axes]
 
-    is_batched_mask = [d is not batching.not_mapped for d in axes]
-    unbatched_args, batched_args = split_args(new_args, is_batched_mask)
-
-    def _batch_fun(batched_args: tuple):
-        combined_args = combine_args(unbatched_args, batched_args, is_batched_mask)
-        return tesseract_dispatch_p.bind(
-            *combined_args,
-            static_args=static_args,
-            input_pytreedef=input_pytreedef,
-            output_pytreedef=output_pytreedef,
-            output_avals=output_avals,
-            is_static_mask=is_static_mask,
-            has_tangent=has_tangent,
-            client=client,
-            eval_func=eval_func,
-        )
-
-    outvals = jax.lax.map(_batch_fun, batched_args)
-
-    return tuple(outvals), (0,) * len(outvals)
+    batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
+    return batch_fn(
+        new_args,
+        is_batched_mask,
+        static_args=static_args,
+        input_pytreedef=input_pytreedef,
+        output_pytreedef=output_pytreedef,
+        output_avals=output_avals,
+        is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
+        client=client,
+        eval_func=eval_func,
+        vmap_method=vmap_method,
+        tesseract_dispatch_p=tesseract_dispatch_p,
+    )
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
@@ -531,6 +525,8 @@ def _validate_and_coerce_inputs(
 def apply_tesseract(
     tesseract_client: Tesseract,
     inputs: Any,
+    *,
+    vmap_method: VmapMethod = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -573,6 +569,43 @@ def apply_tesseract(
     Args:
         tesseract_client: The Tesseract object to apply.
         inputs: The inputs to apply to the Tesseract object.
+        vmap_method: Strategy for handling ``jax.vmap`` batching. Must be set
+            explicitly when using ``jax.vmap``; raises ``NotImplementedError``
+            if ``jax.vmap`` is applied with the default ``None``.
+
+            ``None`` (default)
+                No vmap support. Raises ``NotImplementedError`` if ``jax.vmap``
+                is applied. All other JAX transforms (jit, grad) work normally.
+
+            ``"sequential"``
+                Calls the Tesseract once per batch element via ``jax.lax.map``.
+                Safe for all Tesseracts regardless of schema.
+
+            ``"auto_experimental"``
+                Experimental. Inspects the differentiable input schema at trace
+                time. When all batched differentiable inputs use
+                ``Array[..., dtype]`` (ellipsis shape), adds a leading ``(1,)``
+                dim to unbatched args and sends a single batched call. Falls
+                back to sequential otherwise. Only considers differentiable
+                inputs; non-differentiable array inputs are not yet supported.
+
+            ``"expand_dims"``
+                Adds a leading ``(1,)`` dimension to every unbatched array arg
+                and sends a single batched call. The Tesseract must broadcast
+                ``(1, ...)`` against ``(batch, ...)`` internally. Use this when
+                the Tesseract accepts a leading batch dimension on all inputs.
+
+            ``"broadcast_all"``
+                Broadcasts every unbatched array arg to ``(batch, ...)``, so all
+                args share the same leading dimension. Use this when the Tesseract
+                requires all inputs to have identical shapes.
+
+            Python scalars (``float``, ``int``, ``bool``) are always static and
+            are never batched regardless of the chosen method. Scalar arrays
+            (0-d, e.g. ``Float64``) are treated as regular array args and will
+            be transformed according to the method.
+
+            See :doc:`/content/vmap-methods` for a detailed guide.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -581,6 +614,12 @@ def apply_tesseract(
         raise TypeError(
             "The first argument must be a Tesseract object. "
             f"Got {type(tesseract_client)} instead."
+        )
+
+    if vmap_method not in VMAP_METHOD_DISPATCH:
+        raise ValueError(
+            f"Unknown vmap_method: {vmap_method!r}. "
+            f"Must be one of {tuple(VMAP_METHOD_DISPATCH)}."
         )
 
     # Validate and coerce scalar / array-like inputs to JAX arrays where the schema expects them
@@ -645,6 +684,7 @@ def apply_tesseract(
             has_tangent=has_tangent,
             client=client,
             eval_func="apply",
+            vmap_method=vmap_method,
         )
 
         # Unflatten the output
@@ -664,6 +704,7 @@ def apply_tesseract(
             has_tangent=has_tangent,
             client=client,
             eval_func="apply",
+            vmap_method=vmap_method,
         )
 
         # Unflatten the output
