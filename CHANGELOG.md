@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-04-03
+
+### Features
+
+- Tests for fori and scan (#135)
+- Implement `sow` / `save_intermediates` for easier debugging of Tesseract pipelines (#150)
+- Support Python scalars and generic arrays as inputs to `apply_tesseract` (#155)
+- [**breaking**] Support "expand_dims"`, `"broadcast_all"` and `"auto"`, vmap methods. (#162)
+
+### Bug Fixes
+
+- Tesseracts with dictionary inputs fail (#127)
+- Better error messages for missing endpoints (#136)
+- Error message in fem example notebook (#144)
+- Partial derivatives + JIT causes error (#99)
+- VJP index bug with static args (#159)
+
+### Refactor
+
+- Move helpers to tree_util (#142)
+- Reduce code duplication in test suite (#161)
+
 ## [0.2.3] - 2025-12-12
 
 ### Features
@@ -23,7 +45,7 @@ All notable changes to this project will be documented in this file.
 - Divergence free /= incompressibility (#21)
 - Use has_side_effect=True in FFI calls (#44)
 - Update version in vectoradd_jax example to not result in invalid docker tag (#71)
-- _(deps)_ Use jnp.moveaxis instead of jax.batching.moveaxis (#72)
+- *(deps)* Use jnp.moveaxis instead of jax.batching.moveaxis (#72)
 - Broken link in docs (#76)
 
 ### Documentation
