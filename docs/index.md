@@ -21,7 +21,6 @@ Tesseract JAX is licensed under the [Apache License 2.0](https://github.com/past
 
 Tesseract is a registered trademark of Pasteur Labs, Inc. and may not be used without permission.
 
-
 ```{toctree}
 :caption: Usage
 :maxdepth: 2

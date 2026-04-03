@@ -5,11 +5,9 @@ from developers, engineers, scientists, and end-users in general. Contributions
 are what make the open source community such an amazing place to learn,
 inspire, and create. Any contributions you make are greatly appreciated.
 
-
 ## Code of Conduct
 
 Ensure your contributions adhere to the [Code of Conduct](CODE_OF_CONDUCT.md).
-
 
 ## Feedback
 
@@ -29,7 +27,6 @@ In case you have general questions or feedback, need support from the
 community, or have a cool demo to share, start a thread in our [Discourse
 Forum](https://si-tesseract.discourse.group/). We use GitHub Issues for bug
 reports and feature requests only.
-
 
 ## Documentation
 
@@ -55,7 +52,6 @@ Contributions in the form of tutorials, examples, demos, blog posts (including
 those posted elsewhere already) are best highlighted and celebrated in the
 [Discourse Forum](https://si-tesseract.discourse.group/).
 
-
 ## Code
 
 Tesseract-JAX is developed under the [Apache 2.0](LICENSE) license. By contributing
@@ -63,7 +59,6 @@ to the Tesseract-JAX project you agree that your code contributions are governed
 this license. We require you to sign our [Contributor License
 Agreement](https://github.com/pasteurlabs/pasteur-oss-cla/blob/main/README.md)
 to state so.
-
 
 ### Local development setup
 
@@ -128,6 +123,7 @@ following the specfication.
 
 The title consists of a _type_, and optional _scope_, and a short
 _description_: `type[(scope)]: description`. The types we use are:
+
 - `chore`: for changes that affect the build system, external dependencies, or
   general housekeeping.
 - `ci`: for changes in the CI.
@@ -140,6 +136,7 @@ _description_: `type[(scope)]: description`. The types we use are:
 - `test`: for adding new tests or fixing existing ones.
 
 The scopes we use are:
+
 - `cli`: for changes that affect CLI.
 - `engine`: for changes that affect the CLI engine.
 - `sdk`: for changes that affect the Python API.
@@ -151,13 +148,12 @@ In case there are breaking changes in your code, this should be indicated in
 the message either by appending an exclamation mark (`!`) after the type/scope
 or by adding a `BREAKING CHANGE:` trailer to the message.
 
-
 ## Versioning
 
 The Tesseract-JAX project follows [semantic versioning](https://semver.org).
 
-
 ## Release process
+
 (code owners only)
 
 Releases are done via GitHub Actions, which automatically build the release

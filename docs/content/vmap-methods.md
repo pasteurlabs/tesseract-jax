@@ -7,15 +7,14 @@ When you wrap an `apply_tesseract` call with `jax.vmap`, the `vmap_method` param
 - **Use `"expand_dims"`** when you know the Tesseract accepts a leading batch dimension on all inputs and handles broadcasting internally.
 - **Use `"auto_experimental"`** for Tesseracts with `Array[..., dtype]` schemas when you only ever vmap over differentiable inputs. It auto-detects when vectorization is safe and falls back to sequential otherwise.
 
-
 ## Quick reference
 
-| Method | Shape of unbatched args | Inspects InputSchema | Tesseract requirement |
-|---|---|---|---|
-| `"sequential"` | Unchanged (one call per element) | None | Any Tesseract |
-| `"broadcast_all"` | `(batch_size, ...)` | None | Must accept a leading batch dim |
-| `"expand_dims"` | `(1, ...)` | None | Must accept a leading batch dim |
-| `"auto_experimental"` | `(1, ...)` | Yes | `Array[..., dtype]` on all batched differentiable inputs |
+| Method                | Shape of unbatched args          | Inspects InputSchema | Tesseract requirement                                    |
+| --------------------- | -------------------------------- | -------------------- | -------------------------------------------------------- |
+| `"sequential"`        | Unchanged (one call per element) | None                 | Any Tesseract                                            |
+| `"broadcast_all"`     | `(batch_size, ...)`              | None                 | Must accept a leading batch dim                          |
+| `"expand_dims"`       | `(1, ...)`                       | None                 | Must accept a leading batch dim                          |
+| `"auto_experimental"` | `(1, ...)`                       | Yes                  | `Array[..., dtype]` on all batched differentiable inputs |
 
 ## Methods in detail
 
@@ -62,6 +61,7 @@ apply_tesseract(tess, inputs, vmap_method="auto_experimental")
 Inspects the Tesseract's InputSchema at JAX trace time. If all batched differentiable inputs use ellipsis shapes (`Array[..., dtype]`), adds a leading `(1,)` dimension to unbatched args and sends a single batched call. This is equivalent to `"expand_dims"` but only when the schema confirms it is safe, with a fallback to `"sequential"` otherwise. This method is considered experimental due to only supporting differentiable inputs (`Differentiable[...]`). Non-differentiable array inputs are not considered and will cause a fallback to sequential even if they have ellipsis shapes.
 
 Falls back to `"sequential"` when:
+
 - Any batched differentiable input has a fixed number of dimensions (e.g. `Array[(None,), Float32]`)
 - A batched input is non-differentiable (shape info not yet available in the schema)
 
@@ -69,12 +69,12 @@ Falls back to `"sequential"` when:
 
 The batching method only affects **array args** -- values that are JAX tracers at trace time. Values that are not tracers are treated as **static** and are never transformed by any method.
 
-| Input type | Example | Traced? | Batched by vmap methods? |
-|---|---|---|---|
-| Python scalar | `float`, `int`, `bool` | No (static) | Never |
-| Scalar array (0-d) | `jnp.float32(1.0)`, `Float64` | Yes | Yes |
-| Array | `jnp.ones((3,))` | Yes | Yes |
-| String / other | `"hello"` | No (static) | Never |
+| Input type         | Example                       | Traced?     | Batched by vmap methods? |
+| ------------------ | ----------------------------- | ----------- | ------------------------ |
+| Python scalar      | `float`, `int`, `bool`        | No (static) | Never                    |
+| Scalar array (0-d) | `jnp.float32(1.0)`, `Float64` | Yes         | Yes                      |
+| Array              | `jnp.ones((3,))`              | Yes         | Yes                      |
+| String / other     | `"hello"`                     | No (static) | Never                    |
 
 Scalar arrays (0-d) are treated as regular array args. Under `"expand_dims"`, a scalar `()` becomes `(1,)`. Under `"broadcast_all"`, it becomes `(batch,)`. If the Tesseract's schema expects a scalar (`Array[(), Float64]`), these methods may cause a shape mismatch -- use `"auto_experimental"` or `"sequential"` in that case.
 
