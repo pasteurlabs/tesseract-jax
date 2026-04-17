@@ -4,6 +4,7 @@
 from typing import Any
 
 import jax.tree
+import numpy as np
 from jax import ShapeDtypeStruct
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
@@ -15,6 +16,9 @@ from tesseract_jax.tree_util import (
     combine_args,
     unflatten_args,
 )
+
+# WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
+# and cannot safely allocate JAX arrays. Use vanilla numpy instead.
 
 
 class Jaxeract:
@@ -154,7 +158,7 @@ class Jaxeract:
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(jax.numpy.full_like(aval, jax.numpy.nan))
+                out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
 
         return tuple(out)
 
@@ -221,9 +225,9 @@ class Jaxeract:
                 # Non-differentiable but non-static input: return zero gradient
                 # with the same shape/dtype as the corresponding input array
                 out.append(
-                    jax.numpy.full(
+                    np.full(
                         array_args[array_idx].shape,
-                        jax.numpy.nan,
+                        np.nan,
                         dtype=array_args[array_idx].dtype,
                     )
                 )
