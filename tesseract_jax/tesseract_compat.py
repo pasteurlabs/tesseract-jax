@@ -158,7 +158,7 @@ class Jaxeract:
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(np.full_like(aval, np.nan))
+                out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
 
         return tuple(out)
 
