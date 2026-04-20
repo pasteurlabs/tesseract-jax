@@ -75,3 +75,25 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 ```
 
 - **Non-differentiable inputs/outputs**: Differentiating through inputs or outputs not marked as `Differentiable[...]` in the Tesseract schema can raise a `ValueError` or produce `NaN` tangents. See the [Handling Differentiability](handling-differentiability.md) page for details and workarounds.
+
+- **No JAX operations inside `from_tesseract_api` endpoints**: When using `Tesseract.from_tesseract_api(...)`, the `apply`, `vector_jacobian_product`, and `jacobian_vector_product` functions in your `tesseract_api.py` execute inside JAX FFI callbacks. **Using `jax.numpy` or any other JAX operation that allocates arrays in these functions can cause deadlocks**, because JAX's runtime is already holding a lock during the callback.
+
+  Use plain NumPy instead:
+
+  ```python
+  # ❌ Bad — will deadlock under jit/grad
+  import jax.numpy as jnp
+
+  def apply(inputs):
+      return OutputSchema(c=jnp.sin(inputs.a))
+
+  # ✅ Good — use numpy for in-process Tesseracts
+  import numpy as np
+
+  def apply(inputs):
+      return OutputSchema(c=np.sin(inputs.a))
+  ```
+
+  ```{note}
+  This only affects `from_tesseract_api` (in-process execution). Tesseracts served via Docker (`from_image`) run in a separate process and are not subject to this restriction.
+  ```
