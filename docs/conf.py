@@ -15,7 +15,7 @@ from tesseract_jax import __version__
 here = Path(__file__).parent.resolve()
 
 project = "Tesseract-JAX"
-copyright = "2025, Pasteur Labs"
+copyright = "2026, Pasteur Labs"
 author = "The Tesseract-JAX Team @ Pasteur Labs + OSS contributors"
 
 # The short X.Y version
@@ -60,7 +60,7 @@ intersphinx_mapping = {
     ),
 }
 
-templates_path = []
+templates_path = ["_templates"]
 exclude_patterns = ["build", "Thumbs.db", ".DS_Store"]
 
 
@@ -75,6 +75,10 @@ html_theme_options = {
     "sidebar_hide_name": True,
 }
 html_css_files = ["custom.css"]
+html_js_files = [
+    ("https://buttons.github.io/buttons.js", {"async": "async"}),
+    "external-links.js",
+]
 
 
 # -- Handle Jupyter notebooks ------------------------------------------------
