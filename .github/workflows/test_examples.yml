@@ -20,8 +20,6 @@ jobs:
 
         example:
           - simple
-          - cfd
-          - fem-shapeopt
 
       fail-fast: false
 

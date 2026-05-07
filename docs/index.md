@@ -39,8 +39,7 @@ content/api
 :hidden:
 
 examples/simple/demo.ipynb
-examples/cfd/demo.ipynb
-examples/fem-shapeopt/demo.ipynb
+
 ```
 
 ```{toctree}
@@ -48,6 +47,5 @@ examples/fem-shapeopt/demo.ipynb
 :maxdepth: 2
 :hidden:
 
-Tesseract Core docs <https://docs.pasteurlabs.ai/projects/tesseract-core/latest/>
 Tesseract User Forums <https://si-tesseract.discourse.group/>
 ```
