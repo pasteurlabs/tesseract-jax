@@ -74,11 +74,8 @@ html_theme_options = {
     "dark_logo": "logo-dark.png",
     "sidebar_hide_name": True,
 }
-html_css_files = ["top-nav.css", "custom.css"]
-html_js_files = [
-    ("https://buttons.github.io/buttons.js", {"async": "async"}),
-    "external-links.js",
-]
+html_css_files = ["custom.css"]
+html_js_files = []
 
 
 # -- Handle Jupyter notebooks ------------------------------------------------
@@ -92,3 +89,45 @@ for example_dir in Path("../examples").glob("*/"):
     shutil.copytree(
         example_dir, here / "examples" / example_dir.name, dirs_exist_ok=True
     )
+
+
+# ---------------------------------------------------------------------------
+# Fetch shared navbar assets from tesseract-core/main
+# ---------------------------------------------------------------------------
+_CORE_RAW = "https://raw.githubusercontent.com/pasteurlabs/tesseract-core/main/docs"
+_SHARED_FILES = {
+    here / "_templates" / "page.html": f"{_CORE_RAW}/_templates/page.html",
+    here / "static" / "top-nav.css": f"{_CORE_RAW}/static/top-nav.css",
+}
+
+
+def _fetch_shared_nav(_app):  # noqa: ANN001
+    import urllib.request
+
+    import sphinx.util.logging
+
+    logger = sphinx.util.logging.getLogger(__name__)
+
+    for dest, url in _SHARED_FILES.items():
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(url, dest)
+        except Exception as exc:
+            if dest.exists():
+                logger.warning(
+                    "could not fetch %s, using existing %s: %s",
+                    url,
+                    dest.name,
+                    exc,
+                )
+            else:
+                raise RuntimeError(
+                    f"Cannot fetch {url} and no local copy exists: {exc}"
+                ) from exc
+
+
+html_css_files.append("top-nav.css")
+
+
+def setup(app):  # noqa: ANN001, ANN201, D103
+    app.connect("builder-inited", _fetch_shared_nav)
