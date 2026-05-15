@@ -71,6 +71,10 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Shared navbar assets fetched from tesseract-core at build time
+docs/_templates/page.html
+docs/static/top-nav.css
+
 # PyBuilder
 target/
 
