@@ -1,0 +1,222 @@
+# Copyright 2025 Pasteur Labs. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Spike tests for the JVP/VJP-batching shortcut that calls the ``jacobian`` endpoint.
+
+When a JVP / VJP eqn is vmapped with primals unbatched and (co)tangents batched
+— the pattern produced by ``jax.jacfwd`` / ``jax.jacrev``,
+``lineax.materialise(FunctionLinearOperator)``, and optimistix's eye-vmap —
+the batching rule materialises the Jacobian once via the ``jacobian`` endpoint
+and contracts it against the batched (co)tangents instead of calling the
+``jvp`` / ``vjp`` endpoint per batch element.
+"""
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+from tesseract_jax import apply_tesseract
+
+
+def _spy_endpoints(tess, monkeypatch):
+    """Wrap jacobian / jvp / vjp endpoints with counters."""
+    counts = {"jacobian": 0, "jvp": 0, "vjp": 0}
+    orig_jac = tess.jacobian
+    orig_jvp = tess.jacobian_vector_product
+    orig_vjp = tess.vector_jacobian_product
+
+    def wj(*a, **kw):
+        counts["jacobian"] += 1
+        return orig_jac(*a, **kw)
+
+    def wjvp(*a, **kw):
+        counts["jvp"] += 1
+        return orig_jvp(*a, **kw)
+
+    def wvjp(*a, **kw):
+        counts["vjp"] += 1
+        return orig_vjp(*a, **kw)
+
+    monkeypatch.setattr(tess, "jacobian", wj)
+    monkeypatch.setattr(tess, "jacobian_vector_product", wjvp)
+    monkeypatch.setattr(tess, "vector_jacobian_product", wvjp)
+    return counts
+
+
+def test_jacfwd_uses_jacobian_endpoint(vectoradd_tess, monkeypatch):
+    """``jax.jacfwd`` hits the ``jacobian`` endpoint exactly once, never ``jvp``."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacfwd(f)(a)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_jacrev_uses_jacobian_endpoint(vectoradd_tess, monkeypatch):
+    """``jax.jacrev`` hits the ``jacobian`` endpoint exactly once, never ``vjp``."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacrev(f)(a)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["vjp"] == 0
+
+
+def test_jacfwd_chained_tesseracts(vectoradd_tess, monkeypatch):
+    """``jacfwd`` on ``tess(tess(a))`` uses 2 jacobian calls (one per Tesseract)."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b1 = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+    b2 = jnp.array([0.1, 0.2, 0.3], dtype="float32")
+
+    def f(a):
+        c1 = apply_tesseract(vectoradd_tess, dict(a=a, b=b1))["c"]
+        c2 = apply_tesseract(vectoradd_tess, dict(a=c1, b=b2))["c"]
+        return c2
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacfwd(f)(a)
+
+    # df/da = I @ I = I.
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 2
+    assert counts["jvp"] == 0
+
+
+def test_jacfwd_through_jit(vectoradd_tess, monkeypatch):
+    """``jacfwd`` of a ``jax.jit``-wrapped Tesseract call still uses the shortcut."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    @jax.jit
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacfwd(f)(a)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_jacfwd_residual_pattern(vectoradd_tess, monkeypatch):
+    """``f(a) = a + tess(a)`` — residual pattern. df/da = 2*I."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return a + apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacfwd(f)(a)
+
+    np.testing.assert_allclose(M, 2.0 * np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_explicit_vmap_of_jvp_uses_jacobian(vectoradd_tess, monkeypatch):
+    """``vmap(jvp_fn)(eye)`` (the optimistix / lineax materialise pattern) is intercepted."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    _primal, jvp_fn = jax.linearize(f, a)
+    eye = jnp.eye(3, dtype="float32")
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.vmap(jvp_fn)(eye)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_explicit_vmap_of_vjp_uses_jacobian(vectoradd_tess, monkeypatch):
+    """``vmap(vjp_fn)(eye)`` is intercepted too."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    _primal, vjp_fn = jax.vjp(f, a)
+    eye = jnp.eye(3, dtype="float32")
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    (M,) = jax.vmap(vjp_fn)(eye)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["vjp"] == 0
+
+
+def test_jvp_single_tangent_still_uses_jvp_endpoint(vectoradd_tess, monkeypatch):
+    """A plain ``jax.jvp`` (no vmap) still calls the ``jvp`` endpoint."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+    tangent = jnp.array([1.0, 0.0, 0.0], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    _, jvp_out = jax.jvp(f, (a,), (tangent,))
+
+    np.testing.assert_allclose(jvp_out, tangent, atol=1e-6)
+    assert counts["jacobian"] == 0
+    assert counts["jvp"] == 1
+
+
+def test_scalar_jacobian_fallback(univariate_tess, monkeypatch):
+    """Scalar (1x1) case still routes through the jacobian endpoint via vmap."""
+    x = jnp.array(1.0, dtype="float64")
+    y = jnp.array(2.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
+
+    counts = _spy_endpoints(univariate_tess, monkeypatch)
+    g = jax.jacfwd(f)(x)
+
+    # df/dx = -2(1-x) - 4*100*x*(y-x^2). At x=1, y=2: -2(0) - 400*1*1 = -400.
+    np.testing.assert_allclose(g, -400.0, rtol=1e-5)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
+    """The shortcut's numerical result matches a pure-JAX implementation."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f_tess(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    def f_jax(a):
+        return a + b  # the Tesseract's apply rule, in JAX
+
+    if use_jit:
+        f_tess = jax.jit(f_tess)
+        f_jax = jax.jit(f_jax)
+
+    M_tess = jax.jacfwd(f_tess)(a)
+    M_jax = jax.jacfwd(f_jax)(a)
+    np.testing.assert_allclose(M_tess, M_jax, rtol=1e-5)

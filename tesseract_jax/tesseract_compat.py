@@ -162,6 +162,79 @@ class Jaxeract:
 
         return tuple(out)
 
+    def jacobian(
+        self,
+        array_args: tuple[ArrayLike, ...],
+        static_args: tuple[Any, ...],
+        input_pytreedef: PyTreeDef,
+        output_pytreedef: PyTreeDef,
+        output_avals: tuple[ShapeDtypeStruct, ...],
+        is_static_mask: tuple[bool, ...],
+        has_tangent: tuple[bool, ...],
+        jac_input_paths: tuple[str, ...] | None = None,
+        jac_output_paths: tuple[str, ...] | None = None,
+    ) -> PyTree:
+        """Call the Tesseract's jacobian endpoint with the given arguments.
+
+        Mode-agnostic — returns the full Jacobian as ndarrays, one per
+        (requested_output, requested_input) pair, in row-major order
+        (outer = outputs, inner = inputs). Each array has shape
+        ``out_shape + in_shape``.
+
+        ``jac_input_paths`` / ``jac_output_paths`` (when provided) restrict the
+        request to a sub-block of the Jacobian and are forwarded to the
+        endpoint so the Tesseract computes exactly the block that was asked
+        for.
+        """
+        n_primals = len(is_static_mask) - sum(is_static_mask)
+        primals = array_args[:n_primals]
+
+        primal_inputs = unflatten_args(
+            primals, static_args, input_pytreedef, is_static_mask
+        )
+
+        if jac_input_paths is None:
+            flat_inputs = _pytree_to_tesseract_flat(
+                primal_inputs, schema_paths=self.differentiable_input_paths
+            )
+            jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
+        else:
+            jac_inputs = list(jac_input_paths)
+
+        if jac_output_paths is None:
+            output_flat = _pytree_to_tesseract_flat(
+                jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+                schema_paths=self.differentiable_output_paths,
+            )
+            jac_outputs = [p for p, v in output_flat.items() if v is not None]
+        else:
+            jac_outputs = list(jac_output_paths)
+
+        out_data = self.client.jacobian(
+            inputs=primal_inputs,
+            jac_inputs=jac_inputs,
+            jac_outputs=jac_outputs,
+        )
+
+        # Map each output path to its aval so we can coerce dtypes to match
+        # what abstract_eval declared (Tesseract servers may return wider
+        # dtypes than the schema specifies).
+        output_flat = _pytree_to_tesseract_flat(
+            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            schema_paths=self.differentiable_output_paths,
+        )
+        op_to_dtype = {
+            path: aval.dtype
+            for (path, v), aval in zip(output_flat.items(), output_avals, strict=True)
+            if v is not None
+        }
+        out = []
+        for op in jac_outputs:
+            dtype = op_to_dtype[op]
+            for ip in jac_inputs:
+                out.append(np.asarray(out_data[op][ip], dtype=dtype))
+        return tuple(out)
+
     def vector_jacobian_product(
         self,
         array_args: tuple[ArrayLike, ...],

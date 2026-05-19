@@ -2,6 +2,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any, TypeAlias, TypeVar
 
 import jax.tree
+from jax.core import ShapedArray
 from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 
@@ -38,7 +39,7 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    array_args: tuple[ArrayLike, ...],
+    array_args: tuple[ArrayLike | ShapedArray, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
     is_static_mask: tuple[bool, ...],
