@@ -226,8 +226,7 @@ class Jaxeract:
                 # placeholder of the same shape/dtype as the corresponding
                 # input array. The slot exists for tuple-length contract;
                 # JAX's transpose machinery doesn't consume it for any
-                # user-requested derivative. Mirrors the NaN sentinel used
-                # in the JVP path for non-differentiable outputs (line ~157).
+                # user-requested derivative.
                 out.append(
                     np.full(
                         array_args[array_idx].shape,
