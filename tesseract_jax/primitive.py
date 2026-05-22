@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 import jax
 import jax.core as jc
@@ -59,6 +59,7 @@ def tesseract_dispatch_abstract_eval(
     vmap_method: VmapMethod = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
     if eval_func not in (
@@ -111,15 +112,16 @@ def tesseract_dispatch_abstract_eval(
             if jac_output_paths is not None
             else list(out_path_to_aval.keys())
         )
+        # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
+        # input dtype (jacrev / `jax.jacobian`). Mirrors lineax's mode names.
         avals_out = []
         for op_path in jac_outputs:
             out_aval = out_path_to_aval[op_path]
             for ip in jac_inputs:
-                in_shape, _ = path_to_shape[ip]
+                in_shape, in_dtype = path_to_shape[ip]
+                dtype = in_dtype if jac_mode == "bwd" else out_aval.dtype
                 avals_out.append(
-                    jax.core.ShapedArray(
-                        tuple(out_aval.shape) + in_shape, out_aval.dtype
-                    )
+                    jax.core.ShapedArray(tuple(out_aval.shape) + in_shape, dtype)
                 )
         return tuple(avals_out)
 
@@ -337,6 +339,7 @@ def tesseract_dispatch(
     vmap_method: VmapMethod = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation.
 
@@ -348,6 +351,7 @@ def tesseract_dispatch(
     if eval_func == "jacobian":
         extra_kwargs["jac_input_paths"] = jac_input_paths
         extra_kwargs["jac_output_paths"] = jac_output_paths
+        extra_kwargs["jac_mode"] = jac_mode
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -386,6 +390,7 @@ def tesseract_dispatch_lowering(
     vmap_method: VmapMethod = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
     _raise_if_unimplemented(eval_func, client)
@@ -394,6 +399,7 @@ def tesseract_dispatch_lowering(
     if eval_func == "jacobian":
         extra_kwargs["jac_input_paths"] = jac_input_paths
         extra_kwargs["jac_output_paths"] = jac_output_paths
+        extra_kwargs["jac_mode"] = jac_mode
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -442,27 +448,15 @@ def tesseract_dispatch_batching(
     vmap_method: VmapMethod = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
 
-    # Eye-vmap shortcut for forward / reverse Jacobians.
-    #
-    # ``jax.jacfwd`` and ``jax.jacrev`` (and lineax's default
-    # ``materialise(FunctionLinearOperator)`` and optimistix's similar paths)
-    # work by vmapping the JVP / VJP rule with primals unbatched and the
-    # (co)tangents batched along a fresh axis. Per element of the batch this
-    # would call the Tesseract's JVP/VJP endpoint with a different basis
-    # vector — N endpoint calls for an N-dim input/output.
-    #
-    # When the Tesseract has a ``jacobian`` endpoint, we can do better:
-    # materialise the full Jacobian in *one* round trip, then contract it
-    # against the batched (co)tangents with pure-JAX ``tensordot``. This is
-    # the same matrix the eye-vmap would build up column-by-column, so the
-    # numerical result is identical — just at O(1) endpoint calls instead
-    # of O(N).
+    # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents batched,
+    # materialise the entire Jacobian and apply to batch with matmul
     if eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
         primal_axes = axes[:n_primals]
         tangent_axes = axes[n_primals:]
@@ -530,47 +524,52 @@ def _batched_via_jacobian(
     """
     n_primals = len(is_static_mask) - sum(is_static_mask)
     primals = tuple(array_args[:n_primals])  # unbatched
-    raw_cotans = array_args[n_primals:]
-    cotan_axes = axes[n_primals:]
+    raw_tans = array_args[n_primals:]
+    tan_axes = axes[n_primals:]
 
     # Identify the batch size from the first batched (co)tangent.
     batch_size = next(
         arg.shape[ax]
-        for arg, ax in zip(raw_cotans, cotan_axes, strict=True)
+        for arg, ax in zip(raw_tans, tan_axes, strict=True)
         if ax is not batching.not_mapped
     )
 
-    # Move batched (co)tangents' batch axis to 0; broadcast unbatched ones.
-    def _bring_batch_axis_front(arg: Any, ax: Any) -> Any:
+    # Bring each (co)tangent's batch axis to position 0; broadcast unbatched
+    # ones across the new leading axis.
+    def _to_batched(arg: Any, ax: Any) -> Any:
         if ax is batching.not_mapped:
             return jnp.broadcast_to(arg, (batch_size, *arg.shape))
         return jnp.moveaxis(arg, ax, 0)
 
-    cotans = tuple(
-        _bring_batch_axis_front(arg, ax)
-        for arg, ax in zip(raw_cotans, cotan_axes, strict=True)
-    )
+    tans = jax.tree.map(_to_batched, raw_tans, tan_axes)
 
-    # Get the path lists in the canonical order the ``jacobian`` endpoint
-    # uses, restricted to the non-static differentiable inputs (for JVP) or
-    # the diff outputs (for VJP).
     primal_inputs = unflatten_args(
         primals, static_args, input_pytreedef, is_static_mask
     )
     flat_inputs = _pytree_to_tesseract_flat(
         primal_inputs, schema_paths=client.differentiable_input_paths
     )
-    diff_input_paths = [p for p, v in flat_inputs.items() if v is not None]
-
     output_flat = _pytree_to_tesseract_flat(
         jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
         schema_paths=client.differentiable_output_paths,
     )
+
+    # Map each (schema-diff) ∧ (has_tangent) input path to its position among
+    # the JVP/VJP eqn's tangent inputs (= its non-static primal index).
+    # Excludes JAX-zero tangents (JVP) and non-requested gradients (VJP).
+    non_static_items = [
+        (p, v)
+        for (p, v), m in zip(flat_inputs.items(), is_static_mask, strict=True)
+        if not m
+    ]
+    diff_path_to_input_pos = {
+        p: i
+        for i, (p, v) in enumerate(non_static_items)
+        if v is not None and has_tangent[i]
+    }
+    diff_input_paths = list(diff_path_to_input_pos.keys())
     diff_output_paths = [p for p, v in output_flat.items() if v is not None]
 
-    # Bind the jacobian endpoint once. Result is a flat tuple of arrays in
-    # (out_path, in_path) row-major order; each array has shape
-    # ``out_shape + in_shape``.
     jac_arrays = tesseract_dispatch_p.bind(
         *primals,
         static_args=static_args,
@@ -584,123 +583,75 @@ def _batched_via_jacobian(
         vmap_method=None,
         jac_input_paths=tuple(diff_input_paths),
         jac_output_paths=tuple(diff_output_paths),
+        jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
     )
     n_in = len(diff_input_paths)
+    in_path_to_idx = {p: i for i, p in enumerate(diff_input_paths)}
+    out_path_to_idx = {p: i for i, p in enumerate(diff_output_paths)}
 
-    # Map: tangent / cotangent canonical positions ↔ jac slots.
-    #
-    # The JVP eqn has one cotan entry per non-static *primal* slot. The
-    # jacobian endpoint only returns columns for *differentiable* non-static
-    # inputs. Match them up by position.
+    # TODO(perf): for high-block-count tesseracts (many diff inputs by many
+    # diff outputs), consider replacing the per-block tensordot loop with a
+    # single flattened matmul (``v_flat @ J_flat.T`` + split/reshape). The
+    # current loop is clearer and XLA's fuser handles typical low-block-count
+    # cases; revisit if a real workload shows it's a bottleneck.
     if eval_func == "jacobian_vector_product":
-        # Output one batched array per output aval (shape: batch + out_shape).
-        # Skip non-diff outputs (would be NaN in the eye-vmap path).
-        out_path_to_idx = {p: i for i, p in enumerate(diff_output_paths)}
         outs: list[Any] = []
-        in_path_to_jvp_pos = _diff_path_to_nonstatic_position(
-            primal_inputs, is_static_mask, client.differentiable_input_paths
-        )
-        for path, v in output_flat.items():
-            aval = output_avals[len(outs)]
+        for i, (path, v) in enumerate(output_flat.items()):
+            aval = output_avals[i]
             if v is None:
-                # Non-diff output — match the eye-vmap behaviour (NaN-filled)
-                # so callers that branch on isnan keep working.
+                # NaN matches the eye-vmap behaviour for non-diff outputs;
+                # callers may branch on isnan.
                 outs.append(
                     jnp.full((batch_size, *aval.shape), jnp.nan, dtype=aval.dtype)
                 )
                 continue
             out_i = out_path_to_idx[path]
             acc = jnp.zeros((batch_size, *aval.shape), dtype=aval.dtype)
-            for in_path, jvp_pos in in_path_to_jvp_pos.items():
-                in_j = diff_input_paths.index(in_path)
-                jac = jac_arrays[out_i * n_in + in_j]
-                t = cotans[jvp_pos]
+            for in_path, input_pos in diff_path_to_input_pos.items():
+                jac = jac_arrays[out_i * n_in + in_path_to_idx[in_path]]
+                t = tans[input_pos]
                 acc = acc + _contract_jvp(jac, t, in_ndim=t.ndim - 1)
             outs.append(acc)
         return tuple(outs), (0,) * len(outs)
 
-    # eval_func == "vector_jacobian_product"
-    # VJP returns one gradient per non-static input (matching primal layout).
-    # JAX expects entries for every primal slot, even non-diff ones — fill
-    # with zeros.
-    in_path_to_idx = {p: i for i, p in enumerate(diff_input_paths)}
-    out_path_to_pos = _diff_path_to_pytree_position(
-        output_pytreedef,
-        len(output_avals),
-        client.differentiable_output_paths,
-    )
-    # Iterate flat_inputs in canonical order; for each non-static slot accumulate
-    # a gradient (zeros for non-diff slots, dot_general against ``jac`` for diff).
+    # Map each diff output path to its leaf index in the output pytree
+    # (= its position among VJP eqn's cotangent inputs).
+    out_path_to_pos = {
+        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
+    }
     grads: list[Any] = []
-    for (path, v), is_static in zip(flat_inputs.items(), is_static_mask, strict=True):
+    for (path, _v), is_static in zip(flat_inputs.items(), is_static_mask, strict=True):
         if is_static:
             continue
         primal = primals[len(grads)]
-        if v is None:
-            # Non-diff input — zero gradient with primal's shape.
-            grads.append(jnp.zeros((batch_size, *primal.shape), dtype=primal.dtype))
+        if path not in diff_path_to_input_pos:
+            # NaN matches the eye-vmap VJP rule's padding for non-diff /
+            # non-requested inputs.
+            grads.append(
+                jnp.full((batch_size, *primal.shape), jnp.nan, dtype=primal.dtype)
+            )
             continue
         in_j = in_path_to_idx[path]
         acc = jnp.zeros((batch_size, *primal.shape), dtype=primal.dtype)
         for out_path, out_pos in out_path_to_pos.items():
-            out_i = list(diff_output_paths).index(out_path)
-            jac = jac_arrays[out_i * n_in + in_j]
-            cot = cotans[out_pos]
+            jac = jac_arrays[out_path_to_idx[out_path] * n_in + in_j]
+            cot = tans[out_pos]
             acc = acc + _contract_vjp(jac, cot, out_ndim=cot.ndim - 1)
         grads.append(acc)
     return tuple(grads), (0,) * len(grads)
-
-
-def _diff_path_to_nonstatic_position(
-    primal_inputs: Any,
-    is_static_mask: tuple[bool, ...],
-    schema_input_paths: dict[str, Any],
-) -> dict[str, int]:
-    """Map each differentiable input path to its non-static primal index.
-
-    The returned index is its position among the JVP eqn's tangent inputs.
-    """
-    flat = _pytree_to_tesseract_flat(primal_inputs, schema_paths=schema_input_paths)
-    out: dict[str, int] = {}
-    nonstatic_idx = 0
-    for (path, v), m in zip(flat.items(), is_static_mask, strict=True):
-        if not m:
-            if v is not None:
-                out[path] = nonstatic_idx
-            nonstatic_idx += 1
-    return out
-
-
-def _diff_path_to_pytree_position(
-    output_pytreedef: PyTreeDef,
-    n_outputs: int,
-    schema_output_paths: dict[str, Any],
-) -> dict[str, int]:
-    """Map each differentiable output path to its leaf index in the output pytree.
-
-    The returned index is its position among the VJP eqn's cotangent inputs.
-    """
-    flat = _pytree_to_tesseract_flat(
-        jax.tree.unflatten(output_pytreedef, range(n_outputs)),
-        schema_paths=schema_output_paths,
-    )
-    return {p: i for i, (p, v) in enumerate(flat.items()) if v is not None}
 
 
 def _contract_jvp(jac: Any, t: Any, in_ndim: int) -> Any:
     """Contract a Jacobian with a batched tangent.
 
     ``jac`` has shape ``out_shape + in_shape``, batched ``t`` has shape
-    ``(B,) + in_shape``. Returns ``(B,) + out_shape``.
+    ``(B,) + in_shape``. Returns ``(B,) + out_shape`` with ``jac``'s dtype
+    (matching the dtype abstract_eval declared for ``jac``).
     """
-    if in_ndim == 0:
-        # Scalar input: jac shape == out_shape, t shape == (B,).
-        # Result: einsum('o..., b -> b o...', jac, t) == t[:, None, ...] * jac
-        return jnp.tensordot(t, jac, axes=0)
+    t = t.astype(jac.dtype)
     j_in_axes = tuple(range(jac.ndim - in_ndim, jac.ndim))
     t_in_axes = tuple(range(t.ndim - in_ndim, t.ndim))
     contracted = jnp.tensordot(jac, t, axes=(j_in_axes, t_in_axes))
-    # Result shape: out_shape + (B,); move batch axis to front.
     return jnp.moveaxis(contracted, -1, 0)
 
 
@@ -708,15 +659,12 @@ def _contract_vjp(jac: Any, cot: Any, out_ndim: int) -> Any:
     """Contract a Jacobian with a batched cotangent.
 
     ``jac`` has shape ``out_shape + in_shape``, batched ``cot`` has shape
-    ``(B,) + out_shape``. Returns ``(B,) + in_shape``.
+    ``(B,) + out_shape``. Returns ``(B,) + in_shape`` with ``jac``'s dtype.
     """
-    if out_ndim == 0:
-        # Scalar output: jac shape == in_shape, cot shape == (B,).
-        return jnp.tensordot(cot, jac, axes=0)
+    cot = cot.astype(jac.dtype)
     j_out_axes = tuple(range(out_ndim))
     c_out_axes = tuple(range(1, out_ndim + 1))
     contracted = jnp.tensordot(jac, cot, axes=(j_out_axes, c_out_axes))
-    # Result shape: in_shape + (B,); move batch axis to front.
     return jnp.moveaxis(contracted, -1, 0)
 
 

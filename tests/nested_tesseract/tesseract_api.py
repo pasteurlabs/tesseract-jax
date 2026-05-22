@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 
@@ -82,12 +83,15 @@ def vector_jacobian_product(
 
 
 def jacobian(inputs: InputSchema, jac_inputs: set[str], jac_outputs: set[str]):
-    jac = {dy: {dx: [0.0, 0.0, 0.0] for dx in jac_inputs} for dy in jac_outputs}
+    jac = {
+        dy: {dx: np.zeros((3,), dtype=np.float32) for dx in jac_inputs}
+        for dy in jac_outputs
+    }
 
     if "scalars.a" in jac_inputs and "scalars.a" in jac_outputs:
-        jac["scalars.a"]["scalars.a"] = 10.0
+        jac["scalars.a"]["scalars.a"] = np.float32(10.0)
     if "vectors.v" in jac_inputs and "vectors.v" in jac_outputs:
-        jac["vectors.v"]["vectors.v"] = [[10.0, 0, 0], [0, 10.0, 0], [0, 0, 10.0]]
+        jac["vectors.v"]["vectors.v"] = 10.0 * np.eye(3, dtype=np.float32)
 
     return jac
 

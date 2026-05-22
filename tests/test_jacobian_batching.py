@@ -11,6 +11,8 @@ and contracts it against the batched (co)tangents instead of calling the
 ``jvp`` / ``vjp`` endpoint per batch element.
 """
 
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -199,6 +201,97 @@ def test_scalar_jacobian_fallback(univariate_tess, monkeypatch):
     np.testing.assert_allclose(g, -400.0, rtol=1e-5)
     assert counts["jacobian"] == 1
     assert counts["jvp"] == 0
+
+
+def test_batched_vjp_dtype_compatible_with_scan(mixed_dtype_tess):
+    """``vmap(vjp_fn)`` must return input dtype; otherwise ``lax.scan`` errors.
+
+    JAX's VJP returns gradients in the *input* dtype. If the shortcut produces a
+    wider dtype, downstream consumers that strictly type-check — like
+    ``jax.lax.scan``'s carry — raise ``TypeError`` rather than silently casting.
+    This is a natural pattern (e.g. an iterative algorithm that uses the
+    Jacobian inside its loop body).
+    """
+    x = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+
+    def f(x):
+        return apply_tesseract(mixed_dtype_tess, dict(x=x))["y"]
+
+    def body(carry, _):
+        _, vjp_fn = jax.vjp(f, carry)
+        (g,) = jax.vmap(vjp_fn)(jnp.eye(3, dtype="float64"))
+        return g.sum(axis=0), None
+
+    final, _ = jax.lax.scan(body, x, None, length=2)
+    assert final.dtype == x.dtype
+
+
+def test_batched_jvp_dtype_matches_jax_convention(mixed_dtype_tess):
+    """``vmap(jvp_fn)`` must return output-dtype results (JAX convention)."""
+    x = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+
+    def f_tess(x):
+        return apply_tesseract(mixed_dtype_tess, dict(x=x))["y"]
+
+    def f_jax(x):
+        return x.astype(jnp.float64) * 2.0
+
+    _, jvp_jax = jax.linearize(f_jax, x)
+    _, jvp_tess = jax.linearize(f_tess, x)
+    eye_x = jnp.eye(3, dtype="float32")
+    out_jax = jax.vmap(jvp_jax)(eye_x)
+    out_tess = jax.vmap(jvp_tess)(eye_x)
+    assert out_tess.dtype == out_jax.dtype, (
+        f"vmap(jvp_fn): tess {out_tess.dtype} vs jax {out_jax.dtype}"
+    )
+
+
+def test_jacfwd_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
+    """``jacfwd`` wrt one of several diff inputs requests only that column."""
+    x = jnp.array(1.0, dtype="float64")
+    y = jnp.array(2.0, dtype="float64")
+
+    def f(x):
+        # `y` is also schema-differentiable but JAX won't carry a tangent for it.
+        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
+
+    captured: dict[str, Any] = {}
+    orig = univariate_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_inputs"] = list(jac_inputs)
+        captured["jac_outputs"] = list(jac_outputs)
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(univariate_tess, "jacobian", spy)
+    g = jax.jacfwd(f)(x)
+
+    np.testing.assert_allclose(g, -400.0, rtol=1e-5)
+    assert captured["jac_inputs"] == ["x"], (
+        f"expected only 'x' to be requested, got {captured['jac_inputs']}"
+    )
+
+
+def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
+    """``jacrev`` wrt one of several diff inputs requests only that column."""
+    x = jnp.array(1.0, dtype="float64")
+    y = jnp.array(2.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
+
+    captured: dict[str, Any] = {}
+    orig = univariate_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_inputs"] = list(jac_inputs)
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(univariate_tess, "jacobian", spy)
+    g = jax.jacrev(f)(x)
+
+    np.testing.assert_allclose(g, -400.0, rtol=1e-5)
+    assert captured["jac_inputs"] == ["x"]
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
