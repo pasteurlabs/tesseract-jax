@@ -606,12 +606,17 @@ def _batched_via_jacobian(
                 )
                 continue
             out_i = out_path_to_idx[path]
-            acc = jnp.zeros((batch_size, *aval.shape), dtype=aval.dtype)
+            acc: Any = None
             for in_path, input_pos in diff_path_to_input_pos.items():
                 jac = jac_arrays[out_i * n_in + in_path_to_idx[in_path]]
                 t = tans[input_pos]
-                acc = acc + _contract_jvp(jac, t, in_ndim=t.ndim - 1)
-            outs.append(acc)
+                contrib = _contract_jvp(jac, t, in_ndim=t.ndim - 1)
+                acc = contrib if acc is None else acc + contrib
+            outs.append(
+                acc
+                if acc is not None
+                else jnp.zeros((batch_size, *aval.shape), dtype=aval.dtype)
+            )
         return tuple(outs), (0,) * len(outs)
 
     # Map each diff output path to its leaf index in the output pytree
@@ -632,12 +637,17 @@ def _batched_via_jacobian(
             )
             continue
         in_j = in_path_to_idx[path]
-        acc = jnp.zeros((batch_size, *primal.shape), dtype=primal.dtype)
+        acc = None
         for out_path, out_pos in out_path_to_pos.items():
             jac = jac_arrays[out_path_to_idx[out_path] * n_in + in_j]
             cot = tans[out_pos]
-            acc = acc + _contract_vjp(jac, cot, out_ndim=cot.ndim - 1)
-        grads.append(acc)
+            contrib = _contract_vjp(jac, cot, out_ndim=cot.ndim - 1)
+            acc = contrib if acc is None else acc + contrib
+        grads.append(
+            acc
+            if acc is not None
+            else jnp.zeros((batch_size, *primal.shape), dtype=primal.dtype)
+        )
     return tuple(grads), (0,) * len(grads)
 
 
