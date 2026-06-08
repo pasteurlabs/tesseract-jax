@@ -14,7 +14,7 @@ click==8.4.1
     #   typer
 colorama==0.4.6 ; sys_platform == 'win32'
     # via click
-idna==3.17
+idna==3.18
     # via requests
 jax==0.6.2 ; python_full_version < '3.11'
     # via tesseract-jax
