@@ -4162,7 +4162,7 @@ docs = [
 requires-dist = [
     { name = "equinox", marker = "extra == 'dev'" },
     { name = "furo", marker = "extra == 'docs'" },
-    { name = "jax", specifier = ">=0.5.1" },
+    { name = "jax", specifier = ">=0.6.2" },
     { name = "myst-nb", marker = "extra == 'docs'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
