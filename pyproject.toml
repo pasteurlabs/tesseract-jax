@@ -8,7 +8,7 @@ authors = [
 requires-python = ">=3.10"
 # TODO: add your dependencies here *and* in requirements.txt
 dependencies = [
-    "jax>=0.5.1",
+    "jax>=0.6.2",
     "tesseract-core",
 ]
 dynamic = ["version"]
