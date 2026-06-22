@@ -119,7 +119,11 @@ class TestVectoraddApi:
         b_v = self.b_v
 
         def fn(a_v):
-            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            out = apply_tesseract(
+                self.tess,
+                _make_vectoradd_inputs(a_v, b_v),
+                vmap_method="sequential",
+            )
             return out["vector_add"]["result"]
 
         jac_fn = jax.jacfwd(fn)
@@ -133,7 +137,11 @@ class TestVectoraddApi:
         b_v = self.b_v
 
         def fn(a_v):
-            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            out = apply_tesseract(
+                self.tess,
+                _make_vectoradd_inputs(a_v, b_v),
+                vmap_method="sequential",
+            )
             return out["vector_add"]["result"]
 
         jac_fn = jax.jacrev(fn)
