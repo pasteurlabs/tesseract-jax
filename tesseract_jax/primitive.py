@@ -379,10 +379,10 @@ def tesseract_dispatch_batching(
     _raise_if_unimplemented(eval_func, client)
 
     new_args = [
-        arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
+        arg if ax is None else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
     ]
-    is_batched_mask = [ax is not batching.not_mapped for ax in axes]
+    is_batched_mask = [ax is not None for ax in axes]
 
     batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
     return batch_fn(
