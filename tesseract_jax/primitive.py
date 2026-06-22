@@ -923,8 +923,8 @@ def apply_tesseract(
             (e.g. to perform low-rank approximations or apply coloring
             methods) the sequential per-(co)tangent path (``False``) may be
             preferable. Note that the ``False`` path uses the ``vmap_method``
-            dispatch table: all non-``None`` methods route batched
-            (co)tangents through the sequential fall-back.
+            dispatch table and in reverse mode all non-``None`` methods route
+            batched cotangents through the sequential fall-back.
 
             ``True``
                 Whenever a ``jvp`` or ``vjp`` (co)tangent is batched, call the
@@ -934,7 +934,9 @@ def apply_tesseract(
                 not expose a ``jacobian`` endpoint.
 
             ``False``
-                Call the ``jacobian_vector_product``/``vector_jacobian_product``
+                For ``jacobian_vector_product`` use the `vmap_method` (which
+                could, for example. mean broadcasting/expanding primal dimensions
+                to match tangent). For ``vector_jacobian_product`` calls
                 endpoint once per (co)tangent (``jax.lax.map``). Useful for
                 low-rank approximations and coloring methods.
 
