@@ -599,8 +599,7 @@ def _batched_via_jacobian(
         for i, (path, v) in enumerate(output_flat.items()):
             aval = output_avals[i]
             if v is None:
-                # NaN matches the eye-vmap behaviour for non-diff outputs;
-                # callers may branch on isnan.
+                # NaN consistency with historical sequential jvp/vjp approach.
                 outs.append(
                     jnp.full((batch_size, *aval.shape), jnp.nan, dtype=aval.dtype)
                 )
@@ -630,8 +629,7 @@ def _batched_via_jacobian(
             continue
         primal = primals[len(grads)]
         if path not in diff_path_to_input_pos:
-            # NaN matches the eye-vmap VJP rule's padding for non-diff /
-            # non-requested inputs.
+            # NaN consistency with historical sequential jvp/vjp approach.
             grads.append(
                 jnp.full((batch_size, *primal.shape), jnp.nan, dtype=primal.dtype)
             )
