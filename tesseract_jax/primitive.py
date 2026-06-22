@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import operator
 from collections.abc import Sequence
 from typing import Any, Literal
 
@@ -57,6 +58,7 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -142,6 +144,7 @@ def tesseract_dispatch_jvp_rule(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -205,6 +208,7 @@ def tesseract_dispatch_jvp_rule(
         client=client,
         eval_func="jacobian_vector_product",
         vmap_method=vmap_method,
+        materialise_jacobian=materialise_jacobian,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -218,6 +222,7 @@ def tesseract_dispatch_jvp_rule(
         client=client,
         eval_func="apply",
         vmap_method=vmap_method,
+        materialise_jacobian=materialise_jacobian,
     )
 
     return tuple(res), tuple(jvp)
@@ -238,6 +243,7 @@ def tesseract_dispatch_transpose_rule(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -309,6 +315,7 @@ def tesseract_dispatch_transpose_rule(
         client=client,
         eval_func="vector_jacobian_product",
         vmap_method=vmap_method,
+        materialise_jacobian=materialise_jacobian,
     )
 
     return tuple([None] * len(primal_args) + list(vjp))
@@ -337,6 +344,7 @@ def tesseract_dispatch(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -388,6 +396,7 @@ def tesseract_dispatch_lowering(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -446,6 +455,7 @@ def tesseract_dispatch_batching(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -455,18 +465,27 @@ def tesseract_dispatch_batching(
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
 
-    # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents batched,
-    # materialise the entire Jacobian and apply to batch with matmul
+    # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents
+    # batched, materialise the entire Jacobian and apply to batch with matmul.
+    # Gated by ``materialise_jacobian`` (None = auto, True = force, False = skip).
     if eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
         primal_axes = axes[:n_primals]
         tangent_axes = axes[n_primals:]
         primals_unbatched = all(ax is batching.not_mapped for ax in primal_axes)
         tangents_batched = any(ax is not batching.not_mapped for ax in tangent_axes)
-        if (
+        endpoint_available = "jacobian" in client.available_methods
+        if materialise_jacobian is True and not endpoint_available:
+            raise RuntimeError(
+                "materialise_jacobian=True but the Tesseract does not expose a "
+                "'jacobian' endpoint."
+            )
+        use_shortcut = (
             primals_unbatched
             and tangents_batched
-            and "jacobian" in client.available_methods
-        ):
+            and materialise_jacobian is not False
+            and (materialise_jacobian is True or endpoint_available)
+        )
+        if use_shortcut:
             return _batched_via_jacobian(
                 array_args,
                 axes,
@@ -554,21 +573,25 @@ def _batched_via_jacobian(
         schema_paths=client.differentiable_output_paths,
     )
 
-    # Map each (schema-diff) ∧ (has_tangent) input path to its position among
-    # the JVP/VJP eqn's tangent inputs (= its non-static primal index).
-    # Excludes JAX-zero tangents (JVP) and non-requested gradients (VJP).
-    non_static_items = [
-        (p, v)
-        for (p, v), m in zip(flat_inputs.items(), is_static_mask, strict=True)
-        if not m
-    ]
-    diff_path_to_input_pos = {
-        p: i
-        for i, (p, v) in enumerate(non_static_items)
-        if v is not None and has_tangent[i]
+    # Map each (schema-diff) ∧ (has_tangent) input path to its position in
+    # ``tans``. ``keys()`` give the path order of the Jacobian's columns;
+    # ``values()`` give the corresponding ``tans`` positions. Excludes
+    # JAX-zero tangents (JVP) and non-requested gradients (VJP).
+    diff_input_path_to_pos: dict[str, int] = {}
+    non_static_idx = 0
+    for (p, v), is_static in zip(flat_inputs.items(), is_static_mask, strict=True):
+        if is_static:
+            continue
+        if v is not None and has_tangent[non_static_idx]:
+            diff_input_path_to_pos[p] = non_static_idx
+        non_static_idx += 1
+
+    # Map each diff output path to its leaf index in the output pytree.
+    # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
+    # the corresponding ``tans`` / ``output_avals`` positions.
+    diff_output_path_to_pos: dict[str, int] = {
+        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
     }
-    diff_input_paths = list(diff_path_to_input_pos.keys())
-    diff_output_paths = [p for p, v in output_flat.items() if v is not None]
 
     jac_arrays = tesseract_dispatch_p.bind(
         *primals,
@@ -581,99 +604,105 @@ def _batched_via_jacobian(
         client=client,
         eval_func="jacobian",
         vmap_method=None,
-        jac_input_paths=tuple(diff_input_paths),
-        jac_output_paths=tuple(diff_output_paths),
+        jac_input_paths=tuple(diff_input_path_to_pos),
+        jac_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
     )
-    n_in = len(diff_input_paths)
-    in_path_to_idx = {p: i for i, p in enumerate(diff_input_paths)}
-    out_path_to_idx = {p: i for i, p in enumerate(diff_output_paths)}
+    n_in = len(diff_input_path_to_pos)
+    n_out = len(diff_output_path_to_pos)
+    # Reshape the row-major (out, in) flat tuple into a 2D list-of-lists so
+    # indexing reads as ``jac_blocks[out_i][in_j]``.
+    jac_blocks = [[jac_arrays[i * n_in + j] for j in range(n_in)] for i in range(n_out)]
 
     # TODO(perf): for high-block-count tesseracts (many diff inputs by many
-    # diff outputs), consider replacing the per-block tensordot loop with a
+    # diff outputs), consider replacing the per-block matvec loop with a
     # single flattened matmul (``v_flat @ J_flat.T`` + split/reshape). The
     # current loop is clearer and XLA's fuser handles typical low-block-count
     # cases; revisit if a real workload shows it's a bottleneck.
-    if eval_func == "jacobian_vector_product":
-        outs: list[Any] = []
-        for i, (path, v) in enumerate(output_flat.items()):
-            aval = output_avals[i]
-            if v is None:
-                # NaN consistency with historical sequential jvp/vjp approach.
-                outs.append(
-                    jnp.full((batch_size, *aval.shape), jnp.nan, dtype=aval.dtype)
-                )
-                continue
-            out_i = out_path_to_idx[path]
-            acc: Any = None
-            for in_path, input_pos in diff_path_to_input_pos.items():
-                jac = jac_arrays[out_i * n_in + in_path_to_idx[in_path]]
-                t = tans[input_pos]
-                contrib = _contract_jvp(jac, t, in_ndim=t.ndim - 1)
-                acc = contrib if acc is None else acc + contrib
-            outs.append(
-                acc
-                if acc is not None
-                else jnp.zeros((batch_size, *aval.shape), dtype=aval.dtype)
-            )
-        return tuple(outs), (0,) * len(outs)
 
-    # Map each diff output path to its leaf index in the output pytree
-    # (= its position among VJP eqn's cotangent inputs).
-    out_path_to_pos = {
-        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
-    }
-    grads: list[Any] = []
-    for (path, _v), is_static in zip(flat_inputs.items(), is_static_mask, strict=True):
-        if is_static:
-            continue
-        primal = primals[len(grads)]
-        if path not in diff_path_to_input_pos:
-            # NaN consistency with historical sequential jvp/vjp approach.
-            grads.append(
-                jnp.full((batch_size, *primal.shape), jnp.nan, dtype=primal.dtype)
-            )
-            continue
-        in_j = in_path_to_idx[path]
-        acc = None
-        for out_path, out_pos in out_path_to_pos.items():
-            jac = jac_arrays[out_path_to_idx[out_path] * n_in + in_j]
-            cot = tans[out_pos]
-            contrib = _contract_vjp(jac, cot, out_ndim=cot.ndim - 1)
-            acc = contrib if acc is None else acc + contrib
-        grads.append(
-            acc
-            if acc is not None
-            else jnp.zeros((batch_size, *primal.shape), dtype=primal.dtype)
+    def _tree_sum(contribs: list[Any], slot: Any) -> Any:
+        """Sum ``contribs``, falling back to a ``(batch_size, *slot.shape)`` zero array."""
+        return jax.tree.reduce_associative(
+            operator.add,
+            contribs,
+            identity=jnp.zeros((batch_size, *slot.shape), dtype=slot.dtype),
         )
-    return tuple(grads), (0,) * len(grads)
+
+    def _pad_nans(
+        diff_results: list[Any],
+        full_order: Sequence[Any],  # one entry per slot with .shape and .dtype
+        is_diff: list[bool],  # True where the slot is a diff (computed) result
+    ) -> tuple:
+        """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
+
+        NaN consistency with historical sequential jvp/vjp approach.
+        """
+        out, k = [], 0
+        for item, diff in zip(full_order, is_diff, strict=True):
+            if diff:
+                out.append(diff_results[k])
+                k += 1
+            else:
+                out.append(
+                    jnp.full((batch_size, *item.shape), jnp.nan, dtype=item.dtype)
+                )
+        return tuple(out)
+
+    # Using ``diff_avals`` / ``diff_primals`` as the first arg to
+    # ``jax.tree.map`` pins iteration depth to the outer (n_out or n_in) list
+    # level: those are flat lists of leaves, so each rest-arg's subtree at
+    # that position is passed whole.
+
+    if eval_func == "jacobian_vector_product":
+        # Filter tangents to matrix-column order, then for each diff row sum
+        # the per-column matvec contributions.
+        filtered_tans = [tans[pos] for pos in diff_input_path_to_pos.values()]
+        diff_avals = [output_avals[i] for i in diff_output_path_to_pos.values()]
+        diff_outs = jax.tree.map(
+            lambda slot, jac_row: _tree_sum(
+                jax.tree.map(_matmul, jac_row, filtered_tans), slot
+            ),
+            diff_avals,
+            jac_blocks,
+        )
+        outs = _pad_nans(
+            diff_outs,
+            output_avals,
+            [v is not None for _p, v in output_flat.items()],
+        )
+        return outs, (0,) * len(outs)
+
+    # VJP: transpose the outer/inner list structure to iterate
+    # by column (one per diff input).
+    filtered_cots = [tans[pos] for pos in diff_output_path_to_pos.values()]
+    jac_cols = [list(col) for col in zip(*jac_blocks, strict=True)]
+    diff_primals = [primals[pos] for pos in diff_input_path_to_pos.values()]
+    diff_grads = jax.tree.map(
+        lambda slot, jac_col: _tree_sum(
+            jax.tree.map(_rmatmul, jac_col, filtered_cots), slot
+        ),
+        diff_primals,
+        jac_cols,
+    )
+    diff_pos_set = set(diff_input_path_to_pos.values())
+    grads = _pad_nans(
+        diff_grads,
+        primals,
+        [i in diff_pos_set for i in range(len(primals))],
+    )
+    return grads, (0,) * len(grads)
 
 
-def _contract_jvp(jac: Any, t: Any, in_ndim: int) -> Any:
-    """Contract a Jacobian with a batched tangent.
-
-    ``jac`` has shape ``out_shape + in_shape``, batched ``t`` has shape
-    ``(B,) + in_shape``. Returns ``(B,) + out_shape`` with ``jac``'s dtype
-    (matching the dtype abstract_eval declared for ``jac``).
-    """
-    t = t.astype(jac.dtype)
-    j_in_axes = tuple(range(jac.ndim - in_ndim, jac.ndim))
-    t_in_axes = tuple(range(t.ndim - in_ndim, t.ndim))
-    contracted = jnp.tensordot(jac, t, axes=(j_in_axes, t_in_axes))
-    return jnp.moveaxis(contracted, -1, 0)
+def _matmul(matrix: Any, batched_vector: Any) -> Any:
+    """Contract ``matrix``'s trailing axes against each row of ``batched_vector``."""
+    batched_vector = batched_vector.astype(matrix.dtype)
+    return jax.vmap(lambda v: jnp.tensordot(matrix, v, axes=v.ndim))(batched_vector)
 
 
-def _contract_vjp(jac: Any, cot: Any, out_ndim: int) -> Any:
-    """Contract a Jacobian with a batched cotangent.
-
-    ``jac`` has shape ``out_shape + in_shape``, batched ``cot`` has shape
-    ``(B,) + out_shape``. Returns ``(B,) + in_shape`` with ``jac``'s dtype.
-    """
-    cot = cot.astype(jac.dtype)
-    j_out_axes = tuple(range(out_ndim))
-    c_out_axes = tuple(range(1, out_ndim + 1))
-    contracted = jnp.tensordot(jac, cot, axes=(j_out_axes, c_out_axes))
-    return jnp.moveaxis(contracted, -1, 0)
+def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
+    """Contract each row of ``batched_vector`` against ``matrix``'s leading axes."""
+    batched_vector = batched_vector.astype(matrix.dtype)
+    return jnp.tensordot(batched_vector, matrix, axes=batched_vector.ndim - 1)
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
@@ -802,6 +831,7 @@ def apply_tesseract(
     inputs: Any,
     *,
     vmap_method: VmapMethod = None,
+    materialise_jacobian: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -881,6 +911,33 @@ def apply_tesseract(
             be transformed according to the method.
 
             See :doc:`/content/vmap-methods` for a detailed guide.
+        materialise_jacobian: Strategy for batching (co)tangents at a single
+            primal evaluation (i.e. ``vmap(lambda t: jvp(f, (x,), (t,)))``).
+            If you need access to the entire Jacobian through
+            ``jacfwd``/``jacrev`` the default of using the ``jacobian``
+            endpoint should be much more performant. However, if your Jacobian
+            is large and you are batching over a small number of (co)tangents
+            (e.g. to perform low-rank approximations or apply coloring
+            methods) the sequential per-(co)tangent path (``False``) may be
+            preferable. Note that the ``False`` path uses the ``vmap_method``
+            dispatch table: all non-``None`` methods route batched
+            (co)tangents through the sequential fall-back.
+
+            ``True``
+                Whenever a ``jvp`` or ``vjp`` (co)tangent is batched, call the
+                Tesseract's ``jacobian`` endpoint directly. Then use a PyTree-
+                compatible matmul to compute its action on the batch of
+                (co)tangents. Raises ``RuntimeError`` if the Tesseract does
+                not expose a ``jacobian`` endpoint.
+
+            ``False``
+                Call the ``jacobian_vector_product``/``vector_jacobian_product``
+                endpoint once per (co)tangent (``jax.lax.map``). Useful for
+                low-rank approximations and coloring methods.
+
+            ``None`` (default)
+                Auto: use ``True`` when the Tesseract has a ``jacobian``
+                endpoint, else fall back to ``False``.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -960,6 +1017,7 @@ def apply_tesseract(
             client=client,
             eval_func="apply",
             vmap_method=vmap_method,
+            materialise_jacobian=materialise_jacobian,
         )
 
         # Unflatten the output
@@ -980,6 +1038,7 @@ def apply_tesseract(
             client=client,
             eval_func="apply",
             vmap_method=vmap_method,
+            materialise_jacobian=materialise_jacobian,
         )
 
         # Unflatten the output

@@ -186,6 +186,52 @@ def test_jvp_single_tangent_still_uses_jvp_endpoint(vectoradd_tess, monkeypatch)
     assert counts["jvp"] == 1
 
 
+def test_materialise_jacobian_false_forces_sequential(vectoradd_tess, monkeypatch):
+    """``materialise_jacobian=False`` skips the shortcut even when the endpoint exists."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(
+            vectoradd_tess,
+            dict(a=a, b=b),
+            vmap_method="sequential",
+            materialise_jacobian=False,
+        )["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jacfwd(f)(a)
+
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 0
+    assert counts["jvp"] == 3  # N=3 eye-vmap columns
+
+
+def test_materialise_jacobian_true_errors_without_endpoint(vectoradd_tess, monkeypatch):
+    """``materialise_jacobian=True`` raises if the Tesseract has no ``jacobian`` endpoint."""
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    # Hide the ``jacobian`` endpoint from the Jaxeract wrapper.
+    from tesseract_jax.tesseract_compat import Jaxeract
+
+    orig_init = Jaxeract.__init__
+
+    def patched_init(self, tess):
+        orig_init(self, tess)
+        self.available_methods = [m for m in self.available_methods if m != "jacobian"]
+
+    monkeypatch.setattr(Jaxeract, "__init__", patched_init)
+
+    def f(a):
+        return apply_tesseract(
+            vectoradd_tess, dict(a=a, b=b), materialise_jacobian=True
+        )["c"]
+
+    with pytest.raises(RuntimeError, match="materialise_jacobian=True"):
+        jax.jacfwd(f)(a)
+
+
 def test_scalar_jacobian_fallback(univariate_tess, monkeypatch):
     """Scalar (1x1) case still routes through the jacobian endpoint via vmap."""
     x = jnp.array(1.0, dtype="float64")

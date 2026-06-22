@@ -12,24 +12,19 @@ Measures execution time for noop and vectoradd_jax Tesseracts:
 
 from __future__ import annotations
 
-import inspect
-
 import jax
 import jax.numpy as jnp
 import pytest
-from conftest import DEFAULT_ARRAY_SIZES, MAX_VMAP_ARRAY_SIZE, create_test_array
+from conftest import (
+    DEFAULT_ARRAY_SIZES,
+    MAX_JAC_ARRAY_SIZE,
+    MAX_VMAP_ARRAY_SIZE,
+    create_test_array,
+)
 
 from tesseract_jax import apply_tesseract
 
 jax.config.update("jax_enable_x64", True)
-
-# Use vmap_method="auto_experimental" if supported, fall back to default for older versions.
-# TODO: Remove once "auto_experimental" is supported on main
-_VMAP_KWARGS = (
-    {"vmap_method": "auto_experimental"}
-    if "vmap_method" in inspect.signature(apply_tesseract).parameters
-    else {}
-)
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
@@ -84,7 +79,9 @@ class TestNoopApi:
         if array_size > MAX_VMAP_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds vmap limit")
         fn = jax.vmap(
-            lambda data: apply_tesseract(self.tess, {"data": data}, **_VMAP_KWARGS)
+            lambda data: apply_tesseract(
+                self.tess, {"data": data}, vmap_method="auto_experimental"
+            )
         )
         benchmark(fn, self.batched_inputs["data"])
 
@@ -114,3 +111,31 @@ class TestVectoraddApi:
             return vjp_fn(cotangent)
 
         benchmark(do_vjp)
+
+    def test_vectoradd_api_jacfwd(self, benchmark, array_size):
+        """Forward-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
+        if array_size > MAX_JAC_ARRAY_SIZE:
+            pytest.skip(f"array_size {array_size} exceeds jacobian limit")
+        b_v = self.b_v
+
+        def fn(a_v):
+            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            return out["vector_add"]["result"]
+
+        jac_fn = jax.jacfwd(fn)
+        jac_fn(self.a_v)  # warmup
+        benchmark(jac_fn, self.a_v)
+
+    def test_vectoradd_api_jacrev(self, benchmark, array_size):
+        """Reverse-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
+        if array_size > MAX_JAC_ARRAY_SIZE:
+            pytest.skip(f"array_size {array_size} exceeds jacobian limit")
+        b_v = self.b_v
+
+        def fn(a_v):
+            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+            return out["vector_add"]["result"]
+
+        jac_fn = jax.jacrev(fn)
+        jac_fn(self.a_v)  # warmup
+        benchmark(jac_fn, self.a_v)
