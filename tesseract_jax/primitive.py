@@ -463,6 +463,9 @@ def tesseract_dispatch_batching(
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
 
+    # An unmapped axis is denoted by ``None``. (Older JAX versions exposed this
+    # as the ``batching.not_mapped`` sentinel, which has since been removed; it
+    # was always equal to ``None``.)
     n_primals = len(is_static_mask) - sum(is_static_mask)
 
     # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents
@@ -471,8 +474,8 @@ def tesseract_dispatch_batching(
     if eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
         primal_axes = axes[:n_primals]
         tangent_axes = axes[n_primals:]
-        primals_unbatched = all(ax is batching.not_mapped for ax in primal_axes)
-        tangents_batched = any(ax is not batching.not_mapped for ax in tangent_axes)
+        primals_unbatched = all(ax is None for ax in primal_axes)
+        tangents_batched = any(ax is not None for ax in tangent_axes)
         endpoint_available = "jacobian" in client.available_methods
         if materialise_jacobian is True and not endpoint_available:
             raise RuntimeError(
@@ -500,10 +503,10 @@ def tesseract_dispatch_batching(
             )
 
     new_args = [
-        arg if ax is batching.not_mapped else jnp.moveaxis(arg, ax, 0)
+        arg if ax is None else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
     ]
-    is_batched_mask = [ax is not batching.not_mapped for ax in axes]
+    is_batched_mask = [ax is not None for ax in axes]
 
     batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
     return batch_fn(
@@ -550,13 +553,13 @@ def _batched_via_jacobian(
     batch_size = next(
         arg.shape[ax]
         for arg, ax in zip(raw_tans, tan_axes, strict=True)
-        if ax is not batching.not_mapped
+        if ax is not None
     )
 
     # Bring each (co)tangent's batch axis to position 0; broadcast unbatched
     # ones across the new leading axis.
     def _to_batched(arg: Any, ax: Any) -> Any:
-        if ax is batching.not_mapped:
+        if ax is None:
             return jnp.broadcast_to(arg, (batch_size, *arg.shape))
         return jnp.moveaxis(arg, ax, 0)
 
