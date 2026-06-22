@@ -27,7 +27,7 @@ jobs:
           # test with oldest supported JAX version
           - python-version: "3.10"
             os: ubuntu-latest
-            jax-version: "0.5.1"
+            jax-version: "0.6.2"
 
       fail-fast: false
 
@@ -68,7 +68,7 @@ jobs:
             --cov=tesseract_jax
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v6.0.0
+        uses: codecov/codecov-action@v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: pasteurlabs/tesseract-jax

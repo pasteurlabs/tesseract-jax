@@ -77,16 +77,34 @@ def _serve_tesseract(tmp_path_factory, api_path: str | Path, *, name: str):
         stderr=subprocess.PIPE,
     )
 
+    def _server_output() -> str:
+        """Collect whatever the server process has printed so far."""
+        try:
+            stdout, stderr = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+        return (
+            f"--- {name} server stdout ---\n{stdout.decode(errors='replace')}\n"
+            f"--- {name} server stderr ---\n{stderr.decode(errors='replace')}"
+        )
+
     try:
         start_time = time.time()
         while True:
+            # Fail fast (and surface the reason) if the server already crashed.
+            if process.poll() is not None:
+                raise RuntimeError(
+                    f"Tesseract {name!r} server exited early with code "
+                    f"{process.returncode}\n{_server_output()}"
+                )
             try:
                 requests.get(f"http://localhost:{port}/health")
                 break
             except requests.exceptions.ConnectionError as exc:
                 if time.time() - start_time > timeout:
                     raise TimeoutError(
-                        f"Tesseract {name!r} did not start in time"
+                        f"Tesseract {name!r} did not start in time\n{_server_output()}"
                     ) from exc
                 time.sleep(0.1)
 

@@ -286,8 +286,11 @@ class Jaxeract:
                 and not is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):
-                # Non-differentiable but non-static input: return zero gradient
-                # with the same shape/dtype as the corresponding input array
+                # Non-differentiable but non-static input: return a NaN
+                # placeholder of the same shape/dtype as the corresponding
+                # input array. The slot exists for tuple-length contract;
+                # JAX's transpose machinery doesn't consume it for any
+                # user-requested derivative.
                 out.append(
                     np.full(
                         array_args[array_idx].shape,
