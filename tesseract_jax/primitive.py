@@ -72,8 +72,8 @@ def tesseract_dispatch_abstract_eval(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
@@ -94,7 +94,7 @@ def tesseract_dispatch_abstract_eval(
 
     if eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
-        # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
+        # `live_input_paths` / `live_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
@@ -118,13 +118,13 @@ def tesseract_dispatch_abstract_eval(
             if v is not None
         }
         jac_inputs = (
-            list(jac_input_paths)
-            if jac_input_paths is not None
+            list(live_input_paths)
+            if live_input_paths is not None
             else list(path_to_shape.keys())
         )
         jac_outputs = (
-            list(jac_output_paths)
-            if jac_output_paths is not None
+            list(live_output_paths)
+            if live_output_paths is not None
             else list(out_path_to_aval.keys())
         )
         # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
@@ -358,8 +358,8 @@ def tesseract_dispatch(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation.
@@ -370,8 +370,8 @@ def tesseract_dispatch(
 
     extra_kwargs: dict[str, Any] = {}
     if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
+        extra_kwargs["live_input_paths"] = live_input_paths
+        extra_kwargs["live_output_paths"] = live_output_paths
         extra_kwargs["jac_mode"] = jac_mode
 
     def _dispatch(*args: ArrayLike) -> Any:
@@ -410,8 +410,8 @@ def tesseract_dispatch_lowering(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
@@ -419,8 +419,8 @@ def tesseract_dispatch_lowering(
 
     extra_kwargs: dict[str, Any] = {}
     if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
+        extra_kwargs["live_input_paths"] = live_input_paths
+        extra_kwargs["live_output_paths"] = live_output_paths
         extra_kwargs["jac_mode"] = jac_mode
 
     def _dispatch(*args: ArrayLike) -> Any:
@@ -469,8 +469,8 @@ def tesseract_dispatch_batching(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
@@ -620,8 +620,8 @@ def _batched_via_jacobian(
         client=client,
         eval_func="jacobian",
         vmap_method=None,
-        jac_input_paths=tuple(diff_input_path_to_pos),
-        jac_output_paths=tuple(diff_output_path_to_pos),
+        live_input_paths=tuple(diff_input_path_to_pos),
+        live_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
     )
     n_in = len(diff_input_path_to_pos)

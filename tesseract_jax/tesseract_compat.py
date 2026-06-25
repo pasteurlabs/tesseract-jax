@@ -171,8 +171,8 @@ class Jaxeract:
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
-        jac_input_paths: tuple[str, ...] | None = None,
-        jac_output_paths: tuple[str, ...] | None = None,
+        live_input_paths: tuple[str, ...] | None = None,
+        live_output_paths: tuple[str, ...] | None = None,
         jac_mode: Literal["fwd", "bwd"] = "bwd",
     ) -> PyTree:
         """Call the Tesseract's jacobian endpoint with the given arguments.
@@ -193,19 +193,19 @@ class Jaxeract:
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if jac_input_paths is None:
+        if live_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(jac_input_paths)
+            jac_inputs = list(live_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
             jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
             schema_paths=self.differentiable_output_paths,
         )
-        if jac_output_paths is None:
+        if live_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(jac_output_paths)
+            jac_outputs = list(live_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,
