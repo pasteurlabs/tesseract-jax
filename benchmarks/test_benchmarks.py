@@ -142,8 +142,8 @@ class TestVectoraddApi:
             return out["vector_add"]["result"]
 
         jac_fn = jax.jit(jax.jacfwd(fn))
-        jac_fn(self.a_v)  # warmup
-        benchmark(jac_fn, self.a_v)
+        jax.block_until_ready(jac_fn(self.a_v))  # warmup
+        benchmark(lambda a: jax.block_until_ready(jac_fn(a)), self.a_v)
 
     def test_vectoradd_api_jacrev(self, benchmark, array_size):
         """Reverse-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
@@ -160,5 +160,5 @@ class TestVectoraddApi:
             return out["vector_add"]["result"]
 
         jac_fn = jax.jit(jax.jacrev(fn))
-        jac_fn(self.a_v)  # warmup
-        benchmark(jac_fn, self.a_v)
+        jax.block_until_ready(jac_fn(self.a_v))  # warmup
+        benchmark(lambda a: jax.block_until_ready(jac_fn(a)), self.a_v)
