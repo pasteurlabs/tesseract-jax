@@ -6,6 +6,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from pydantic import BaseModel, Field, model_validator
 from tesseract_core.runtime import Array, Differentiable, Float32
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
@@ -17,11 +18,11 @@ class Vector_and_Scalar(BaseModel):
     s: Differentiable[Array[..., Float32]] = Field(
         description="A scalar (or, under vmap, a batch of scalars broadcast-compatible "
         "with v's leading dims)",
-        default=1.0,
-        # Pydantic v2 skips default validation by default; opt in so the
-        # Python-float default gets coerced to a 0-d ``Float32`` array
-        # (otherwise downstream array ops like ``s[..., None]`` fail).
-        validate_default=True,
+        # Default is a 0-d ``Float32`` array (not a Python ``float``) so that
+        # downstream array ops like ``s[..., None]`` work even when the field
+        # is not explicitly supplied. Pydantic v2 skips default validation, so
+        # a bare ``1.0`` here would NOT be coerced to an array.
+        default=np.float32(1.0),
     )
 
     @model_validator(mode="after")
