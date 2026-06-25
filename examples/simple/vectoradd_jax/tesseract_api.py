@@ -6,6 +6,7 @@ from typing import Any
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from pydantic import BaseModel, Field, model_validator
 from tesseract_core.runtime import Array, Differentiable, Float32
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
@@ -13,13 +14,36 @@ from typing_extensions import Self
 
 
 class Vector_and_Scalar(BaseModel):
-    v: Differentiable[Array[(None,), Float32]] = Field(
-        description="An arbitrary vector"
+    v: Differentiable[Array[..., Float32]] = Field(description="An arbitrary vector")
+    s: Differentiable[Array[..., Float32]] = Field(
+        description="A scalar (or, under vmap, a batch of scalars broadcast-compatible "
+        "with v's leading dims)",
+        # Default is a 0-d ``Float32`` array (not a Python ``float``) so that
+        # downstream array ops like ``s[..., None]`` work even when the field
+        # is not explicitly supplied. Pydantic v2 skips default validation, so
+        # a bare ``1.0`` here would NOT be coerced to an array.
+        default=np.float32(1.0),
     )
-    s: Differentiable[Float32] = Field(description="A scalar", default=1.0)
 
-    def scale(self) -> Differentiable[Array[(None,), Float32]]:
-        return self.s * self.v
+    @model_validator(mode="after")
+    def validate_v_s_alignment(self) -> Self:
+        # ``s * v`` is implemented as ``s[..., None] * v``; the validator
+        # requires those two shapes to be broadcast-compatible. Use
+        # ``len(.shape)`` instead of ``.ndim`` so the check also runs on
+        # ``ShapeDType`` avals.
+        v_shape, s_shape = tuple(self.v.shape), tuple(self.s.shape)
+        try:
+            jnp.broadcast_shapes(v_shape, (*s_shape, 1))
+        except ValueError as exc:
+            raise ValueError(
+                f"v.shape={v_shape} and s.shape={s_shape} must be "
+                "broadcast-compatible (with a trailing singleton added to s "
+                "for the vector axis)."
+            ) from exc
+        return self
+
+    def scale(self) -> Differentiable[Array[..., Float32]]:
+        return self.s[..., None] * self.v
 
 
 class InputSchema(BaseModel):
@@ -37,19 +61,22 @@ class InputSchema(BaseModel):
 
     @model_validator(mode="after")
     def validate_shape_inputs(self) -> Self:
-        if self.a.v.shape != self.b.v.shape:
+        a_shape, b_shape = tuple(self.a.v.shape), tuple(self.b.v.shape)
+        try:
+            jnp.broadcast_shapes(a_shape, b_shape)
+        except ValueError as exc:
             raise ValueError(
-                f"a.v and b.v must have the same shape. "
-                f"Got {self.a.v.shape} and {self.b.v.shape} instead."
-            )
+                f"a.v and b.v must be broadcast-compatible. "
+                f"Got {a_shape} and {b_shape} instead."
+            ) from exc
         return self
 
 
 class Result_and_Norm(BaseModel):
-    result: Differentiable[Array[(None,), Float32]] = Field(
+    result: Differentiable[Array[..., Float32]] = Field(
         description="Vector s_a·a + s_b·b"
     )
-    normed_result: Differentiable[Array[(None,), Float32]] = Field(
+    normed_result: Differentiable[Array[..., Float32]] = Field(
         description="Normalized Vector s_a·a + s_b·b/|s_a·a + s_b·b|"
     )
 
@@ -61,15 +88,20 @@ class OutputSchema(BaseModel):
 
 @eqx.filter_jit
 def apply_jit(inputs: dict) -> dict:
-    a_scaled = inputs["a"]["s"] * inputs["a"]["v"]
-    b_scaled = inputs["b"]["s"] * inputs["b"]["v"]
+    # ``s`` is one rank lower than ``v``; add a trailing axis so it broadcasts
+    # against ``v`` correctly under vmap (where ``s`` may pick up leading dims).
+    a_scaled = inputs["a"]["s"][..., None] * inputs["a"]["v"]
+    b_scaled = inputs["b"]["s"][..., None] * inputs["b"]["v"]
     add_result = a_scaled + b_scaled
     min_result = a_scaled - b_scaled
 
     def safe_norm(x, ord):
-        # Compute the norm of a vector, adding a small epsilon to ensure
-        # differentiability and avoid division by zero
-        return jnp.power(jnp.power(jnp.abs(x), ord).sum() + 1e-8, 1 / ord)
+        # Compute the norm along the last axis (with a small epsilon to ensure
+        # differentiability and avoid division by zero). ``keepdims=True`` lets
+        # the result broadcast against ``x`` under leading batch dims.
+        return jnp.power(
+            jnp.power(jnp.abs(x), ord).sum(axis=-1, keepdims=True) + 1e-8, 1 / ord
+        )
 
     return {
         "vector_add": {
@@ -184,7 +216,10 @@ def jac_jit(
     jac_inputs: tuple[str],
     jac_outputs: tuple[str],
 ):
+    # ``jacfwd`` is the right default for this Tesseract: inputs and outputs
+    # have similar dimensionality (array-in, array-out), so the per-trace cost
+    # of forward-mode wins over reverse-mode's vmap-of-VJP.
     filtered_apply = filter_func(apply_jit, inputs, jac_outputs)
-    return jax.jacrev(filtered_apply)(
+    return jax.jacfwd(filtered_apply)(
         flatten_with_paths(inputs, include_paths=jac_inputs)
     )
