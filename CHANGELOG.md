@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-06-25
+
+### Features
+
+- Use jacobian endpoint  (#191)
+
+### Bug Fixes
+
+- Prevent random deadlocks by not allocating JAX memory from within callbacks (#177)
+
+### Refactor
+
+- Bump lowest supported JAX version to 0.6.2 (#201)
+
+### Documentation
+
+- Pull in new navbar from tesseract-core (#183)
+- Correct comment on VJP non-diff input placeholder (NaN, not zero) (#190)
+
 ## [0.3.0] - 2026-04-03
 
 ### Features
