@@ -5,8 +5,8 @@
 
 When a JVP / VJP eqn is vmapped with primals unbatched and (co)tangents batched
 — the pattern produced by ``jax.jacfwd`` / ``jax.jacrev``,
-``lineax.materialise(FunctionLinearOperator)``, and optimistix's eye-vmap —
-the batching rule materialises the Jacobian once via the ``jacobian`` endpoint
+``lineax.materialize(FunctionLinearOperator)``, and optimistix's eye-vmap —
+the batching rule materializes the Jacobian once via the ``jacobian`` endpoint
 and contracts it against the batched (co)tangents instead of calling the
 ``jvp`` / ``vjp`` endpoint per batch element.
 """
@@ -132,7 +132,7 @@ def test_jacfwd_residual_pattern(vectoradd_tess, monkeypatch):
 
 
 def test_explicit_vmap_of_jvp_uses_jacobian(vectoradd_tess, monkeypatch):
-    """``vmap(jvp_fn)(eye)`` (the optimistix / lineax materialise pattern) is intercepted."""
+    """``vmap(jvp_fn)(eye)`` (the optimistix / lineax materialize pattern) is intercepted."""
     a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
     b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
 
@@ -186,8 +186,8 @@ def test_jvp_single_tangent_still_uses_jvp_endpoint(vectoradd_tess, monkeypatch)
     assert counts["jvp"] == 1
 
 
-def test_materialise_jacobian_false_forces_sequential(vectoradd_tess, monkeypatch):
-    """``materialise_jacobian=False`` skips the shortcut even when the endpoint exists."""
+def test_materialize_jacobian_false_forces_sequential(vectoradd_tess, monkeypatch):
+    """``materialize_jacobian=False`` skips the shortcut even when the endpoint exists."""
     a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
     b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
 
@@ -196,7 +196,7 @@ def test_materialise_jacobian_false_forces_sequential(vectoradd_tess, monkeypatc
             vectoradd_tess,
             dict(a=a, b=b),
             vmap_method="sequential",
-            materialise_jacobian=False,
+            materialize_jacobian=False,
         )["c"]
 
     counts = _spy_endpoints(vectoradd_tess, monkeypatch)
@@ -207,8 +207,8 @@ def test_materialise_jacobian_false_forces_sequential(vectoradd_tess, monkeypatc
     assert counts["jvp"] == 3  # N=3 eye-vmap columns
 
 
-def test_materialise_jacobian_true_errors_without_endpoint(vectoradd_tess, monkeypatch):
-    """``materialise_jacobian=True`` raises if the Tesseract has no ``jacobian`` endpoint."""
+def test_materialize_jacobian_true_errors_without_endpoint(vectoradd_tess, monkeypatch):
+    """``materialize_jacobian=True`` raises if the Tesseract has no ``jacobian`` endpoint."""
     a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
     b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
 
@@ -225,10 +225,10 @@ def test_materialise_jacobian_true_errors_without_endpoint(vectoradd_tess, monke
 
     def f(a):
         return apply_tesseract(
-            vectoradd_tess, dict(a=a, b=b), materialise_jacobian=True
+            vectoradd_tess, dict(a=a, b=b), materialize_jacobian=True
         )["c"]
 
-    with pytest.raises(RuntimeError, match="materialise_jacobian=True"):
+    with pytest.raises(RuntimeError, match="materialize_jacobian=True"):
         jax.jacfwd(f)(a)
 
 

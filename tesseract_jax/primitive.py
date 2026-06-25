@@ -58,7 +58,7 @@ def tesseract_dispatch_abstract_eval(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -144,7 +144,7 @@ def tesseract_dispatch_jvp_rule(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -208,7 +208,7 @@ def tesseract_dispatch_jvp_rule(
         client=client,
         eval_func="jacobian_vector_product",
         vmap_method=vmap_method,
-        materialise_jacobian=materialise_jacobian,
+        materialize_jacobian=materialize_jacobian,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -222,7 +222,7 @@ def tesseract_dispatch_jvp_rule(
         client=client,
         eval_func="apply",
         vmap_method=vmap_method,
-        materialise_jacobian=materialise_jacobian,
+        materialize_jacobian=materialize_jacobian,
     )
 
     return tuple(res), tuple(jvp)
@@ -243,7 +243,7 @@ def tesseract_dispatch_transpose_rule(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -315,7 +315,7 @@ def tesseract_dispatch_transpose_rule(
         client=client,
         eval_func="vector_jacobian_product",
         vmap_method=vmap_method,
-        materialise_jacobian=materialise_jacobian,
+        materialize_jacobian=materialize_jacobian,
     )
 
     return tuple([None] * len(primal_args) + list(vjp))
@@ -344,7 +344,7 @@ def tesseract_dispatch(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -396,7 +396,7 @@ def tesseract_dispatch_lowering(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -455,7 +455,7 @@ def tesseract_dispatch_batching(
     client: Jaxeract,
     eval_func: str,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
     jac_input_paths: tuple[str, ...] | None = None,
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -469,24 +469,24 @@ def tesseract_dispatch_batching(
     n_primals = len(is_static_mask) - sum(is_static_mask)
 
     # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents
-    # batched, materialise the entire Jacobian and apply to batch with matmul.
-    # Gated by ``materialise_jacobian`` (None = auto, True = force, False = skip).
+    # batched, materialize the entire Jacobian and apply to batch with matmul.
+    # Gated by ``materialize_jacobian`` (None = auto, True = force, False = skip).
     if eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
         primal_axes = axes[:n_primals]
         tangent_axes = axes[n_primals:]
         primals_unbatched = all(ax is None for ax in primal_axes)
         tangents_batched = any(ax is not None for ax in tangent_axes)
         endpoint_available = "jacobian" in client.available_methods
-        if materialise_jacobian is True and not endpoint_available:
+        if materialize_jacobian is True and not endpoint_available:
             raise RuntimeError(
-                "materialise_jacobian=True but the Tesseract does not expose a "
+                "materialize_jacobian=True but the Tesseract does not expose a "
                 "'jacobian' endpoint."
             )
         use_shortcut = (
             primals_unbatched
             and tangents_batched
-            and materialise_jacobian is not False
-            and (materialise_jacobian is True or endpoint_available)
+            and materialize_jacobian is not False
+            and (materialize_jacobian is True or endpoint_available)
         )
         if use_shortcut:
             return _batched_via_jacobian(
@@ -834,7 +834,7 @@ def apply_tesseract(
     inputs: Any,
     *,
     vmap_method: VmapMethod = None,
-    materialise_jacobian: bool | None = None,
+    materialize_jacobian: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -914,35 +914,35 @@ def apply_tesseract(
             be transformed according to the method.
 
             See :doc:`/content/vmap-methods` for a detailed guide.
-        materialise_jacobian: Strategy for batching (co)tangents at a single
-            primal evaluation (i.e. ``vmap(lambda t: jvp(f, (x,), (t,)))``).
-            If you need access to the entire Jacobian through
-            ``jacfwd``/``jacrev`` the default of using the ``jacobian``
-            endpoint should be much more performant. However, if your Jacobian
-            is large and you are batching over a small number of (co)tangents
-            (e.g. to perform low-rank approximations or apply coloring
-            methods) the sequential per-(co)tangent path (``False``) may be
-            preferable. Note that the ``False`` path uses the ``vmap_method``
-            dispatch table and in reverse mode all non-``None`` methods route
-            batched cotangents through the sequential fall-back.
+        materialize_jacobian: Strategy for batching (co)tangents at a single
+            primal evaluation (e.g. ``jacfwd``, ``jacrev``,
+            ``vmap(lambda t: jvp(f, (x,), (t,)))``,
+            ``vmap(vjp(f, x)[1])``, ``vmap(linearize(f, x)[1])`` ...).
 
             ``True``
-                Whenever a ``jvp`` or ``vjp`` (co)tangent is batched, call the
-                Tesseract's ``jacobian`` endpoint directly. Then use a PyTree-
-                compatible matmul to compute its action on the batch of
-                (co)tangents. Raises ``RuntimeError`` if the Tesseract does
-                not expose a ``jacobian`` endpoint.
+                Call the Tesseract's ``jacobian`` endpoint directly and use a
+                PyTree-compatible matmul to compute its action on the batch of
+                (co)tangents.
 
             ``False``
-                For ``jacobian_vector_product`` use the `vmap_method` (which
-                could, for example. mean broadcasting/expanding primal dimensions
-                to match tangent). For ``vector_jacobian_product`` calls
-                endpoint once per (co)tangent (``jax.lax.map``). Useful for
-                low-rank approximations and coloring methods.
+                Batch ``jacobian_vector_product`` according to ``vmap_method`` (e.g.
+                ``vmap_method=auto_experimental`` would broadcast primals to match tangents).
+                If ``vmap_method`` is not ``None``, ``vector_jacobian_product`` will always
+                be called sequentially once per cotangent. ⚠️ If ``vmap_method=None``
+                and ``materialize_jacobian=False`` then batched (co)tangents are not supported
+                (a ``NotImplementedError`` will be raised).
 
             ``None`` (default)
                 Auto: use ``True`` when the Tesseract has a ``jacobian``
                 endpoint, else fall back to ``False``.
+
+            When batching over a large number of (co)tangents or
+            if you need access to the entire Jacobian through
+            ``jacfwd``/``jacrev`` the default of using the ``jacobian``
+            endpoint should be much more performant. However, if your Jacobian
+            is large and you are batching over a small number of (co)tangents
+            (e.g. to perform low-rank approximations or apply coloring
+            methods) ``False`` may be more efficient.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -1022,7 +1022,7 @@ def apply_tesseract(
             client=client,
             eval_func="apply",
             vmap_method=vmap_method,
-            materialise_jacobian=materialise_jacobian,
+            materialize_jacobian=materialize_jacobian,
         )
 
         # Unflatten the output
@@ -1043,7 +1043,7 @@ def apply_tesseract(
             client=client,
             eval_func="apply",
             vmap_method=vmap_method,
-            materialise_jacobian=materialise_jacobian,
+            materialize_jacobian=materialize_jacobian,
         )
 
         # Unflatten the output
