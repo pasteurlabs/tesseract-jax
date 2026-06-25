@@ -64,26 +64,37 @@ class TestNoopApi:
 
     def test_noop_api_apply_jit(self, benchmark):
         """Benchmark jitted apply (warm cache) via from_tesseract_api."""
-        fn = jax.jit(lambda: apply_tesseract(self.tess, self.inputs))
-        fn()
-        benchmark(fn)
+
+        @jax.jit
+        def fn(inputs):
+            return apply_tesseract(self.tess, inputs)
+
+        jax.block_until_ready(fn(self.inputs))
+        benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs)
 
     def test_noop_api_cast_float64(self, benchmark):
         """Benchmark jitted apply with float64 input (expects float32)."""
-        fn = jax.jit(lambda: apply_tesseract(self.tess, self.inputs_f64))
-        fn()
-        benchmark(fn)
+
+        @jax.jit
+        def fn(inputs):
+            return apply_tesseract(self.tess, inputs)
+
+        jax.block_until_ready(fn(self.inputs_f64))
+        benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs_f64)
 
     def test_noop_api_vmap(self, benchmark, array_size):
         """Benchmark vmap (batch_size=10) via from_tesseract_api."""
         if array_size > MAX_VMAP_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds vmap limit")
-        fn = jax.vmap(
-            lambda data: apply_tesseract(
-                self.tess, {"data": data}, vmap_method="auto_experimental"
+        fn = jax.jit(
+            jax.vmap(
+                lambda data: apply_tesseract(
+                    self.tess, {"data": data}, vmap_method="auto_experimental"
+                )
             )
         )
-        benchmark(fn, self.batched_inputs["data"])
+        jax.block_until_ready(fn(self.batched_inputs["data"]))
+        benchmark(lambda b: jax.block_until_ready(fn(b)), self.batched_inputs["data"])
 
 
 class TestVectoraddApi:
@@ -102,15 +113,19 @@ class TestVectoraddApi:
         a_v = self.a_v
         cotangent = jnp.ones_like(a_v)
 
-        def fn(a_v):
-            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a_v, b_v))
+        @jax.jit
+        def fn(a):
+            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a, b_v))
             return out["vector_add"]["result"]
 
-        def do_vjp():
-            _, vjp_fn = jax.vjp(fn, a_v)
-            return vjp_fn(cotangent)
+        @jax.jit
+        def do_vjp(args):
+            a, cot = args
+            _, vjp_fn = jax.vjp(fn, a)
+            return vjp_fn(cot)
 
-        benchmark(do_vjp)
+        jax.block_until_ready(do_vjp((a_v, cotangent)))
+        benchmark(lambda args: jax.block_until_ready(do_vjp(args)), (a_v, cotangent))
 
     def test_vectoradd_api_jacfwd(self, benchmark, array_size):
         """Forward-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
