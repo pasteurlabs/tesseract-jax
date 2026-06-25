@@ -26,11 +26,11 @@ VECTORADD_TESSERACT_PATH = (
 # Default array sizes when --array-sizes is not specified.
 DEFAULT_ARRAY_SIZES = [1_000, 100_000, 1_000_000, 10_000_000]
 
-# Smaller sizes for jacobian benchmarks (jacrev/jacfwd produce NxN matrices).
-DEFAULT_JAC_ARRAY_SIZES = [10, 100]
-
 # Maximum array size for vmap benchmarks (batch_size x array_size must fit in memory).
 MAX_VMAP_ARRAY_SIZE = 1_000_000
+
+# Maximum array size for jacobian benchmarks (jacrev/jacfwd produce NxN matrices).
+MAX_JAC_ARRAY_SIZE = 1_000
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

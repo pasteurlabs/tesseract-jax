@@ -49,6 +49,17 @@ def jacobian_vector_product(
     }
 
 
+def jacobian(
+    inputs: InputSchema,
+    jac_inputs: set[str],
+    jac_outputs: set[str],
+):
+    """Full Jacobian for c = a + b: dc/da = I; b is non-differentiable."""
+    n = inputs.a.shape[0]
+    eye = np.eye(n, dtype=np.float32)
+    return {dy: {dx: eye for dx in jac_inputs} for dy in jac_outputs}
+
+
 def vector_jacobian_product(
     inputs: InputSchema,
     vjp_inputs: set[str],
