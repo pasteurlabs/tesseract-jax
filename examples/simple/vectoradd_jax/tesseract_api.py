@@ -1,7 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any
+from typing import Any, Self
 
 import equinox as eqx
 import jax
@@ -10,7 +10,6 @@ import numpy as np
 from pydantic import BaseModel, Field, model_validator
 from tesseract_core.runtime import Array, Differentiable, Float32
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
-from typing_extensions import Self
 
 
 class Vector_and_Scalar(BaseModel):

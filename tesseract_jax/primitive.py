@@ -1,7 +1,6 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
 import operator
 from collections.abc import Sequence
 from typing import Any, Literal
@@ -28,18 +27,6 @@ from tesseract_jax.tree_util import (
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
-
-# ``jax.tree.reduce_associative`` was added in JAX 0.7.0; fall back to a plain
-# ``functools.reduce`` on older versions. Both honour the same identity-when-empty
-# semantics, so the call sites don't need to care which path runs.
-_HAS_TREE_REDUCE_ASSOCIATIVE = hasattr(jax.tree, "reduce_associative")
-
-
-def _reduce_sum(contribs: list[Any], identity: Any) -> Any:
-    """Sum ``contribs``; return ``identity`` when empty."""
-    if _HAS_TREE_REDUCE_ASSOCIATIVE:
-        return jax.tree.reduce_associative(operator.add, contribs, identity=identity)
-    return functools.reduce(operator.add, contribs) if contribs else identity
 
 
 class _Hashable:
@@ -638,8 +625,10 @@ def _batched_via_jacobian(
 
     def _tree_sum(contribs: list[Any], slot: Any) -> Any:
         """Sum ``contribs``, falling back to a ``(batch_size, *slot.shape)`` zero array."""
-        return _reduce_sum(
-            contribs, jnp.zeros((batch_size, *slot.shape), dtype=slot.dtype)
+        return jax.tree.reduce_associative(
+            operator.add,
+            contribs,
+            identity=jnp.zeros((batch_size, *slot.shape), dtype=slot.dtype),
         )
 
     def _pad_nans(

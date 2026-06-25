@@ -13,21 +13,21 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         # NOTE: If bumping the minimum Python version here, also do it in
-        # ruff.toml, setup.py and other CI files as well.
+        # pyproject.toml, ruff.toml, and other CI files as well.
 
         # test with oldest and latest supported Python versions
-        python-version: ["3.10", "3.13"]
+        python-version: ["3.11", "3.14"]
         # test with oldest supported Python version only (for slow tests)
-        # python-version: ["3.10"]
+        # python-version: ["3.11"]
         # test with *all* supported Python versions
-        # python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # python-version: ["3.11", "3.12", "3.13", "3.14"]
 
         jax-version: ["latest"]
         include:
           # test with oldest supported JAX version
-          - python-version: "3.10"
+          - python-version: "3.11"
             os: ubuntu-latest
-            jax-version: "0.6.2"
+            jax-version: "0.7.0"
 
       fail-fast: false
 
