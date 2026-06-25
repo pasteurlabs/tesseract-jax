@@ -13,10 +13,10 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         # NOTE: If bumping the minimum Python version here, also do it in
-        # ruff.toml, setup.py and other CI files as well.
+        # pyproject.toml, ruff.toml, and other CI files as well.
 
         # test with oldest supported Python version only (for slow tests)
-        python-version: ["3.10"]
+        python-version: ["3.11"]
 
         example:
           - simple

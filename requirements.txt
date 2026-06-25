@@ -12,19 +12,13 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
 idna==3.18
     # via requests
-jax==0.6.2 ; python_full_version < '3.11'
+jax==0.10.2
     # via tesseract-jax
-jax==0.10.2 ; python_full_version >= '3.11'
-    # via tesseract-jax
-jaxlib==0.6.2 ; python_full_version < '3.11'
-    # via jax
-jaxlib==0.10.2 ; python_full_version >= '3.11'
+jaxlib==0.10.2
     # via jax
 jinja2==3.1.6
     # via tesseract-core
-markdown-it-py==3.0.0 ; python_full_version < '3.11'
-    # via rich
-markdown-it-py==4.2.0 ; python_full_version >= '3.11'
+markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.3
     # via jinja2
@@ -34,14 +28,7 @@ ml-dtypes==0.5.4
     # via
     #   jax
     #   jaxlib
-numpy==2.2.6 ; python_full_version < '3.11'
-    # via
-    #   jax
-    #   jaxlib
-    #   ml-dtypes
-    #   scipy
-    #   tesseract-core
-numpy==2.4.6 ; python_full_version >= '3.11'
+numpy==2.4.6
     # via
     #   jax
     #   jaxlib
@@ -72,11 +59,7 @@ rich==15.0.0
     # via
     #   tesseract-core
     #   typer
-scipy==1.15.3 ; python_full_version < '3.11'
-    # via
-    #   jax
-    #   jaxlib
-scipy==1.17.1 ; python_full_version == '3.11.*'
+scipy==1.17.1 ; python_full_version < '3.12'
     # via
     #   jax
     #   jaxlib
