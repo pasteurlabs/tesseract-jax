@@ -1,7 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from typing import Any
+from typing import Any, Literal
 
 import jax.tree
 import numpy as np
@@ -160,6 +160,70 @@ class Jaxeract:
             else:
                 out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
 
+        return tuple(out)
+
+    def jacobian(
+        self,
+        array_args: tuple[ArrayLike, ...],
+        static_args: tuple[Any, ...],
+        input_pytreedef: PyTreeDef,
+        output_pytreedef: PyTreeDef,
+        output_avals: tuple[ShapeDtypeStruct, ...],
+        is_static_mask: tuple[bool, ...],
+        has_tangent: tuple[bool, ...],
+        jac_input_paths: tuple[str, ...] | None = None,
+        jac_output_paths: tuple[str, ...] | None = None,
+        jac_mode: Literal["fwd", "bwd"] = "bwd",
+    ) -> PyTree:
+        """Call the Tesseract's jacobian endpoint with the given arguments.
+
+        Returns one ndarray per (requested_output, requested_input) pair, in
+        row-major order. Each array has shape ``out_shape + in_shape`` and
+        dtype determined by ``jac_mode`` (``"bwd"`` matches ``jax.jacrev``
+        and uses input dtype; ``"fwd"`` matches ``jax.jacfwd`` and uses
+        output dtype). Mirrors lineax's mode names.
+        """
+        n_primals = len(is_static_mask) - sum(is_static_mask)
+        primals = array_args[:n_primals]
+
+        primal_inputs = unflatten_args(
+            primals, static_args, input_pytreedef, is_static_mask
+        )
+
+        flat_inputs = _pytree_to_tesseract_flat(
+            primal_inputs, schema_paths=self.differentiable_input_paths
+        )
+        if jac_input_paths is None:
+            jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
+        else:
+            jac_inputs = list(jac_input_paths)
+
+        output_flat = _pytree_to_tesseract_flat(
+            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            schema_paths=self.differentiable_output_paths,
+        )
+        if jac_output_paths is None:
+            jac_outputs = [p for p, v in output_flat.items() if v is not None]
+        else:
+            jac_outputs = list(jac_output_paths)
+
+        out_data = self.client.jacobian(
+            inputs=primal_inputs,
+            jac_inputs=jac_inputs,
+            jac_outputs=jac_outputs,
+        )
+
+        ip_to_dtype = {p: v.dtype for p, v in flat_inputs.items() if v is not None}
+        op_to_dtype = {
+            p: aval.dtype
+            for (p, v), aval in zip(output_flat.items(), output_avals, strict=True)
+            if v is not None
+        }
+        out = []
+        for op in jac_outputs:
+            for ip in jac_inputs:
+                target = ip_to_dtype[ip] if jac_mode == "bwd" else op_to_dtype[op]
+                out.append(np.asarray(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
