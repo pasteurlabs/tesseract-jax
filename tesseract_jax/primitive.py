@@ -378,6 +378,9 @@ def tesseract_dispatch_batching(
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
     _raise_if_unimplemented(eval_func, client)
 
+    # An unmapped axis is denoted by ``None``. (Older JAX versions exposed this
+    # as the ``batching.not_mapped`` sentinel, which has since been removed; it
+    # was always equal to ``None``.)
     new_args = [
         arg if ax is None else jnp.moveaxis(arg, ax, 0)
         for arg, ax in zip(array_args, axes, strict=True)
