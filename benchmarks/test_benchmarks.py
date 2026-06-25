@@ -119,5 +119,5 @@ class TestVectoraddApi:
             _, vjp_fn = jax.vjp(fn, a)
             return vjp_fn(cot)
 
-        jax.block_until_ready(do_vjp(a_v, cotangent))
+        jax.block_until_ready(do_vjp((a_v, cotangent)))
         benchmark(lambda args: jax.block_until_ready(do_vjp(args)), (a_v, cotangent))
