@@ -2,11 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.1] - 2026-06-25
+## [0.4.0] - 2026-06-25
 
 ### Features
 
 - Use jacobian endpoint  (#191)
+- *(deps)* [**breaking**] Drop support by Python 3.10, test Python 3.14 in CI, bump jax lb to 0.7.0 (#207)
 
 ### Bug Fixes
 
