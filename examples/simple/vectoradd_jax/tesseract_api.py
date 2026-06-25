@@ -18,6 +18,10 @@ class Vector_and_Scalar(BaseModel):
         description="A scalar (or, under vmap, a batch of scalars broadcast-compatible "
         "with v's leading dims)",
         default=1.0,
+        # Pydantic v2 skips default validation by default; opt in so the
+        # Python-float default gets coerced to a 0-d ``Float32`` array
+        # (otherwise downstream array ops like ``s[..., None]`` fail).
+        validate_default=True,
     )
 
     @model_validator(mode="after")
