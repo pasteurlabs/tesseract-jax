@@ -6,7 +6,7 @@ repos:
         additional_dependencies: [--isolated]
         args: ["--maxkb=2000"]
         # Add exceptions here, as a regex
-        exclude: ""
+        # exclude: ""
 
       - id: check-json
         additional_dependencies: [--isolated]
@@ -75,7 +75,7 @@ repos:
             mv uv.lock.bak uv.lock; \
             exit $rc;
           '
-        additional_dependencies: [uv==0.6.11, --isolated]
+        additional_dependencies: [uv==0.11.21, --isolated]
 
       # Update requirements.txt after production.uv.lock changes
       - id: update-requirements
@@ -93,4 +93,4 @@ repos:
             mv uv.lock.bak uv.lock; \
             exit $rc;
           '
-        additional_dependencies: [uv==0.6.11, --isolated]
+        additional_dependencies: [uv==0.11.21, --isolated]
