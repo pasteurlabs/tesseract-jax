@@ -63,10 +63,6 @@ repos:
         language: python
         entry: |
           bash -c ' \
-            if [ -z "$DOWNLOAD_TOKEN" ]; then \
-              DOWNLOAD_TOKEN="VssSessionToken"; \
-              uv tool install keyring --with artifacts-keyring; \
-            fi; \
             cp uv.lock uv.lock.bak; \
             cp production.uv.lock uv.lock; \
             uv lock --refresh; \
