@@ -5,7 +5,7 @@ readme = "README.md"
 authors = [
     {name = "The tesseract-jax team @ Pasteur Labs", email = "info@simulation.science"},
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.15"
 # TODO: add your dependencies here *and* in requirements.txt
 dependencies = [
     "jax>=0.7.0",
