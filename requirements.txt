@@ -6,7 +6,7 @@ annotated-types==0.7.0
     # via pydantic
 certifi==2026.6.17
     # via requests
-charset-normalizer==3.4.7
+charset-normalizer==3.4.8
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
@@ -69,7 +69,7 @@ tesseract-core==1.10.0
     # via tesseract-jax
 typer==0.26.7
     # via tesseract-core
-typing-extensions==4.15.0
+typing-extensions==4.16.0
     # via
     #   pydantic
     #   pydantic-core
