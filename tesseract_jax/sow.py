@@ -164,7 +164,7 @@ _sow_treedefs: contextvars.ContextVar[dict[str, jax.tree_util.PyTreeDef] | None]
 # ---------------------------------------------------------------------------
 
 
-def sow(value: T, name: str, *, tag: str = "intermediates") -> T:
+def sow[T](value: T, name: str, *, tag: str = "intermediates") -> T:
     """Tag an intermediate value for capture by :func:`save_intermediates`.
 
     Acts as the identity function: the return value is always equal to

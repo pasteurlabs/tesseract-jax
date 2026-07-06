@@ -6,7 +6,7 @@ annotated-types==0.7.0
     # via pydantic
 certifi==2026.6.17
     # via requests
-charset-normalizer==3.4.7
+charset-normalizer==3.4.8
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
@@ -59,11 +59,7 @@ rich==15.0.0
     # via
     #   tesseract-core
     #   typer
-scipy==1.17.1 ; python_full_version < '3.12'
-    # via
-    #   jax
-    #   jaxlib
-scipy==1.18.0 ; python_full_version >= '3.12'
+scipy==1.18.0
     # via
     #   jax
     #   jaxlib
