@@ -1,5 +1,5 @@
 # Set to the lowest supported Python version.
-target-version = "py311"
+target-version = "py312"
 
 # Set the target line length for formatting.
 line-length = 88

@@ -1,5 +1,5 @@
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, TypeVar
 
 import jax.tree
 from jax.core import ShapedArray
@@ -7,10 +7,10 @@ from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 
 T = TypeVar("T")
-PyTree: TypeAlias = Any
+type PyTree = Any
 
 
-def split_args(
+def split_args[T](
     flat_args: Sequence[T], mask: Sequence[bool]
 ) -> tuple[tuple[T, ...], tuple[T, ...]]:
     """Split a flat argument tuple according to mask (mask_False, mask_True)."""
