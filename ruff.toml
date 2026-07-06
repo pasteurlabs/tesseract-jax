@@ -39,8 +39,6 @@ ignore = [
     "ANN202", # Type annotations: missing return type for private functions
     "ANN401", # Type annotations: Any
     "F722", # Pyflakes: syntax error in type annotations
-    "UP040", # PEP 695 `type` alias: opt-out; some aliases are used at runtime (e.g. isinstance)
-    "UP047", # PEP 695 generics: opt-out to avoid a py312 modernization sweep
 ]
 
 [lint.extend-per-file-ignores]
