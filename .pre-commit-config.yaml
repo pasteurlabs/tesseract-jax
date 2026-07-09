@@ -6,7 +6,7 @@ repos:
         additional_dependencies: [--isolated]
         args: ["--maxkb=2000"]
         # Add exceptions here, as a regex
-        exclude: ""
+        # exclude: ""
 
       - id: check-json
         additional_dependencies: [--isolated]
@@ -63,10 +63,6 @@ repos:
         language: python
         entry: |
           bash -c ' \
-            if [ -z "$DOWNLOAD_TOKEN" ]; then \
-              DOWNLOAD_TOKEN="VssSessionToken"; \
-              uv tool install keyring --with artifacts-keyring; \
-            fi; \
             cp uv.lock uv.lock.bak; \
             cp production.uv.lock uv.lock; \
             uv lock --refresh; \
@@ -75,7 +71,7 @@ repos:
             mv uv.lock.bak uv.lock; \
             exit $rc;
           '
-        additional_dependencies: [uv==0.6.11, --isolated]
+        additional_dependencies: [uv==0.11.21, --isolated]
 
       # Update requirements.txt after production.uv.lock changes
       - id: update-requirements
@@ -93,4 +89,4 @@ repos:
             mv uv.lock.bak uv.lock; \
             exit $rc;
           '
-        additional_dependencies: [uv==0.6.11, --isolated]
+        additional_dependencies: [uv==0.11.21, --isolated]
