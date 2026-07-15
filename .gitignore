@@ -151,3 +151,6 @@ uv.lock.bak
 
 # Claude Code
 .claude/
+
+# hatch_vcs version file
+_version.py
