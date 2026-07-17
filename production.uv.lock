@@ -2907,26 +2907,32 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "equinox", marker = "extra == 'dev'" },
+    { name = "furo", marker = "extra == 'dev'" },
     { name = "furo", marker = "extra == 'docs'" },
     { name = "jax", specifier = ">=0.7.0" },
+    { name = "myst-nb", marker = "extra == 'dev'" },
     { name = "myst-nb", marker = "extra == 'docs'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-benchmark", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "requests", marker = "extra == 'dev'" },
+    { name = "sphinx", marker = "extra == 'dev'" },
     { name = "sphinx", marker = "extra == 'docs'" },
+    { name = "sphinx-autodoc-typehints", marker = "extra == 'dev'" },
     { name = "sphinx-autodoc-typehints", marker = "extra == 'docs'" },
+    { name = "sphinx-copybutton", marker = "extra == 'dev'" },
     { name = "sphinx-copybutton", marker = "extra == 'docs'" },
+    { name = "sphinx-design", marker = "extra == 'dev'" },
     { name = "sphinx-design", marker = "extra == 'docs'" },
+    { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
     { name = "tesseract-core" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
-    { name = "tesseract-jax", extras = ["docs"], marker = "extra == 'dev'" },
     { name = "typeguard", marker = "extra == 'dev'" },
 ]
-provides-extras = ["docs", "dev"]
+provides-extras = ["dev", "docs"]
 
 [[package]]
 name = "tornado"

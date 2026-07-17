@@ -1,9 +1,9 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from . import _version
+from ._version import __version__ as scm_version
 
-__version__ = _version.get_versions()["version"]
+__version__ = scm_version
 
 # import public API of the package
 # SIDE EFFECT: Register Tesseract as a pytree node
