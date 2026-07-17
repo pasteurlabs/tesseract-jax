@@ -756,6 +756,57 @@ def test_partial_differentiation(served_univariate_tesseract_raw, use_jit):
     _assert_pytree_isequal(grad, grad_ref)
 
 
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_partial_differentiation_jvp(
+    served_pytree_tesseract, pytree_tess_inputs, use_jit, monkeypatch
+):
+    """``jax.jvp`` restricts what the ``jacobian_vector_product`` endpoint computes.
+
+    Differentiates one output (``result``) wrt one input (``alpha.x``) of a
+    multi-in / multi-out served Tesseract:
+
+    - ``jvp_inputs`` is restricted in *both* modes (trace-time ``has_tangent``
+      filtering, not DCE).
+    - ``jvp_outputs`` is restricted only under ``jit``, where DCE prunes the dead
+      output tangents. We deliberately do not assert the un-jitted output set, so
+      this test would not regress if JAX ever began running DCE without ``jit``.
+    """
+    tess = Tesseract.from_url(served_pytree_tesseract)
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    x = inp["alpha"]["x"]
+    t = jnp.ones_like(x)
+
+    def f(x):
+        full = {**inp, "alpha": {**inp["alpha"], "x": x}}
+        return apply_tesseract(tess, full)["result"]
+
+    calls: list[dict] = []
+    orig = tess.jacobian_vector_product
+
+    def spy(*, inputs, jvp_inputs, jvp_outputs, tangent_vector):
+        calls.append({"inputs": sorted(jvp_inputs), "outputs": sorted(jvp_outputs)})
+        return orig(
+            inputs=inputs,
+            jvp_inputs=jvp_inputs,
+            jvp_outputs=jvp_outputs,
+            tangent_vector=tangent_vector,
+        )
+
+    # Un-jitted reference for the value check (computed before the spy so only the
+    # measured call is captured).
+    _, ref = jax.jvp(f, (x,), (t,))
+    monkeypatch.setattr(tess, "jacobian_vector_product", spy)
+
+    jvp_fn = jax.jit(lambda x, t: jax.jvp(f, (x,), (t,))[1]) if use_jit else None
+    out = jvp_fn(x, t) if use_jit else jax.jvp(f, (x,), (t,))[1]
+
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-5)
+    assert calls, "expected the jvp endpoint to be called"
+    assert calls[-1]["inputs"] == ["alpha.{x}"]
+    if use_jit:
+        assert calls[-1]["outputs"] == ["result"]
+
+
 def test_tesseract_as_jax_pytree(served_univariate_tesseract_raw):
     """Test that Tesseract can be used as a JAX PyTree."""
     tess = Tesseract.from_url(served_univariate_tesseract_raw)

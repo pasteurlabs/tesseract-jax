@@ -330,8 +330,15 @@ def test_batched_jvp_dtype_matches_jax_convention(mixed_dtype_tess):
     )
 
 
-def test_jacfwd_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
-    """``jacfwd`` wrt one of several diff inputs requests only that column."""
+@pytest.mark.parametrize("use_jit", [False, True])
+def test_jacfwd_partial_diff_restricts_jac_inputs(
+    univariate_tess, use_jit, monkeypatch
+):
+    """``jacfwd`` wrt one of several diff inputs requests only that column.
+
+    Input restriction is trace-time (``has_tangent`` filtering, not DCE), so it
+    holds jitted and un-jitted alike.
+    """
     x = jnp.array(1.0, dtype="float64")
     y = jnp.array(2.0, dtype="float64")
 
@@ -348,7 +355,8 @@ def test_jacfwd_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
         return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
 
     monkeypatch.setattr(univariate_tess, "jacobian", spy)
-    g = jax.jacfwd(f)(x)
+    jac_fn = jax.jit(jax.jacfwd(f)) if use_jit else jax.jacfwd(f)
+    g = jac_fn(x)
 
     np.testing.assert_allclose(g, -400.0, rtol=1e-5)
     assert captured["jac_inputs"] == ["x"], (
@@ -356,7 +364,10 @@ def test_jacfwd_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
     )
 
 
-def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
+@pytest.mark.parametrize("use_jit", [False, True])
+def test_jacrev_partial_diff_restricts_jac_inputs(
+    univariate_tess, use_jit, monkeypatch
+):
     """``jacrev`` wrt one of several diff inputs requests only that column."""
     x = jnp.array(1.0, dtype="float64")
     y = jnp.array(2.0, dtype="float64")
@@ -372,7 +383,8 @@ def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
         return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
 
     monkeypatch.setattr(univariate_tess, "jacobian", spy)
-    g = jax.jacrev(f)(x)
+    jac_fn = jax.jit(jax.jacrev(f)) if use_jit else jax.jacrev(f)
+    g = jac_fn(x)
 
     np.testing.assert_allclose(g, -400.0, rtol=1e-5)
     assert captured["jac_inputs"] == ["x"]
@@ -409,6 +421,77 @@ def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch)
     assert captured["jac_inputs"] == ["x"], (
         f"expected only 'x' to be requested, got {captured['jac_inputs']}"
     )
+
+
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
+def test_jitted_jacfwd_partial_diff_restrictions(
+    pytree_tess, pytree_tess_inputs, materialize_jacobian, monkeypatch
+):
+    """Under ``jit``, ``jacfwd`` requests only the live (input, output) sub-block.
+
+    Differentiates one output (``result``) wrt one input (``alpha.x``) of a
+    multi-in / multi-out Tesseract and checks the request is pruned on *both*
+    forward code paths: the materialised ``jacobian`` endpoint
+    (``materialize_jacobian=None``) and the per-tangent
+    ``jacobian_vector_product`` endpoint (``materialize_jacobian=False``).
+
+    Output restriction relies on DCE, which only runs under ``jit`` — hence the
+    ``jax.jit`` wrapper here (cf. the un-jitted input tests above).
+    """
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    x = inp["alpha"]["x"]
+
+    def f(x):
+        full = {**inp, "alpha": {**inp["alpha"], "x": x}}
+        return apply_tesseract(
+            pytree_tess,
+            full,
+            vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
+        )["result"]
+
+    jac: dict[str, list] = {"inputs": [], "outputs": []}
+    jvp: dict[str, list] = {"inputs": [], "outputs": []}
+    orig_jac = pytree_tess.jacobian
+    orig_jvp = pytree_tess.jacobian_vector_product
+
+    def spy_jac(*, inputs, jac_inputs, jac_outputs):
+        jac["inputs"].append(sorted(jac_inputs))
+        jac["outputs"].append(sorted(jac_outputs))
+        return orig_jac(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    def spy_jvp(*, inputs, jvp_inputs, jvp_outputs, tangent_vector):
+        jvp["inputs"].append(sorted(jvp_inputs))
+        jvp["outputs"].append(sorted(jvp_outputs))
+        return orig_jvp(
+            inputs=inputs,
+            jvp_inputs=jvp_inputs,
+            jvp_outputs=jvp_outputs,
+            tangent_vector=tangent_vector,
+        )
+
+    # Un-jitted reference for the value check (DCE off -> full request, but the
+    # selected `result` block is identical). Computed before the spies are set so
+    # only the jitted, pruned call is captured below.
+    ref = jax.jacfwd(f)(x)
+
+    monkeypatch.setattr(pytree_tess, "jacobian", spy_jac)
+    monkeypatch.setattr(pytree_tess, "jacobian_vector_product", spy_jvp)
+    out = jax.jit(jax.jacfwd(f))(x)
+
+    np.testing.assert_allclose(out, ref, rtol=1e-5)
+
+    if materialize_jacobian is None:
+        assert jvp["outputs"] == [], "materialised path must not call the jvp endpoint"
+        assert jac["inputs"] == [["alpha.{x}"]]
+        assert jac["outputs"] == [["result"]]
+    else:
+        assert jac["outputs"] == [], (
+            "per-tangent path must not call the jacobian endpoint"
+        )
+        assert jvp["outputs"], "expected the jvp endpoint to be called"
+        assert all(o == ["result"] for o in jvp["outputs"]), jvp["outputs"]
+        assert all(i == ["alpha.{x}"] for i in jvp["inputs"]), jvp["inputs"]
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
