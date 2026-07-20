@@ -212,6 +212,45 @@ def _find_nested_jaxpr_param(
     return None
 
 
+def _extend_scan_params_for_outputs(
+    params: dict[str, Any], n_new_outputs: int
+) -> dict[str, Any]:
+    """Adjust ``scan`` params so *n_new_outputs* extra stacked outputs fit.
+
+    Outputs appended to a scan body are treated as new *scanned* (stacked)
+    outputs -- one value collected per iteration.  The way scan records
+    the carry/stacked split of its outputs changed across JAX versions:
+
+    * JAX >=0.11 stores it in the ``ft_out`` FlatTree metadata.
+    * Earlier versions store only ``num_carry`` (the leading outputs are
+      the carry, the rest are stacked), so no metadata update is needed.
+
+    We only need to touch ``ft_out``: the new outputs are grafted onto its
+    stacked portion, using the same per-output placeholder scan records for
+    its existing stacked outputs.
+    """
+    if n_new_outputs == 0 or "ft_out" not in params:
+        return params
+
+    from jax._src import flattree as ft
+
+    params = dict(params)
+    # ``ft_out`` always unpacks into exactly ``(carry, stacked)``.  We keep
+    # the carry portion untouched and graft the new outputs onto the stacked
+    # portion, preserving its existing (possibly nested) structure.
+    carry_ft, ys_ft = params["ft_out"].unpack()
+    # A stacked output is recorded as ``FTFiltered(FTSingleton(Right(None)))``
+    # -- a length-1 placeholder; the concrete aval is filled in later via
+    # ``ft_out.update``.  Append one such entry per new output.
+    new_entries = [
+        ft.FTFiltered(ft.FTSingleton(ft.Either.right(None)))
+        for _ in range(n_new_outputs)
+    ]
+    new_ys = ft.FTTuple(ys_ft, *new_entries)
+    params["ft_out"] = ft.pack((carry_ft, new_ys))
+    return params
+
+
 def _rewrite_jaxpr(
     jaxpr: extend.core.Jaxpr,
     tag: str,
@@ -298,14 +337,31 @@ def _rewrite_jaxpr(
                 orig = updated_params["out_layouts"]
                 updated_params["out_layouts"] = tuple(orig) + (None,) * n_new_outputs
 
+            # ``scan`` (and thus ``fori_loop`` with a static trip count)
+            # accumulates one *stacked* output per loop iteration.  New
+            # outputs added to the body become new scanned outputs, so we
+            # must (a) tell scan how many extra stacked outputs to expect
+            # (via ``ft_out`` on newer JAX) and (b) declare the parent
+            # outvars with a leading length dimension (below).  Other
+            # primitives (e.g. ``pjit``) leave the inner avals unchanged.
+            is_scan = eqn.primitive.name == "scan"
+            if is_scan:
+                updated_params = _extend_scan_params_for_outputs(
+                    updated_params, n_new_outputs
+                )
+
             # Create fresh variables in the parent scope to receive
             # each new output from the inner jaxpr.
             new_outputs = rewritten_inner.outvars[
                 len(inner_closed_jaxpr.jaxpr.outvars) :
             ]
-            new_inner_output_avals = [v.aval for v in new_outputs]
+            length = updated_params.get("length") if is_scan else None
             expanded_outvars = list(eqn.outvars)
-            for aval in new_inner_output_avals:
+            for var in new_outputs:
+                aval = var.aval
+                if is_scan:
+                    # Stacked output: prepend the loop length as a new axis.
+                    aval = aval.update(shape=(length, *aval.shape))
                 fresh_var = _make_var(aval)
                 expanded_outvars.append(fresh_var)
                 extra_output_vars.append(fresh_var)
