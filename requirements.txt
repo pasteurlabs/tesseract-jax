@@ -12,9 +12,9 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
 idna==3.18
     # via requests
-jax==0.10.2
+jax==0.11.0
     # via tesseract-jax
-jaxlib==0.10.2
+jaxlib==0.11.0
     # via jax
 jinja2==3.1.6
     # via tesseract-core
