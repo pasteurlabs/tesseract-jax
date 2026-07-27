@@ -273,10 +273,10 @@ class Jaxeract:
         # JAX expects gradients for all inputs, even non-differentiable ones.
         # Reconstruct the full output tuple in the same order as flat_inputs.
         out = []
-        all_idx = 0  # Index into flat_inputs, none_mask, and is_static_mask
+        # all_idx indexes into flat_inputs, none_mask, and is_static_mask
         array_idx = 0  # Index into array_args (which excludes static inputs)
         tan_idx = 0  # Index into tangents/cotangents (which excludes non-differentiable inputs)
-        for path in flat_inputs:
+        for all_idx, path in enumerate(flat_inputs):
             if path in out_data:
                 # Path has a gradient from the server
                 out.append(out_data[path])
@@ -303,7 +303,5 @@ class Jaxeract:
             # Increment array_idx only for non-static inputs (which appear in array_args)
             if not is_static_mask[all_idx]:
                 array_idx += 1
-
-            all_idx += 1
 
         return tuple(out)

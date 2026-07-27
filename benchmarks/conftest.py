@@ -63,7 +63,7 @@ def _check_docker() -> bool:
     try:
         subprocess.run(["docker", "info"], capture_output=True, check=True, timeout=10)
         return True
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         return False
 
 
@@ -114,6 +114,7 @@ def noop_tesseract_image():
         capture_output=True,
         text=True,
         timeout=300,
+        check=False,
     )
     if result.returncode != 0:
         pytest.fail(f"Failed to build noop tesseract: {result.stderr}")
