@@ -37,9 +37,12 @@ def _strip_functions_from_api(source: str, func_names: set[str]) -> str:
     # Collect line ranges (1-indexed) of functions to remove
     remove_ranges: list[tuple[int, int]] = []
     for node in ast.iter_child_nodes(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            if node.name in func_names and node.end_lineno is not None:
-                remove_ranges.append((node.lineno, node.end_lineno))
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in func_names
+            and node.end_lineno is not None
+        ):
+            remove_ranges.append((node.lineno, node.end_lineno))
 
     if not remove_ranges:
         return source

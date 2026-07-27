@@ -39,6 +39,11 @@ ignore = [
     "ANN202", # Type annotations: missing return type for private functions
     "ANN401", # Type annotations: Any
     "F722", # Pyflakes: syntax error in type annotations
+    # Unnecessary dict() call. Enabled by default as of ruff 0.16. The
+    # dict(x=..., y=...) form mirrors Tesseract's named-input API and reads
+    # better than quoted literals; all call sites are trace- or test-time
+    # (measured ~35ns per call), so the literal's speedup is irrelevant here.
+    "C408",
 ]
 
 [lint.extend-per-file-ignores]
