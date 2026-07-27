@@ -2,9 +2,9 @@
 #    uv export --frozen --color never --no-emit-project --no-hashes
 annotated-doc==0.0.4
     # via typer
-annotated-types==0.7.0
+annotated-types==0.8.0
     # via pydantic
-certifi==2026.6.17
+certifi==2026.7.22
     # via requests
 charset-normalizer==3.4.9
     # via requests
@@ -28,7 +28,7 @@ ml-dtypes==0.5.4
     # via
     #   jax
     #   jaxlib
-numpy==2.4.6
+numpy==2.5.1
     # via
     #   jax
     #   jaxlib
@@ -65,9 +65,9 @@ scipy==1.18.0
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core==1.10.0
+tesseract-core==1.11.0
     # via tesseract-jax
-typer==0.26.7
+typer==0.27.0
     # via tesseract-core
 typing-extensions==4.16.0
     # via
