@@ -3,8 +3,9 @@
 
 """Tests for jax.linearize and jax.linear_transpose with tesseract-jax.
 
-All tests use the (nonlinear) Rosenbrock tesseract: a linear tesseract makes
-the Jacobian the identity, which renders most assertions here tautological.
+Tests use the (nonlinear) Rosenbrock tesseract unless they need several
+differentiable inputs: a linear tesseract makes the Jacobian the identity, which
+renders most assertions here tautological.
 
 Every test is parametrised over ``use_jit`` because the two settings dispatch
 through separately registered code paths -- ``tesseract_dispatch_p.def_impl``
@@ -138,3 +139,117 @@ def test_linear_transpose_on_raw_jvp_with_closure(univariate_tess, use_jit):
     _, vjp_fn = jax.vjp(f, x)
     (vjp_result,) = vjp_fn(ct)
     np.testing.assert_allclose(transposed, vjp_result, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Differentiating a derivative endpoint
+#
+# J(x)·v is linear in v, so jax.jvp / jax.jacfwd of a jax.linearize tangent
+# function is well defined and reduces to the same endpoint at a new tangent.
+# Differentiating with respect to x is not, and must stay refused.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_jvp_of_tangent_fn(univariate_tess, use_jit):
+    """jax.jvp of a linearized function: both outputs are the endpoint re-applied."""
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+    t = np.array(3.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _primal_out, tangent_fn = jax.linearize(f, x)
+    primal_out, tangent_out = jax.jvp(tangent_fn, (x,), (t,))
+
+    # tangent_fn is linear, so its JVP is itself evaluated at the new tangent.
+    np.testing.assert_allclose(primal_out, tangent_fn(x), rtol=1e-5)
+    np.testing.assert_allclose(tangent_out, tangent_fn(t), rtol=1e-5)
+
+
+@pytest.mark.parametrize("mode", ["fwd", "rev"])
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_jacobian_of_tangent_fn(univariate_tess, use_jit, mode):
+    """jacfwd/jacrev of a linearized function recovers f's Jacobian.
+
+    This is the pattern optimistix uses.
+    """
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    jac = jax.jacfwd if mode == "fwd" else jax.jacrev
+    _primal_out, tangent_fn = jax.linearize(f, x)
+
+    # d/dv [J(x)·v] == J(x)
+    np.testing.assert_allclose(jac(tangent_fn)(x), jac(f)(x), rtol=1e-5)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_jvp_of_vjp_fn(univariate_tess, use_jit):
+    """The VJP endpoint is likewise linear, in its cotangent slots."""
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+    ct = np.array(1.0, dtype="float64")
+    dct = np.array(3.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _primal_out, vjp_fn = jax.vjp(f, x)
+    primal_out, tangent_out = jax.jvp(vjp_fn, (ct,), (dct,))
+
+    np.testing.assert_allclose(primal_out[0], vjp_fn(ct)[0], rtol=1e-5)
+    np.testing.assert_allclose(tangent_out[0], vjp_fn(dct)[0], rtol=1e-5)
+
+
+@pytest.mark.parametrize("argnums", [0, 1])
+def test_jacfwd_of_tangent_fn_partial_argnums(pytree_tess, pytree_tess_inputs, argnums):
+    """Differentiating only some arguments leaves the rest symbolically zero.
+
+    Uses a multi-differentiable-input tesseract so that some tangent slots arrive
+    as ad.Zero and have to be instantiated before they can cross a bind.
+    """
+    inp = pytree_tess_inputs
+
+    def f(alpha, delta):
+        return apply_tesseract(
+            pytree_tess, inputs={**inp, "alpha": alpha, "delta": delta}
+        )["result"]
+
+    alpha, delta = inp["alpha"], inp["delta"]
+    _primal_out, tangent_fn = jax.linearize(f, alpha, delta)
+
+    expected = jax.jacfwd(f, argnums=argnums)(alpha, delta)
+    got = jax.jacfwd(tangent_fn, argnums=argnums)(alpha, delta)
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5), expected, got
+    )
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_second_derivative_wrt_primals_is_refused(univariate_tess, use_jit):
+    """A Hessian needs a second derivative, which Tesseract does not expose."""
+    x = np.array(1.0, dtype="float64")
+    y = np.array(2.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    with pytest.raises(RuntimeError, match=r"(?i)primal inputs"):
+        jax.jacfwd(jax.grad(f))(x)

@@ -22,11 +22,16 @@ from tesseract_jax import apply_tesseract
 
 
 def _spy_endpoints(tess, monkeypatch):
-    """Wrap jacobian / jvp / vjp endpoints with counters."""
-    counts = {"jacobian": 0, "jvp": 0, "vjp": 0}
+    """Wrap apply / jacobian / jvp / vjp endpoints with counters."""
+    counts = {"apply": 0, "jacobian": 0, "jvp": 0, "vjp": 0}
+    orig_apply = tess.apply
     orig_jac = tess.jacobian
     orig_jvp = tess.jacobian_vector_product
     orig_vjp = tess.vector_jacobian_product
+
+    def wa(*a, **kw):
+        counts["apply"] += 1
+        return orig_apply(*a, **kw)
 
     def wj(*a, **kw):
         counts["jacobian"] += 1
@@ -40,6 +45,7 @@ def _spy_endpoints(tess, monkeypatch):
         counts["vjp"] += 1
         return orig_vjp(*a, **kw)
 
+    monkeypatch.setattr(tess, "apply", wa)
     monkeypatch.setattr(tess, "jacobian", wj)
     monkeypatch.setattr(tess, "jacobian_vector_product", wjvp)
     monkeypatch.setattr(tess, "vector_jacobian_product", wvjp)
@@ -111,6 +117,37 @@ def test_jacfwd_through_jit(vectoradd_tess, monkeypatch):
     M = jax.jacfwd(f)(a)
 
     np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_jacfwd_of_linearized_uses_jacobian_endpoint(vectoradd_tess, monkeypatch):
+    """``jacfwd`` of a ``jax.linearize`` tangent function uses the shortcut too.
+
+    The spy covers the ``linearize`` call as well, so the counts are the whole cost
+    of the pattern: one ``apply`` (the forward evaluation ``linearize`` itself
+    needs, and differentiating the tangent function adds none) plus one
+    ``jacobian`` (the batching shortcut), and no ``jvp`` at all.
+
+    That last one is the interesting part. The JVP rule for a derivative endpoint
+    emits two binds -- the undifferentiated output and the endpoint re-applied at
+    the new tangent -- and ``jacfwd`` discards the former. Under ``jit`` DCE drops
+    it, so this costs exactly what ``jacfwd(f)`` costs. Un-jitted, DCE does not
+    fire and the discarded bind is paid for; hence the ``jit`` here.
+    """
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    _primal_out, tangent_fn = jax.linearize(f, a)
+    M = jax.jit(jax.jacfwd(tangent_fn))(a)
+
+    # tangent_fn is linear with f's Jacobian, so this is df/da = I.
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["apply"] == 1
     assert counts["jacobian"] == 1
     assert counts["jvp"] == 0
 
@@ -338,6 +375,39 @@ def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
 
     np.testing.assert_allclose(g, -400.0, rtol=1e-5)
     assert captured["jac_inputs"] == ["x"]
+
+
+def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
+    """``jacfwd`` of a linearized function wrt one argument narrows the request too.
+
+    The tangent function's other argument gets a symbolic-zero tangent, which is
+    instantiated to dense zeros before it can cross a bind. Its Jacobian column
+    would then be fetched only to be multiplied by those zeros, so the JVP rule
+    recomputes ``has_tangent`` for the tangent bind rather than inheriting it.
+    """
+    x = jnp.array(1.0, dtype="float64")
+    y = jnp.array(2.0, dtype="float64")
+
+    def f(x, y):
+        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
+
+    _primal, tangent_fn = jax.linearize(f, x, y)
+    expected = jax.jacfwd(f, argnums=0)(x, y)  # before the spy, so it is not captured
+
+    captured: dict[str, Any] = {}
+    orig = univariate_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_inputs"] = list(jac_inputs)
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(univariate_tess, "jacobian", spy)
+    g = jax.jacfwd(tangent_fn, argnums=0)(x, y)
+
+    np.testing.assert_allclose(g, expected, rtol=1e-5)
+    assert captured["jac_inputs"] == ["x"], (
+        f"expected only 'x' to be requested, got {captured['jac_inputs']}"
+    )
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
