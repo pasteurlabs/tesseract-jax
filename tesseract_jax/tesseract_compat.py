@@ -55,6 +55,24 @@ class Jaxeract:
 
         self.available_methods = self.client.available_endpoints
 
+    # Every attribute above is derived from ``self.client``, so two wrappers around
+    # the same Tesseract are interchangeable. Saying so matters: this object is a
+    # parameter of ``tesseract_dispatch_p``, and ``apply_tesseract`` builds a fresh
+    # one per call, so with the inherited identity semantics two otherwise identical
+    # calls lower to custom calls that XLA cannot recognise as equal and therefore
+    # cannot common up. Equality is delegated rather than based on the URL or schema
+    # so that distinct Tesseracts stay distinct; if ``Tesseract`` ever gains value
+    # semantics of its own, this inherits them.
+    def __eq__(self, other: object) -> bool:
+        """Whether ``other`` wraps the same Tesseract."""
+        if not isinstance(other, Jaxeract):
+            return NotImplemented
+        return self.client == other.client
+
+    def __hash__(self) -> int:
+        """Hash consistently with ``__eq__``."""
+        return hash((Jaxeract, self.client))
+
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,
     # vjp and vjp.

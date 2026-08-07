@@ -475,6 +475,16 @@ def tesseract_dispatch_lowering(
             out = (out,)
         return out
 
+    # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
+    # This is what lets XLA's CSE fold repeated identical calls into a single
+    # request -- the same treatment a LAPACK custom call such as ``lu_factor``
+    # already gets. It relies on the bind params comparing equal for identical
+    # calls, which is why ``Jaxeract`` defines ``__eq__`` / ``__hash__``.
+    #
+    # Marking the callback side-effecting would *not* buy a guarantee that it
+    # always runs: JAX's own DCE already drops a Tesseract call whose outputs are
+    # unused, before XLA ever sees it. All it did was suppress CSE and pin the
+    # call's order against other effects.
     result, _, keepalive = mlir.emit_python_callback(
         ctx,
         _dispatch,
@@ -482,7 +492,7 @@ def tesseract_dispatch_lowering(
         array_args,
         ctx.avals_in,
         ctx.avals_out,
-        has_side_effect=True,
+        has_side_effect=False,
     )
     ctx.module_context.add_keepalive(keepalive)
     return result
