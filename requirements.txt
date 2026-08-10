@@ -39,9 +39,9 @@ opt-einsum==3.4.0
     # via jax
 orjson==3.11.9
     # via tesseract-core
-packaging==26.2
+packaging==26.3
     # via tesseract-core
-pip==26.2
+pip==26.2.1
     # via tesseract-core
 pybase64==1.4.3
     # via tesseract-core
