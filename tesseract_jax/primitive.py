@@ -169,6 +169,8 @@ def tesseract_dispatch_jvp_rule(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -265,6 +267,8 @@ def tesseract_dispatch_jvp_rule(
         ),
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
+        live_input_paths=live_input_paths,
+        live_output_paths=live_output_paths,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -279,6 +283,8 @@ def tesseract_dispatch_jvp_rule(
         eval_func=eval_func,
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
+        live_input_paths=live_input_paths,
+        live_output_paths=live_output_paths,
     )
 
     return tuple(res), tuple(jvp)
@@ -606,6 +612,14 @@ def tesseract_dispatch_batching(
             and (materialize_jacobian is True or endpoint_available)
         )
         if use_shortcut:
+            # FIXME: `live_input_paths` / `live_output_paths` are dropped here.
+            # `_batched_via_jacobian` recomputes both from the schema and
+            # `has_tangent`, and returns one output per `output_avals` entry, so a
+            # pruned equation reports its full output count down this path while
+            # `tesseract_dispatch_abstract_eval` reports the pruned one. Reachable
+            # since the JVP rule started differentiating derivative endpoints:
+            # `jacfwd(lin_fn, argnums=...)` sends one bind down each path and the
+            # counts disagree.
             return _batched_via_jacobian(
                 array_args,
                 axes,
