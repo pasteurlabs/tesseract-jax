@@ -612,14 +612,6 @@ def tesseract_dispatch_batching(
             and (materialize_jacobian is True or endpoint_available)
         )
         if use_shortcut:
-            # FIXME: `live_input_paths` / `live_output_paths` are dropped here.
-            # `_batched_via_jacobian` recomputes both from the schema and
-            # `has_tangent`, and returns one output per `output_avals` entry, so a
-            # pruned equation reports its full output count down this path while
-            # `tesseract_dispatch_abstract_eval` reports the pruned one. Reachable
-            # since the JVP rule started differentiating derivative endpoints:
-            # `jacfwd(lin_fn, argnums=...)` sends one bind down each path and the
-            # counts disagree.
             return _batched_via_jacobian(
                 array_args,
                 axes,
@@ -631,6 +623,7 @@ def tesseract_dispatch_batching(
                 has_tangent=has_tangent,
                 client=client,
                 eval_func=eval_func,
+                live_output_paths=live_output_paths,
             )
 
     new_args = [
@@ -668,6 +661,7 @@ def _batched_via_jacobian(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    live_output_paths: tuple[str, ...] | None,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -722,9 +716,15 @@ def _batched_via_jacobian(
 
     # Map each diff output path to its leaf index in the output pytree.
     # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions.
+    # the corresponding ``tans`` / ``output_avals`` positions. Rows DCE has already
+    # declared dead are left out of the request entirely. ``live_output_paths`` is
+    # only ever set on a ``jacobian_vector_product`` equation -- the DCE rule defers
+    # ``vector_jacobian_product`` to JAX's default -- so the VJP branch below always
+    # sees the full set and stays in step with the cotangents it is handed.
     diff_output_path_to_pos: dict[str, int] = {
-        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
+        p: i
+        for i, (p, v) in enumerate(output_flat.items())
+        if v is not None and (live_output_paths is None or p in live_output_paths)
     }
 
     jac_arrays = tesseract_dispatch_p.bind(
@@ -799,10 +799,21 @@ def _batched_via_jacobian(
             diff_avals,
             jac_blocks,
         )
+        # Emit exactly the leaves this bind is contracted to emit: the
+        # non-differentiable ones (whose tangent is a NaN) plus the differentiable
+        # ones DCE left live. `live_jvp_output_positions` is the shared source of
+        # truth with abstract_eval, so the two agree on the count and the order.
+        positions = live_jvp_output_positions(
+            output_pytreedef,
+            len(output_avals),
+            client.differentiable_output_paths,
+            live_output_paths,
+        )
+        is_diff = [v is not None for _p, v in output_flat.items()]
         outs = _pad_nans(
             diff_outs,
-            output_avals,
-            [v is not None for _p, v in output_flat.items()],
+            [output_avals[pos] for pos in positions],
+            [is_diff[pos] for pos in positions],
         )
         return outs, (0,) * len(outs)
 

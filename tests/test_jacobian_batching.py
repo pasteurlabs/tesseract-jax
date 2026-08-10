@@ -495,6 +495,75 @@ def test_jitted_jacfwd_partial_diff_restrictions(
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
+def test_jacfwd_of_tangent_fn_prunes_like_jacfwd(
+    pytree_tess, pytree_tess_inputs, use_jit, monkeypatch
+):
+    """Differentiating a linearized function requests only the live sub-block.
+
+    The batching rule has to honour the equation's ``live_output_paths`` for this:
+    it recomputes the requested rows from the schema, so without threading the
+    pruning through it would request every differentiable row -- and, worse, report
+    a different output count than ``abstract_eval`` does for the same bind.
+
+    The pruning holds whether or not this is jitted, because ``jax.linearize``
+    partially evaluates and bakes it into the tangent function's jaxpr before DCE
+    is ever asked. That makes the linearized path *narrower* than ``jacfwd(f)``
+    un-jitted, where forward-mode DCE does not run -- hence the assertion is on
+    the requested block itself rather than parity with the reference.
+    """
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    alpha, delta = inp["alpha"], inp["delta"]
+
+    def f(alpha, delta):
+        # Consumes one of several differentiable outputs.
+        return apply_tesseract(pytree_tess, {**inp, "alpha": alpha, "delta": delta})[
+            "result"
+        ]
+
+    # One spy for both phases -- stacking two would make the first also record the
+    # second's calls.
+    seen: list[tuple] = []
+    orig = pytree_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        seen.append((tuple(sorted(jac_inputs)), tuple(sorted(jac_outputs))))
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(pytree_tess, "jacobian", spy)
+
+    def maybe_jit(fn):
+        return jax.jit(fn) if use_jit else fn
+
+    expected = maybe_jit(jax.jacfwd(f, argnums=0))(alpha, delta)
+    reference_requests = list(seen)
+    seen.clear()
+
+    _primal, tangent_fn = jax.linearize(f, alpha, delta)
+    got = maybe_jit(jax.jacfwd(tangent_fn, argnums=0))(alpha, delta)
+    linearized_requests = list(seen)
+
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5), expected, got
+    )
+    # One jacobian call, restricted to the differentiated argument's columns and
+    # the single consumed output's row. `delta` is not differentiated, so none of
+    # its columns appear; `result_dict` / `result_list` are not consumed, so none
+    # of their rows do.
+    assert linearized_requests == [(("alpha.{x}", "alpha.{y}"), ("result",))], (
+        f"linearized path requested {linearized_requests}"
+    )
+    # Under jit the reference prunes identically; un-jitted it cannot, so it asks
+    # for every differentiable row.
+    if use_jit:
+        assert reference_requests == linearized_requests
+    else:
+        assert reference_requests != linearized_requests, (
+            "expected un-jitted jacfwd(f) to request more rows than the "
+            "linearized path, since forward-mode DCE does not run eagerly"
+        )
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
 def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
     """The shortcut's numerical result matches a pure-JAX implementation."""
     a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
