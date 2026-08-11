@@ -156,52 +156,122 @@ unsafe fn dispatch(
     // Inputs must be ready before we read them; XLA gives us its stream.
     rt.stream_synchronize(stream)?;
 
-    // ---- Build the JSON request: base64-encode each input (host side) ----
-    // (cuda_ipc inputs are rejected by the current server; base64 keeps the
-    //  well-tested path. Outputs still come back on-GPU via cuda_ipc.)
+    // ---- Build the JSON request: export each GPU input via CUDA IPC ----
+    //
+    // GPU-direct inputs (no host copy). XLA's input pointers are VMM/pool-backed,
+    // which the legacy cudaIpcGetMemHandle API rejects, so we stage each input's
+    // bytes into a fresh cudaMalloc buffer (one on-GPU copy) and export a handle
+    // to that -- mirroring tesseract-core's staging fallback, in native code.
+    //
+    // The staging buffers must stay alive until the server has copied the inputs
+    // out of them. The server does that synchronously while handling this request
+    // (decode copies on open), so it is safe to free them right after the HTTP
+    // response returns. `staging` holds them until then.
     let mut input_objs = serde_json::Map::new();
+    let mut staging: Vec<*mut c_void> = Vec::with_capacity(inputs.len());
+    // Ensure staging buffers are freed on every exit path (including errors).
+    let cleanup = |rt: &cuda::Runtime, staging: &[*mut c_void]| {
+        for &p in staging {
+            let _ = rt.free(p);
+        }
+    };
+
     for (buf, key) in inputs.iter().zip(desc.input_keys.iter()) {
-        let name = dtype_name(buf.dtype)
-            .ok_or_else(|| format!("unsupported input dtype code {}", buf.dtype))?;
+        let name = match dtype_name(buf.dtype) {
+            Some(n) => n,
+            None => {
+                cleanup(rt, &staging);
+                return Err(format!("unsupported input dtype code {}", buf.dtype));
+            }
+        };
         let shape = buf.shape();
         let nb = nbytes(&shape, dtype_itemsize(name));
-        // Copy device -> host so we can base64 it.
-        let mut host = vec![0u8; nb];
-        rt.memcpy_dtoh(host.as_mut_ptr() as *mut c_void, buf.data, nb)?;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&host);
+
+        let res: Result<[u8; 64], String> = (|| {
+            let stage = rt.malloc(nb)?;
+            staging.push(stage);
+            rt.memcpy_dtod_sync(stage, buf.data as *const c_void, nb)?;
+            rt.ipc_get_handle(stage)
+        })();
+        let handle = match res {
+            Ok(h) => h,
+            Err(e) => {
+                cleanup(rt, &staging);
+                return Err(e);
+            }
+        };
+
+        let handle_b64 = base64::engine::general_purpose::STANDARD.encode(handle);
         input_objs.insert(
             key.clone(),
             serde_json::json!({
                 "object_type": "array",
                 "shape": shape,
                 "dtype": name,
-                "data": {"buffer": b64, "encoding": "base64"},
+                "data": {
+                    "handle": handle_b64,
+                    "device": 0,
+                    "storage_offset": 0,
+                    "storage_size": nb,
+                    "encoding": "cuda_ipc",
+                },
             }),
         );
     }
     let body = serde_json::json!({"inputs": input_objs});
-    let body = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
+    let body = match serde_json::to_vec(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            cleanup(rt, &staging);
+            return Err(e.to_string());
+        }
+    };
 
     // ---- HTTP POST ----
-    let resp = ureq::post(&desc.apply_url)
+    let resp = match ureq::post(&desc.apply_url)
         .set("Content-Type", "application/json")
         .set("Accept", "application/json+cuda_ipc")
         .send_bytes(&body)
-        .map_err(|e| format!("HTTP apply failed: {e}"))?;
-    let payload: serde_json::Value =
-        serde_json::from_reader(resp.into_reader()).map_err(|e| e.to_string())?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            cleanup(rt, &staging);
+            return Err(format!("HTTP apply failed: {e}"));
+        }
+    };
+    let payload: serde_json::Value = match serde_json::from_reader(resp.into_reader()) {
+        Ok(p) => p,
+        Err(e) => {
+            cleanup(rt, &staging);
+            return Err(e.to_string());
+        }
+    };
 
     // ---- For each output, decode cuda_ipc and copy into XLA's buffer ----
+    let mut result = Ok(());
     for (buf, key) in outputs.iter().zip(desc.output_keys.iter()) {
-        let arr = payload
-            .get(key)
-            .ok_or_else(|| format!("output '{key}' missing from response"))?;
-        decode_cuda_ipc_into(&rt, arr, buf, stream)?;
+        match payload.get(key) {
+            Some(arr) => {
+                if let Err(e) = decode_cuda_ipc_into(&rt, arr, buf, stream) {
+                    result = Err(e);
+                    break;
+                }
+            }
+            None => {
+                result = Err(format!("output '{key}' missing from response"));
+                break;
+            }
+        }
     }
 
     // Ensure copies complete before we return (XLA reuses these buffers).
-    rt.stream_synchronize(stream)?;
-    Ok(())
+    if result.is_ok() {
+        result = rt.stream_synchronize(stream);
+    }
+
+    // The server has copied the inputs out during the request; free staging now.
+    cleanup(rt, &staging);
+    result
 }
 
 /// Open a cuda_ipc array handle and copy its bytes into `out` (device->device).

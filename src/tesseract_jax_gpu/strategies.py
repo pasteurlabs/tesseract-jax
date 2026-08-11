@@ -110,16 +110,18 @@ def _make_runner_a(
     out_leaf_getters = _out_leaf_getters(out_tree, out_avals)
 
     def run(inputs: list) -> list:
-        # Inputs host-side (base64); outputs come back cuda_ipc (on GPU).
-        host_inputs = {
-            key: _view_to_host(_cupy_view(ptr, typestr, tuple(shape)))
+        # GPU-direct both ways: pass the input device arrays through as cupy
+        # views (no host copy). In cuda_ipc mode the client exports each GPU
+        # input via a CUDA IPC handle, and outputs come back cuda_ipc (on GPU).
+        gpu_inputs = {
+            key: _cupy_view(ptr, typestr, tuple(shape))
             for key, (ptr, typestr, shape) in zip(input_keys, inputs, strict=True)
         }
-        # Request cuda_ipc *outputs* for the duration of this call only, so the
-        # shared client's default output format is not permanently mutated
-        # (which would break other, non-GPU-direct uses of the same client).
+        # Request cuda_ipc encoding for the duration of this call only, so the
+        # shared client's default format is not permanently mutated (which would
+        # break other, non-GPU-direct uses of the same client).
         with _cuda_ipc_output(tesseract_client):
-            result = tesseract_client.apply(host_inputs)
+            result = tesseract_client.apply(gpu_inputs)
         return [get(result) for get in out_leaf_getters]
 
     return run

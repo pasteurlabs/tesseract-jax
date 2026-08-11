@@ -1,0 +1,14 @@
+        size |  baseline(host-callback) |     A(C++ / py cuda_ipc) |           B(Rust native)
+---------------------------------------------------------------------------------------------
+        1000 |                 2.634ms |                 4.015ms |                 2.949ms
+       10000 |                 3.061ms |                 3.994ms |                 2.905ms
+      100000 |                 6.464ms |                 4.006ms |                 2.903ms
+     1000000 |                96.528ms |                 4.372ms |                 3.663ms
+    10000000 |              1093.006ms |                 6.228ms |                 5.279ms
+
+speedup vs baseline (median latency, higher = faster):
+  n=     1000: A(C++ / py cuda_ipc): 0.66x, B(Rust native): 0.89x
+  n=    10000: A(C++ / py cuda_ipc): 0.77x, B(Rust native): 1.05x
+  n=   100000: A(C++ / py cuda_ipc): 1.61x, B(Rust native): 2.23x
+  n=  1000000: A(C++ / py cuda_ipc): 22.08x, B(Rust native): 26.35x
+  n= 10000000: A(C++ / py cuda_ipc): 175.50x, B(Rust native): 207.06x

@@ -36,6 +36,9 @@ type MemcpyAsync =
 type StreamSync = unsafe extern "C" fn(*mut c_void) -> c_int;
 type IpcOpen = unsafe extern "C" fn(*mut *mut c_void, CudaIpcMemHandle, u32) -> c_int;
 type IpcClose = unsafe extern "C" fn(*mut c_void) -> c_int;
+type IpcGetHandle = unsafe extern "C" fn(*mut CudaIpcMemHandle, *mut c_void) -> c_int;
+type Malloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
+type Free = unsafe extern "C" fn(*mut c_void) -> c_int;
 type GetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 
 pub struct Runtime {
@@ -46,6 +49,9 @@ pub struct Runtime {
     stream_sync: RawSymbol<StreamSync>,
     ipc_open: RawSymbol<IpcOpen>,
     ipc_close: RawSymbol<IpcClose>,
+    ipc_get_handle: RawSymbol<IpcGetHandle>,
+    malloc: RawSymbol<Malloc>,
+    free: RawSymbol<Free>,
     get_error_string: Option<RawSymbol<GetErrorString>>,
 }
 
@@ -88,6 +94,9 @@ pub fn runtime() -> Result<&'static Runtime, String> {
             let stream_sync = load(&lib, b"cudaStreamSynchronize")?;
             let ipc_open = load(&lib, b"cudaIpcOpenMemHandle")?;
             let ipc_close = load(&lib, b"cudaIpcCloseMemHandle")?;
+            let ipc_get_handle = load(&lib, b"cudaIpcGetMemHandle")?;
+            let malloc = load(&lib, b"cudaMalloc")?;
+            let free = load(&lib, b"cudaFree")?;
             let get_error_string = load(&lib, b"cudaGetErrorString").ok();
             Ok(Runtime {
                 _lib: lib,
@@ -97,6 +106,9 @@ pub fn runtime() -> Result<&'static Runtime, String> {
                 stream_sync,
                 ipc_open,
                 ipc_close,
+                ipc_get_handle,
+                malloc,
+                free,
                 get_error_string,
             })
         }
@@ -134,6 +146,7 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn memcpy_dtoh(
         &self,
         dst: *mut c_void,
@@ -199,5 +212,53 @@ impl Runtime {
             return Err(format!("cudaIpcCloseMemHandle failed: {}", self.err(rc)));
         }
         Ok(())
+    }
+
+    pub fn malloc(&self, n: usize) -> Result<*mut c_void, String> {
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let rc = unsafe { (self.malloc.0)(&mut ptr, n) };
+        if rc != CUDA_SUCCESS {
+            return Err(format!("cudaMalloc({n}) failed: {}", self.err(rc)));
+        }
+        Ok(ptr)
+    }
+
+    pub fn free(&self, ptr: *mut c_void) -> Result<(), String> {
+        let rc = unsafe { (self.free.0)(ptr) };
+        if rc != CUDA_SUCCESS {
+            return Err(format!("cudaFree failed: {}", self.err(rc)));
+        }
+        Ok(())
+    }
+
+    /// Synchronous device->device copy (default stream). Used to stage an input
+    /// into a fresh cudaMalloc buffer before exporting it.
+    pub fn memcpy_dtod_sync(
+        &self,
+        dst: *mut c_void,
+        src: *const c_void,
+        n: usize,
+    ) -> Result<(), String> {
+        let rc = unsafe { (self.memcpy.0)(dst, src, n, CUDA_MEMCPY_DTOD) };
+        if rc != CUDA_SUCCESS {
+            return Err(format!("cudaMemcpy(DtoD) failed: {}", self.err(rc)));
+        }
+        Ok(())
+    }
+
+    /// cudaIpcGetMemHandle on a device pointer. Returns the 64 raw handle bytes.
+    /// The pointer must be a plain cudaMalloc allocation (the legacy IPC API
+    /// rejects VMM/pool-backed memory, which is why callers stage first).
+    pub fn ipc_get_handle(&self, ptr: *mut c_void) -> Result<[u8; 64], String> {
+        let mut h = CudaIpcMemHandle { reserved: [0; 64] };
+        let rc = unsafe { (self.ipc_get_handle.0)(&mut h, ptr) };
+        if rc != CUDA_SUCCESS {
+            return Err(format!("cudaIpcGetMemHandle failed: {}", self.err(rc)));
+        }
+        let mut out = [0u8; 64];
+        for (i, b) in h.reserved.iter().enumerate() {
+            out[i] = *b as u8;
+        }
+        Ok(out)
     }
 }
