@@ -19,6 +19,10 @@ here = Path(__file__).parent
 jax.config.update("jax_enable_x64", True)
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "gpu: requires a CUDA GPU")
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -55,8 +59,15 @@ def _strip_functions_from_api(source: str, func_names: set[str]) -> str:
     return "".join(keep)
 
 
-def _serve_tesseract(tmp_path_factory, api_path: str | Path, *, name: str):
-    """Start a tesseract-runtime server and yield its URL."""
+def _serve_tesseract(
+    tmp_path_factory, api_path: str | Path, *, name: str, extra_env: dict | None = None
+):
+    """Start a tesseract-runtime server and yield its URL.
+
+    ``extra_env`` merges additional environment variables into the server
+    process (e.g. ``TESSERACT_OUTPUT_FORMAT`` / the cuda_ipc opt-in for the GPU
+    fixture).
+    """
     port = _find_free_port()
     timeout = 10
 
@@ -65,6 +76,8 @@ def _serve_tesseract(tmp_path_factory, api_path: str | Path, *, name: str):
     env = os.environ.copy()
     env["TESSERACT_API_PATH"] = str(api_path)
     env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
+    if extra_env:
+        env.update(extra_env)
 
     process = subprocess.Popen(
         [
@@ -120,6 +133,52 @@ def _serve_tesseract(tmp_path_factory, api_path: str | Path, *, name: str):
 def _load_tesseract(folder_name: str) -> Tesseract:
     """Load a Tesseract directly from a test API file."""
     return Tesseract.from_tesseract_api(f"tests/{folder_name}/tesseract_api.py")
+
+
+# ---------------------------------------------------------------------------
+# GPU (cuda_ipc) serving
+# ---------------------------------------------------------------------------
+#
+# Cross-process CUDA IPC needs the Tesseract (producer) and the test process
+# (consumer) to be *separate* processes sharing the GPU -- a process cannot open
+# an IPC handle it exported itself. This reuses the same ``_serve_tesseract``
+# helper as every other served fixture (``tesseract-runtime serve``), just with
+# the cuda_ipc experimental flag and output format passed as extra env.
+
+
+def _gpu_available() -> bool:
+    try:
+        return any(d.platform == "gpu" for d in jax.devices())
+    except Exception:
+        return False
+
+
+def serve_gpu_tesseract(tmp_path_factory, *, output_format: str = "json+base64"):
+    """Serve the GPU test Tesseract with cuda_ipc enabled; yield its URL."""
+    yield from _serve_tesseract(
+        tmp_path_factory,
+        here / "gpu_tesseract" / "tesseract_api.py",
+        name="gpu",
+        extra_env={
+            "TESSERACT_OUTPUT_FORMAT": output_format,
+            # cuda_ipc output is an experimental opt-in in tesseract-core.
+            "TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC": "1",
+        },
+    )
+
+
+@pytest.fixture(scope="module")
+def served_gpu_tesseract(tmp_path_factory):
+    """A served GPU Tesseract (base64 default output). Skips without a GPU/CuPy."""
+    if not _gpu_available():
+        pytest.skip("no GPU backend for JAX")
+    pytest.importorskip("cupy")
+    gen = serve_gpu_tesseract(tmp_path_factory)
+    url = next(gen)
+    try:
+        yield Tesseract.from_url(url)
+    finally:
+        gen.close()
 
 
 # ---------------------------------------------------------------------------

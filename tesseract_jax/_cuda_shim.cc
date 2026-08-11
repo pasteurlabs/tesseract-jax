@@ -18,13 +18,9 @@
 //   calls it directly on its executor thread, with no Python on the stack. To
 //   reach Python we acquire the GIL (pybind11 gil_scoped_acquire) and call a
 //   registered callable.
-// * Two "impls" share this one handler. Strategy A: the Python callback returns
-//   result arrays (as objects exposing __cuda_array_interface__) and the shim
-//   copies them into the output buffers. Strategy B: identical native path; the
-//   difference between A and B lives entirely in the Python callback (how much
-//   of the IPC handshake is done in Python vs. native), so the native shim is
-//   deliberately strategy-agnostic and both reuse it. This keeps the comparison
-//   fair: only the seam behind `dispatch` differs.
+// * The registered Python callback returns the result arrays (as objects
+//   exposing __cuda_array_interface__) and the shim copies them device->device
+//   into XLA's output buffers.
 
 #include <cstdint>
 #include <cstring>
@@ -76,7 +72,7 @@ CudaRuntime& cuda_rt() {
     }
     if (!rt.handle) {
       throw std::runtime_error(
-          "tesseract_jax_gpu: could not dlopen libcudart (is CUDA installed?)");
+          "tesseract_jax: could not dlopen libcudart (is CUDA installed?)");
     }
     rt.Memcpy = reinterpret_cast<decltype(rt.Memcpy)>(
         dlsym(rt.handle, "cudaMemcpy"));
@@ -88,7 +84,7 @@ CudaRuntime& cuda_rt() {
         dlsym(rt.handle, "cudaGetErrorString"));
     if (!rt.Memcpy || !rt.MemcpyAsync || !rt.StreamSynchronize) {
       throw std::runtime_error(
-          "tesseract_jax_gpu: failed to resolve required cudaMemcpy symbols");
+          "tesseract_jax: failed to resolve required cudaMemcpy symbols");
     }
   });
   return rt;
@@ -207,7 +203,7 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     py::object& cb = dispatch_callable();
     if (cb.is_none()) {
       return ffi::Error::Internal(
-          "tesseract_jax_gpu: no dispatch callback registered");
+          "tesseract_jax: no dispatch callback registered");
     }
 
     // Build the list of input views: (ptr, typestr, shape) tuples.

@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
 from typing import Any, Literal
 
 import jax.tree
@@ -54,6 +55,47 @@ class Jaxeract:
         ]["ApplyOutputSchema"]["differentiable_arrays"]
 
         self.available_methods = self.client.available_endpoints
+
+    @contextlib.contextmanager
+    def cuda_ipc(self):
+        """Temporarily make the underlying HTTP client use ``cuda_ipc`` encoding.
+
+        Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
+        the client exports GPU array *inputs* via CUDA IPC handles and decodes
+        ``cuda_ipc`` *outputs* back to GPU arrays -- no host round-trip. Two
+        things must change and be restored:
+
+        * ``_output_format`` (drives both the request encoder and response
+          decoder), and
+        * an ``Accept: application/json+cuda_ipc`` header, since the response
+          format is otherwise the server's default and the client never sends
+          Accept on its own.
+
+        Scoped so the shared client is not permanently mutated (which would leak
+        cuda_ipc behavior onto host-callback / CPU uses of the same client). A
+        no-op for non-HTTP clients (e.g. the in-process ``LocalClient``).
+        """
+        client = getattr(self.client, "_client", None)
+        if client is None or not hasattr(client, "_output_format"):
+            yield
+            return
+        prev_fmt = client._output_format
+        session = getattr(client, "_session", None)
+        had_accept = session is not None and "Accept" in session.headers
+        prev_accept = session.headers.get("Accept") if session is not None else None
+
+        client._output_format = "json+cuda_ipc"
+        if session is not None:
+            session.headers["Accept"] = "application/json+cuda_ipc"
+        try:
+            yield
+        finally:
+            client._output_format = prev_fmt
+            if session is not None:
+                if had_accept:
+                    session.headers["Accept"] = prev_accept
+                else:
+                    session.headers.pop("Accept", None)
 
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,

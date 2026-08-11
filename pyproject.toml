@@ -64,23 +64,17 @@ version-file = "tesseract_jax/_version.py"
 path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tesseract_jax", "src/tesseract_jax_gpu"]
-# Native shims are produced by the custom hook: the C++ shim (Strategy A) into
-# src/tesseract_jax_gpu, and the Rust module (Strategy B) into src/ as a
-# top-level module (its name must match the #[pymodule] name).
+packages = ["tesseract_jax"]
+# The native FFI shim is produced by the custom hook into tesseract_jax/.
 artifacts = [
-    "src/tesseract_jax_gpu/*.so",
-    "src/tesseract_jax_gpu/*.pyd",
-    "src/tesseract_jax_gpu/*.dylib",
-    "src/tesseract_jax_gpu_b.so",
+    "tesseract_jax/*.so",
+    "tesseract_jax/*.pyd",
+    "tesseract_jax/*.dylib",
 ]
-force-include = { "src/tesseract_jax_gpu_b.so" = "tesseract_jax_gpu_b.so" }
 
 [tool.hatch.build.targets.sdist]
 include = [
     "tesseract_jax/",
-    "src/tesseract_jax_gpu/",
-    "rust/tesseract_jax_gpu_b/",
     "hatch_build.py",
     "examples/",
     "requirements.txt",

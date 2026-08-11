@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import operator
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import jax
@@ -384,6 +384,54 @@ def tesseract_dispatch(
 tesseract_dispatch_p.def_impl(tesseract_dispatch)
 
 
+def _build_dispatch_closure(
+    *,
+    static_args: tuple[_Hashable, ...],
+    input_pytreedef: PyTreeDef,
+    output_pytreedef: PyTreeDef,
+    output_avals: tuple[ShapeDtypeStruct, ...],
+    is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
+    client: Jaxeract,
+    eval_func: str,
+    jac_input_paths: tuple[str, ...] | None,
+    jac_output_paths: tuple[str, ...] | None,
+    jac_mode: Literal["fwd", "bwd"],
+) -> Callable[..., tuple]:
+    """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
+
+    Returns ``dispatch(*args) -> tuple`` calling ``getattr(client, eval_func)``
+    with the primitive's flattening metadata. This is transport-agnostic: the CPU
+    lowering runs it via a host callback; the GPU lowering runs it via the native
+    FFI handler with the client in ``cuda_ipc`` mode. Because it dispatches by
+    ``eval_func``, *every* endpoint (apply / jvp / vjp / jacobian) is generic
+    across both transports.
+    """
+    extra_kwargs: dict[str, Any] = {}
+    if eval_func == "jacobian":
+        extra_kwargs["jac_input_paths"] = jac_input_paths
+        extra_kwargs["jac_output_paths"] = jac_output_paths
+        extra_kwargs["jac_mode"] = jac_mode
+
+    def dispatch(*args: ArrayLike) -> tuple:
+        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
+        out = getattr(client, eval_func)(
+            args,
+            static_args_,
+            input_pytreedef,
+            output_pytreedef,
+            output_avals,
+            is_static_mask,
+            has_tangent,
+            **extra_kwargs,
+        )
+        if not isinstance(out, tuple):
+            out = (out,)
+        return out
+
+    return dispatch
+
+
 def tesseract_dispatch_lowering(
     ctx: Any,
     *array_args: ArrayLike | ShapedArray | Any,
@@ -401,34 +449,26 @@ def tesseract_dispatch_lowering(
     jac_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
-    """Defines how to dispatch lowering the computation."""
+    """CPU lowering: run the dispatch closure via a host callback."""
     _raise_if_unimplemented(eval_func, client)
 
-    extra_kwargs: dict[str, Any] = {}
-    if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
-        extra_kwargs["jac_mode"] = jac_mode
-
-    def _dispatch(*args: ArrayLike) -> Any:
-        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
-        out = getattr(client, eval_func)(
-            args,
-            static_args_,
-            input_pytreedef,
-            output_pytreedef,
-            output_avals,
-            is_static_mask,
-            has_tangent,
-            **extra_kwargs,
-        )
-        if not isinstance(out, tuple):
-            out = (out,)
-        return out
+    dispatch = _build_dispatch_closure(
+        static_args=static_args,
+        input_pytreedef=input_pytreedef,
+        output_pytreedef=output_pytreedef,
+        output_avals=output_avals,
+        is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
+        client=client,
+        eval_func=eval_func,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
+    )
 
     result, _, keepalive = mlir.emit_python_callback(
         ctx,
-        _dispatch,
+        dispatch,
         None,
         array_args,
         ctx.avals_in,
@@ -439,7 +479,85 @@ def tesseract_dispatch_lowering(
     return result
 
 
+def tesseract_dispatch_gpu_lowering(
+    ctx: Any,
+    *array_args: ArrayLike | ShapedArray | Any,
+    static_args: tuple[_Hashable, ...],
+    input_pytreedef: PyTreeDef,
+    output_pytreedef: PyTreeDef,
+    output_avals: tuple[ShapeDtypeStruct, ...],
+    is_static_mask: tuple[bool, ...],
+    has_tangent: tuple[bool, ...],
+    client: Jaxeract,
+    eval_func: str,
+    vmap_method: VmapMethod = None,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
+) -> Any:
+    """GPU lowering: run the dispatch closure via the native FFI handler.
+
+    Falls back to the host-callback lowering if the native shim is unavailable
+    (e.g. CPU-only install), so correctness never depends on the GPU path.
+    """
+    from tesseract_jax import gpu_ffi
+
+    if not gpu_ffi.is_available():
+        return tesseract_dispatch_lowering(
+            ctx,
+            *array_args,
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=output_avals,
+            is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
+            client=client,
+            eval_func=eval_func,
+            vmap_method=vmap_method,
+            materialize_jacobian=materialize_jacobian,
+            jac_input_paths=jac_input_paths,
+            jac_output_paths=jac_output_paths,
+            jac_mode=jac_mode,
+        )
+
+    _raise_if_unimplemented(eval_func, client)
+
+    inner = _build_dispatch_closure(
+        static_args=static_args,
+        input_pytreedef=input_pytreedef,
+        output_pytreedef=output_pytreedef,
+        output_avals=output_avals,
+        is_static_mask=is_static_mask,
+        has_tangent=has_tangent,
+        client=client,
+        eval_func=eval_func,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
+    )
+
+    # Run the dispatch with the client in cuda_ipc mode, so GPU inputs are
+    # exported by IPC handle and outputs come back on-device.
+    def gpu_dispatch(args: tuple) -> tuple:
+        with client.cuda_ipc():
+            return inner(*args)
+
+    target = gpu_ffi.ensure_registered()
+    # The token must outlive lowering (the FFI call reads it at execution time).
+    # Lowering happens once per compiled program, so the registry is bounded by
+    # the number of distinct compiled dispatches; we intentionally do not release.
+    token = gpu_ffi.register_dispatch(gpu_dispatch)
+
+    rule = jax.ffi.ffi_lowering(target)
+    return rule(ctx, *array_args, token=np.int64(token))
+
+
 mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
+mlir.register_lowering(
+    tesseract_dispatch_p, tesseract_dispatch_gpu_lowering, platform="cuda"
+)
 
 
 def tesseract_dispatch_batching(
