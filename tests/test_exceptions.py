@@ -19,9 +19,10 @@ callback is lowered as side-effecting or pure.
 Exception *types* are normalised twice on the way out, so these tests pin what a
 caller actually sees rather than what the endpoint raised:
 
-* tesseract-core wraps whatever the endpoint raised in ``RuntimeError``
-* under ``jit``, anything raised inside the callback arrives as
-  ``jax.errors.JaxRuntimeError``
+* tesseract-core wraps anything raised *by the endpoint body* in ``RuntimeError``,
+  which covers cases 3 and 4 but not 2 -- input validation happens while parsing
+  the payload, before the body runs, so it surfaces as a ``ValidationError``
+* under ``jit``, all of them arrive as ``jax.errors.JaxRuntimeError``
 
 Case 1 escapes both, because it fails while tracing rather than in the callback.
 The *message* survives intact either way.
@@ -72,7 +73,12 @@ def test_abstract_validation_fails_before_dispatch(validating_tess, monkeypatch)
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_value_based_input_validation_reaches_caller(validating_tess, use_jit):
-    """`x > 0` depends on the value, so it can only fail at run time."""
+    """`x > 0` depends on the value, so it can only fail at run time.
+
+    The bound is a schema-level ``AfterValidator``, so it fires while the payload is
+    being parsed rather than in the endpoint body -- which is why this is a
+    ``ValidationError`` and not wrapped in ``RuntimeError`` like cases 3 and 4.
+    """
 
     def f(x):
         return apply_tesseract(validating_tess, dict(x=x, v=V))["result"]
@@ -80,9 +86,8 @@ def test_value_based_input_validation_reaches_caller(validating_tess, use_jit):
     if use_jit:
         f = jax.jit(f)
 
-    with pytest.raises(
-        _expected_error(use_jit), match=r"x must be strictly positive, got -1\.0"
-    ):
+    expected = jax.errors.JaxRuntimeError if use_jit else ValidationError
+    with pytest.raises(expected, match=r"x must be strictly positive, got -1\.0"):
         jax.block_until_ready(f(jnp.array(-1.0, dtype="float64")))
 
 

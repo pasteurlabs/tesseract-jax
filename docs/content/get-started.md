@@ -101,16 +101,18 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 - **Tesseracts are assumed pure functions** of their inputs. Tesseract-JAX lowers each
   endpoint call as a pure operation, which is what allows repeated identical calls to be
   collapsed into a single request. Where purity does not hold, the compiler is free to
-  surprise you:
+  surprise you. All of the following require compilation, so they apply under
+  `jax.jit` (including anything jitted internally) and never to eager execution, where
+  each call runs as soon as it is reached:
   - **A call whose result is provably unused may not happen.**
 
     ```python
     @jax.jit
     def unused_result(a):
-        _ = apply_tesseract(tess, inputs)["c"]   # not called: nothing depends on it
+        _ = apply_tesseract(tess, inputs)["c"]  # not called: nothing depends on it
         return a * 2.0
 
-    threshold_ok = False   # a concrete value, not a traced argument
+    threshold_ok = False  # a concrete value, not a traced argument
 
     @jax.jit
     def dead_branch():
@@ -118,10 +120,10 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
         return jnp.where(threshold_ok, apply_tesseract(tess, inputs)["c"], 0.0)
     ```
 
-    If the endpoint has an observable side effect — writing a file, logging to a
-    tracking server — that side effect will not happen either, and neither will any
-    error it would have raised. `abstract_eval` is still called while tracing, so a
-    Tesseract that fails abstract validation still fails.
+    If the endpoint has an observable side effect (writing a file, logging to a tracking
+    server), that side effect will not happen either, and neither will any error it
+    would have raised. `abstract_eval` is still called while tracing, so a Tesseract
+    that fails abstract validation still fails.
 
     This cuts both ways: guarding a call you know would be rejected is a legitimate way
     to avoid it, as long as the guard is something the compiler can evaluate. A guard on
@@ -130,9 +132,9 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   - **How many times a call happens is not guaranteed.** Two identical calls in one
     traced function may be collapsed into one, and the compiler is in principle free to
     recompute a call to save memory. An endpoint that returns different results for
-    identical inputs — sampling without a seed input, reading mutable external state —
-    can therefore be called once where you expected twice, with both results being the
-    same value.
+    identical inputs, such as one sampling without a seed input or reading mutable
+    external state, can therefore be called once where you expected twice, with both
+    results being the same value.
 
   - **Ordering is not guaranteed** relative to other host callbacks such as
     `jax.debug.print`.
