@@ -233,7 +233,7 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 def tesseract_dispatch_transpose_rule(
     cotangent: Sequence[ArrayLike | ad.Zero],
-    *args: ArrayLike,
+    *args: ArrayLike | ad.UndefinedPrimal,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
     output_pytreedef: PyTreeDef,
@@ -250,6 +250,22 @@ def tesseract_dispatch_transpose_rule(
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     primal_args = args[:n_primals]
+
+    # Primal slots must hold concrete residuals. An UndefinedPrimal here means the
+    # caller asked us to transpose with respect to a primal -- J(x)·v is linear in
+    # the tangent v but not in x, so no endpoint can serve it. JAX itself refuses
+    # the equivalent transpose, so bail with guidance instead of letting the
+    # UndefinedPrimal fall through into the checks below.
+    if any(ad.is_undefined_primal(p) for p in primal_args):
+        raise ValueError(
+            "Transpose of the Tesseract primitive requires concrete primal "
+            "values, but received UndefinedPrimal. This typically happens when "
+            "jax.linear_transpose is applied to a function whose arguments "
+            "include both primals and tangents. Close over the primals instead, "
+            "e.g.:\n"
+            "  primals = (x,)\n"
+            "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
+        )
 
     # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
     # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
