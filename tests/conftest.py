@@ -233,6 +233,11 @@ def mixed_dtype_tess() -> Tesseract:
     return _load_tesseract("mixed_dtype_tesseract")
 
 
+@pytest.fixture
+def validating_tess() -> Tesseract:
+    return _load_tesseract("validating_tesseract")
+
+
 # ---------------------------------------------------------------------------
 # Shared test inputs
 # ---------------------------------------------------------------------------
