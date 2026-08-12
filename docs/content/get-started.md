@@ -97,3 +97,49 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   ```{note}
   This only affects `from_tesseract_api` (in-process execution). Tesseracts served via Docker (`from_image`) run in a separate process and are not subject to this restriction.
   ```
+
+- **Tesseracts are assumed pure functions** of their inputs. Tesseract-JAX lowers each
+  endpoint call as a pure operation, which is what allows repeated identical calls to be
+  collapsed into a single request. Where purity does not hold, the compiler is free to
+  surprise you. All of the following require compilation, so they apply under
+  `jax.jit` (including anything jitted internally) and never to eager execution, where
+  each call runs as soon as it is reached:
+  - **A call whose result is provably unused may not happen.**
+
+    ```python
+    @jax.jit
+    def unused_result(a):
+        _ = apply_tesseract(tess, inputs)["c"]  # not called: nothing depends on it
+        return a * 2.0
+
+    threshold_ok = False  # a concrete value, not a traced argument
+
+    @jax.jit
+    def dead_branch():
+        # the predicate is known at compile time, so the branch is dead
+        return jnp.where(threshold_ok, apply_tesseract(tess, inputs)["c"], 0.0)
+    ```
+
+    If the endpoint has an observable side effect (writing a file, logging to a tracking
+    server), that side effect will not happen either, and neither will any error it
+    would have raised. `abstract_eval` is still called while tracing, so a Tesseract
+    that fails abstract validation still fails.
+
+    This cuts both ways: guarding a call you know would be rejected is a legitimate way
+    to avoid it, as long as the guard is something the compiler can evaluate. A guard on
+    a traced value cannot be folded, so the call still happens.
+
+  - **How many times a call happens is not guaranteed.** Two identical calls in one
+    traced function may be collapsed into one, and the compiler is in principle free to
+    recompute a call to save memory. An endpoint that returns different results for
+    identical inputs, such as one sampling without a seed input or reading mutable
+    external state, can therefore be called once where you expected twice, with both
+    results being the same value.
+
+  - **Ordering is not guaranteed** relative to other host callbacks such as
+    `jax.debug.print`.
+
+  If you have a Tesseract that genuinely depends on being called a particular number of
+  times, or in a particular order, please
+  [open an issue](https://github.com/pasteurlabs/tesseract-jax/issues) describing the
+  workflow.
