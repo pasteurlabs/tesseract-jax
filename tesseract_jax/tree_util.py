@@ -79,7 +79,7 @@ def _prune_nones(tree: PyTree) -> PyTree:
     if isinstance(tree, dict):
         return {k: _prune_nones(v) for k, v in tree.items() if v is not None}
     elif isinstance(tree, tuple | list):
-        return type(tree)(_prune_nones(v) for v in tree if v is not None)
+        return type(tree)(_prune_nones(v) for v in tree)
     else:
         return tree
 
