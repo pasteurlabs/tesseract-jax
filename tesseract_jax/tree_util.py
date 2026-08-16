@@ -56,9 +56,6 @@ def unflatten_args(
     combined_args = combine_args(array_args, static_args_converted, is_static_mask)
     result = jax.tree.unflatten(input_pytreedef, combined_args)
 
-    if remove_static_args:
-        result = _prune_nones(result)
-
     # Since jax 0.8, when tracing stuff without jit arrays are wrapped
     # by TypedNdArray (thin wrapper around a numpy array); this snippet converts them
     # back to ndarrays for downstream calculations.
@@ -73,15 +70,6 @@ def unflatten_args(
         pass
 
     return result
-
-
-def _prune_nones(tree: PyTree) -> PyTree:
-    if isinstance(tree, dict):
-        return {k: _prune_nones(v) for k, v in tree.items() if v is not None}
-    elif isinstance(tree, tuple | list):
-        return type(tree)(_prune_nones(v) for v in tree)
-    else:
-        return tree
 
 
 def _merge_path(
