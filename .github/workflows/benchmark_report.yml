@@ -27,9 +27,14 @@ permissions:
 
 jobs:
   report:
-    if: github.event.workflow_run.event == 'pull_request'
+    # A failed benchmark run has nothing worth posting, and the `benchmark`
+    # check already surfaces that failure on the PR. Gating here (as mosaic's
+    # docs-publish.yml does) skips the runner entirely rather than starting up
+    # only to find no report.
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-
     steps:
       - name: Download benchmark results
         id: download
@@ -41,11 +46,9 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
 
-      # The report is the gate: it and `pr_number.txt` are written in one step
-      # from one variable, so either both exist or neither does. A missing
-      # report means the benchmark run failed, which the `benchmark` check
-      # already reports on the PR, so bail out quietly rather than adding a
-      # second red X.
+      # A missing report means the benchmark run produced nothing to post, which
+      # the `benchmark` check already surfaces on the PR. Bail out quietly
+      # rather than adding a second red X.
       - name: Check for a report
         id: check
         run: |
@@ -56,32 +59,41 @@ jobs:
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
 
-      # `pr_number.txt` is fork-controlled: on `pull_request` the producer
-      # workflow file comes from the PR head, so a fork could name any PR and
-      # make the bot comment on an unrelated thread. Two defences:
-      #   1. Strip to digits, so it can never reach a shell as anything else.
-      #   2. Confirm the PR really belongs to this run, by matching its head SHA
-      #      against `workflow_run.head_sha` from the trusted event payload.
-      # A mismatch also happens benignly when the PR is force-pushed mid-run, so
-      # it warns and skips rather than failing; the new push posts its own run.
-      - name: Resolve and verify PR number
+      # Which PR to comment on is derived entirely from the event payload, which
+      # a fork cannot influence — never from the artifact, whose producer
+      # workflow file comes from the PR head. `workflow_run.pull_requests` is
+      # empty for fork PRs and `commits/{sha}/pulls` has the same blind spot,
+      # but head_repository + head_branch identify the source branch, which is
+      # enough to look the PR up.
+      - name: Resolve PR number
         id: pr
         if: steps.check.outputs.found == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          HEAD_LABEL: "${{ github.event.workflow_run.head_repository.owner.login }}:${{ github.event.workflow_run.head_branch }}"
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          number=$(tr -dc '0-9' < benchmark-results/pr_number.txt | head -c 9)
-          if [ -z "$number" ]; then
-            echo "::error::Artifact contained no valid PR number"
-            exit 1
+          matches=$(gh api -X GET "/repos/$REPO/pulls" \
+            -f "head=$HEAD_LABEL" -f state=open \
+            -q '.[] | "\(.number) \(.head.sha)"')
+
+          if [ -z "$matches" ]; then
+            echo "::warning::No open PR found for $HEAD_LABEL; skipping comment"
+            exit 0
           fi
 
-          pr_sha=$(gh api "/repos/$REPO/pulls/$number" -q .head.sha 2>/dev/null \
-            | grep -oE '^[0-9a-f]{40}$' || true)
-          if [ "$pr_sha" != "$RUN_SHA" ]; then
-            echo "::warning::PR #$number head '$pr_sha' does not match run SHA '$RUN_SHA'; refusing to comment"
+          # One branch can back several open PRs (differing base branches). With
+          # a single match take it, so a force-push mid-run still gets its
+          # comment; otherwise disambiguate on this run's SHA.
+          if [ "$(printf '%s\n' "$matches" | wc -l | tr -d ' ')" -eq 1 ]; then
+            number=$(printf '%s\n' "$matches" | awk '{print $1}')
+          else
+            number=$(printf '%s\n' "$matches" | awk -v sha="$RUN_SHA" '$2 == sha {print $1; exit}')
+          fi
+
+          if [ -z "$number" ]; then
+            echo "::warning::Could not unambiguously resolve a PR for $HEAD_LABEL at $RUN_SHA; skipping"
             exit 0
           fi
 

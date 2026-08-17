@@ -86,11 +86,10 @@ jobs:
 
           echo "has_baseline=true" >> $GITHUB_OUTPUT
 
-      # Secrets are withheld from `pull_request` runs on fork PRs, so the
-      # comment is posted by the privileged `Benchmark Report` workflow
-      # instead. It needs to be told which PR this is: `workflow_run` payloads
-      # leave `pull_requests` empty for forks, and the commits/{sha}/pulls API
-      # has the same blind spot, so the artifact is the only channel that works.
+      # Secrets are withheld from `pull_request` runs on fork PRs, so the comment
+      # is posted by the privileged `Benchmark Report` workflow instead. It
+      # works out which PR this is from the `workflow_run` event payload, so
+      # nothing needs to be handed over here beyond the report itself.
       - name: Generate comparison report
         if: github.event_name == 'pull_request'
         env:
@@ -107,11 +106,6 @@ jobs:
             --pr-number "$PR_NUMBER" \
             --output benchmark_report.md
 
-          # Machine-readable copy, so the reporting workflow never has to parse
-          # the report back out. Same variable as above, so the two cannot
-          # disagree, and `bash -e` means a failure above skips this entirely.
-          echo "$PR_NUMBER" > pr_number.txt
-
       - name: Upload benchmark results
         if: always()
         uses: actions/upload-artifact@v7
@@ -121,6 +115,5 @@ jobs:
             current_benchmarks.json
             baseline/baseline_benchmarks.json
             benchmark_report.md
-            pr_number.txt
           if-no-files-found: ignore
           retention-days: 30
