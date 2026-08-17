@@ -559,6 +559,7 @@ def tesseract_dispatch_batching(
                 has_tangent=has_tangent,
                 client=client,
                 eval_func=eval_func,
+                vmap_method=vmap_method,
             )
 
     new_args = [
@@ -581,6 +582,10 @@ def tesseract_dispatch_batching(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
 
 
@@ -596,6 +601,7 @@ def _batched_via_jacobian(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -665,7 +671,10 @@ def _batched_via_jacobian(
         has_tangent=has_tangent,
         client=client,
         eval_func="jacobian",
-        vmap_method=None,
+        # Propagated, not hard-coded: an outer vmap batches this bind too, and
+        # ``None`` routes it to the not-implemented handler, which then tells
+        # the caller to pass the vmap_method they already passed.
+        vmap_method=vmap_method,
         jac_input_paths=tuple(diff_input_path_to_pos),
         jac_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",

@@ -521,3 +521,78 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) == Jaxeract(vectoradd_tess)
     assert hash(Jaxeract(vectoradd_tess)) == hash(Jaxeract(vectoradd_tess))
     assert Jaxeract(vectoradd_tess) != object()
+
+
+# ---------------------------------------------------------------------------
+# Nested batching: an outer vmap over a jacobian shortcut
+# ---------------------------------------------------------------------------
+
+
+def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess):
+    """``vmap(jacfwd(f))`` works when a vmap_method is supplied.
+
+    The jacobian shortcut binds a nested ``jacobian`` call. That bind used to
+    hard-code ``vmap_method=None``, so an outer vmap batching it resolved to
+    the not-implemented handler and told the caller to pass the vmap_method
+    they had already passed. Regression from the shortcut landing in #191.
+    """
+
+    def f(x):
+        return apply_tesseract(univariate_tess, {"x": x}, vmap_method="sequential")
+
+    xs = jnp.arange(3.0, dtype="float32")
+    got = jax.vmap(jax.jacfwd(f))(xs)["result"]
+    expected = jnp.stack([jax.jacfwd(f)(x)["result"] for x in xs])
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess):
+    """The nested bind must keep its jacobian path restriction and mode.
+
+    Threading only ``vmap_method`` is not enough: with the path parameters
+    dropped, the inner bind reverts to every differentiable path and the
+    contraction fails with mismatched shapes on any multi-input schema.
+    """
+    base = {
+        "alpha": {"x": jnp.ones(3, "float32"), "y": jnp.ones(4, "float32")},
+        "beta": {
+            "z": jnp.ones(5, "float32"),
+            "gamma": {"u": jnp.ones(6, "float32"), "v": jnp.ones(7, "float32")},
+        },
+        "delta": [jnp.ones(8, "float32"), jnp.ones(9, "float32")],
+        "epsilon": {"k": jnp.ones(2, "float32"), "m": jnp.ones(10, "float32")},
+        "zeta": [jnp.ones(11, "float32"), jnp.ones(12, "float32")],
+    }
+
+    def f(x):
+        inputs = {**base, "alpha": {**base["alpha"], "x": x}}
+        return apply_tesseract(pytree_tess, inputs, vmap_method="sequential")["result"]
+
+    xs = jnp.stack([jnp.ones(3, "float32") * s for s in (1.0, 2.0)])
+    got = jax.vmap(jax.jacfwd(f))(xs)
+    expected = jnp.stack([jax.jacfwd(f)(x) for x in xs])
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+def test_materialize_jacobian_false_survives_a_batching_rebind(
+    univariate_tess, monkeypatch
+):
+    """``materialize_jacobian=False`` must still hold after an inner re-bind.
+
+    The flag is the documented escape hatch for when materializing the
+    Jacobian is too expensive, so silently taking the shortcut anyway is the
+    cost the caller asked to avoid.
+    """
+
+    def f(x):
+        return apply_tesseract(
+            univariate_tess,
+            {"x": x},
+            vmap_method="sequential",
+            materialize_jacobian=False,
+        )
+
+    counts = _spy_endpoints(univariate_tess, monkeypatch)
+    jax.jacfwd(jax.vmap(f))(jnp.arange(3.0, dtype="float32"))
+
+    assert counts["jacobian"] == 0
