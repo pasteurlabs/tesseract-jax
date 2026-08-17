@@ -11,6 +11,7 @@ import jax.numpy as jnp
 import jax.tree
 import numpy as np
 from jax import ShapeDtypeStruct, dtypes, extend
+from jax._src.interpreters import partial_eval as pe
 from jax.core import ShapedArray
 from jax.interpreters import ad, batching, mlir
 from jax.tree_util import PyTreeDef
@@ -18,9 +19,11 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
+from tesseract_jax.dce import tesseract_dispatch_dce_rule
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
+    live_jvp_output_positions,
     split_args,
     unflatten_args,
 )
@@ -67,8 +70,8 @@ def tesseract_dispatch_abstract_eval(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
@@ -89,7 +92,7 @@ def tesseract_dispatch_abstract_eval(
 
     if eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
-        # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
+        # `live_input_paths` / `live_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
@@ -113,13 +116,13 @@ def tesseract_dispatch_abstract_eval(
             if v is not None
         }
         jac_inputs = (
-            list(jac_input_paths)
-            if jac_input_paths is not None
+            list(live_input_paths)
+            if live_input_paths is not None
             else list(path_to_shape.keys())
         )
         jac_outputs = (
-            list(jac_output_paths)
-            if jac_output_paths is not None
+            list(live_output_paths)
+            if live_output_paths is not None
             else list(out_path_to_aval.keys())
         )
         # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
@@ -135,9 +138,22 @@ def tesseract_dispatch_abstract_eval(
                 )
         return tuple(avals_out)
 
-    # Those have the same shape as the outputs
+    # apply / jvp emit one aval per (live) output leaf with the output's shape.
+    # `live_output_paths` (set by the DCE rule) prunes the jvp output tangents to
+    # those still used downstream; non-differentiable leaves are always retained
+    # and apply is never pruned.
     assert eval_func in ("apply", "jacobian_vector_product")
-    return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
+    if eval_func == "jacobian_vector_product":
+        positions = live_jvp_output_positions(
+            output_pytreedef,
+            len(output_avals),
+            client.differentiable_output_paths,
+            live_output_paths,
+        )
+        selected = tuple(output_avals[p] for p in positions)
+    else:
+        selected = output_avals
+    return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in selected)
 
 
 def tesseract_dispatch_jvp_rule(
@@ -153,6 +169,8 @@ def tesseract_dispatch_jvp_rule(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -220,7 +238,7 @@ def tesseract_dispatch_jvp_rule(
     # size such a mask and it keeps the inherited value -- as does `res`, which
     # reproduces the original call over the original operands.
     #
-    # Not cosmetic: the batching rule turns `has_tangent` into `jac_input_paths`,
+    # Not cosmetic: the batching rule turns `has_tangent` into `live_input_paths`,
     # i.e. which columns of the Jacobian get requested, so an inherited mask
     # over-fetches whenever only some arguments are differentiated.
     # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the
@@ -249,6 +267,8 @@ def tesseract_dispatch_jvp_rule(
         ),
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
+        live_input_paths=live_input_paths,
+        live_output_paths=live_output_paths,
     )
 
     res = tesseract_dispatch_p.bind(
@@ -263,6 +283,8 @@ def tesseract_dispatch_jvp_rule(
         eval_func=eval_func,
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
+        live_input_paths=live_input_paths,
+        live_output_paths=live_output_paths,
     )
 
     return tuple(res), tuple(jvp)
@@ -284,6 +306,9 @@ def tesseract_dispatch_transpose_rule(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
     assert eval_func in ("jacobian_vector_product",)
@@ -306,6 +331,26 @@ def tesseract_dispatch_transpose_rule(
             "  primals = (x,)\n"
             "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
         )
+
+    # The forward-mode DCE rule may have pruned this jvp equation's outputs down
+    # to ``live_output_paths``, in which case ``cotangent`` only carries the live
+    # leaves. Scatter them back to the full output layout (symbolic zeros for the
+    # pruned leaves) so the logic below — and the VJP it dispatches — sees the
+    # un-pruned structure. ``live_output_paths is None`` ⇒ nothing was pruned.
+    if live_output_paths is not None:
+        live_positions = live_jvp_output_positions(
+            output_pytreedef,
+            len(output_avals),
+            client.differentiable_output_paths,
+            live_output_paths,
+        )
+        full_cotangent: list[Any] = [
+            ad.Zero(jax.core.ShapedArray(aval.shape, aval.dtype))
+            for aval in output_avals
+        ]
+        for k, pos in enumerate(live_positions):
+            full_cotangent[pos] = cotangent[k]
+        cotangent = full_cotangent
 
     # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
     # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
@@ -373,6 +418,29 @@ def tesseract_dispatch_transpose_rule(
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
 
 
+def _endpoint_extra_kwargs(
+    eval_func: str,
+    live_input_paths: tuple[str, ...] | None,
+    live_output_paths: tuple[str, ...] | None,
+    jac_mode: Literal["fwd", "bwd"],
+) -> dict[str, Any]:
+    """Endpoint kwargs that restrict the requested sub-block of the derivative.
+
+    ``live_*_paths`` (set by the DCE rule) tell the ``jacobian`` /
+    ``jacobian_vector_product`` endpoints to compute only the still-live rows /
+    columns. ``None`` means "compute everything" (the un-pruned default).
+    """
+    if eval_func == "jacobian":
+        return {
+            "live_input_paths": live_input_paths,
+            "live_output_paths": live_output_paths,
+            "jac_mode": jac_mode,
+        }
+    if eval_func == "jacobian_vector_product":
+        return {"live_output_paths": live_output_paths}
+    return {}
+
+
 def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
     if eval_func not in client.available_methods:
         raise NotImplementedError(
@@ -394,8 +462,8 @@ def tesseract_dispatch(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation.
@@ -404,11 +472,9 @@ def tesseract_dispatch(
     """
     _raise_if_unimplemented(eval_func, client)
 
-    extra_kwargs: dict[str, Any] = {}
-    if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
-        extra_kwargs["jac_mode"] = jac_mode
+    extra_kwargs = _endpoint_extra_kwargs(
+        eval_func, live_input_paths, live_output_paths, jac_mode
+    )
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -446,18 +512,16 @@ def tesseract_dispatch_lowering(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
     _raise_if_unimplemented(eval_func, client)
 
-    extra_kwargs: dict[str, Any] = {}
-    if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
-        extra_kwargs["jac_mode"] = jac_mode
+    extra_kwargs = _endpoint_extra_kwargs(
+        eval_func, live_input_paths, live_output_paths, jac_mode
+    )
 
     def _dispatch(*args: ArrayLike) -> Any:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
@@ -515,8 +579,8 @@ def tesseract_dispatch_batching(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
+    live_input_paths: tuple[str, ...] | None = None,
+    live_output_paths: tuple[str, ...] | None = None,
     jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
@@ -559,6 +623,7 @@ def tesseract_dispatch_batching(
                 has_tangent=has_tangent,
                 client=client,
                 eval_func=eval_func,
+                live_output_paths=live_output_paths,
             )
 
     new_args = [
@@ -596,6 +661,7 @@ def _batched_via_jacobian(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    live_output_paths: tuple[str, ...] | None,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -650,9 +716,15 @@ def _batched_via_jacobian(
 
     # Map each diff output path to its leaf index in the output pytree.
     # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions.
+    # the corresponding ``tans`` / ``output_avals`` positions. Rows DCE has already
+    # declared dead are left out of the request entirely. ``live_output_paths`` is
+    # only ever set on a ``jacobian_vector_product`` equation -- the DCE rule defers
+    # ``vector_jacobian_product`` to JAX's default -- so the VJP branch below always
+    # sees the full set and stays in step with the cotangents it is handed.
     diff_output_path_to_pos: dict[str, int] = {
-        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
+        p: i
+        for i, (p, v) in enumerate(output_flat.items())
+        if v is not None and (live_output_paths is None or p in live_output_paths)
     }
 
     jac_arrays = tesseract_dispatch_p.bind(
@@ -666,8 +738,8 @@ def _batched_via_jacobian(
         client=client,
         eval_func="jacobian",
         vmap_method=None,
-        jac_input_paths=tuple(diff_input_path_to_pos),
-        jac_output_paths=tuple(diff_output_path_to_pos),
+        live_input_paths=tuple(diff_input_path_to_pos),
+        live_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
     )
     n_in = len(diff_input_path_to_pos)
@@ -727,10 +799,21 @@ def _batched_via_jacobian(
             diff_avals,
             jac_blocks,
         )
+        # Emit exactly the leaves this bind is contracted to emit: the
+        # non-differentiable ones (whose tangent is a NaN) plus the differentiable
+        # ones DCE left live. `live_jvp_output_positions` is the shared source of
+        # truth with abstract_eval, so the two agree on the count and the order.
+        positions = live_jvp_output_positions(
+            output_pytreedef,
+            len(output_avals),
+            client.differentiable_output_paths,
+            live_output_paths,
+        )
+        is_diff = [v is not None for _p, v in output_flat.items()]
         outs = _pad_nans(
             diff_outs,
-            output_avals,
-            [v is not None for _p, v in output_flat.items()],
+            [output_avals[pos] for pos in positions],
+            [is_diff[pos] for pos in positions],
         )
         return outs, (0,) * len(outs)
 
@@ -768,6 +851,7 @@ def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
+pe.dce_rules[tesseract_dispatch_p] = tesseract_dispatch_dce_rule
 
 
 def _check_dtype(dtype: Any) -> None:
