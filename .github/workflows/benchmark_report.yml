@@ -1,0 +1,92 @@
+name: Benchmark Report
+
+# Posts the benchmark comparison produced by the `Benchmarks` workflow as a PR
+# comment.
+#
+# This is split out because `pull_request` runs on fork PRs get no secrets and a
+# read-only `GITHUB_TOKEN`, so they cannot comment at all. `workflow_run` runs in
+# the context of the base branch, where both are available.
+#
+# SECURITY: this workflow is privileged. It must never check out or execute code
+# from the pull request. It only downloads artifacts and posts a comment, and it
+# treats every artifact byte as untrusted input.
+
+on:
+  workflow_run:
+    workflows: ["Benchmarks"]
+    types: [completed]
+
+concurrency:
+  group: benchmark-report-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+
+jobs:
+  report:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download benchmark results
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: benchmark-results
+          path: benchmark-results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      # The report is the gate: it and `pr_number.txt` are written in one step
+      # from one variable, so either both exist or neither does. A missing
+      # report means the benchmark run failed, which the `benchmark` check
+      # already reports on the PR, so bail out quietly rather than adding a
+      # second red X.
+      - name: Check for a report
+        id: check
+        run: |
+          if [ ! -s benchmark-results/benchmark_report.md ]; then
+            echo "::notice::No benchmark report to post, skipping"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      # `pr_number.txt` comes from a workflow file that a fork controls, so
+      # strip it to digits rather than trusting it. This can never reach a
+      # shell as anything but an integer.
+      - name: Read PR number
+        id: pr
+        if: steps.check.outputs.found == 'true'
+        run: |
+          number=$(tr -dc '0-9' < benchmark-results/pr_number.txt | head -c 9)
+          if [ -z "$number" ]; then
+            echo "::error::Artifact contained no valid PR number"
+            exit 1
+          fi
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - name: Find existing comment
+        if: steps.check.outputs.found == 'true'
+        uses: peter-evans/find-comment@v4
+        id: find-comment
+        with:
+          issue-number: ${{ steps.pr.outputs.number }}
+          comment-author: "PasteurBot"
+          body-includes: "## Benchmark Results"
+
+      # `body-path` rather than `body`, so the report is never interpolated into
+      # a `run:` block or a `$GITHUB_OUTPUT` heredoc it could break out of.
+      - name: Create or update PR comment
+        if: steps.check.outputs.found == 'true'
+        uses: peter-evans/create-or-update-comment@v5
+        with:
+          token: ${{ secrets.PL_PASTEURBOT_PAT_PUBLIC }}
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ steps.pr.outputs.number }}
+          body-path: benchmark-results/benchmark_report.md
+          edit-mode: replace

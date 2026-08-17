@@ -17,7 +17,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   benchmark:
@@ -87,9 +86,15 @@ jobs:
 
           echo "has_baseline=true" >> $GITHUB_OUTPUT
 
+      # Secrets are withheld from `pull_request` runs on fork PRs, so the
+      # comment is posted by the privileged `Benchmark Report` workflow
+      # instead. It needs to be told which PR this is: `workflow_run` payloads
+      # leave `pull_requests` empty for forks, and the commits/{sha}/pulls API
+      # has the same blind spot, so the artifact is the only channel that works.
       - name: Generate comparison report
         if: github.event_name == 'pull_request'
-        id: comparison
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           baseline_flag=""
           if [ "${{ steps.baseline.outputs.has_baseline }}" = "true" ]; then
@@ -99,36 +104,16 @@ jobs:
           python benchmarks/compare_benchmarks.py \
             $baseline_flag \
             --current current_benchmarks.json \
+            --pr-number "$PR_NUMBER" \
             --output benchmark_report.md
 
-          # Set output as multiline string
-          {
-            echo 'report<<BENCHMARK_REPORT_END'
-            cat benchmark_report.md
-            echo ''
-            echo 'BENCHMARK_REPORT_END'
-          } >> $GITHUB_OUTPUT
-
-      - name: Find existing comment
-        if: github.event_name == 'pull_request'
-        uses: peter-evans/find-comment@v4
-        id: find-comment
-        with:
-          issue-number: ${{ github.event.pull_request.number }}
-          comment-author: "PasteurBot"
-          body-includes: "## Benchmark Results"
-
-      - name: Create or update PR comment
-        if: github.event_name == 'pull_request'
-        uses: peter-evans/create-or-update-comment@v5
-        with:
-          token: ${{ secrets.PL_PASTEURBOT_PAT_PUBLIC }}
-          comment-id: ${{ steps.find-comment.outputs.comment-id }}
-          issue-number: ${{ github.event.pull_request.number }}
-          body: ${{ steps.comparison.outputs.report }}
-          edit-mode: replace
+          # Machine-readable copy, so the reporting workflow never has to parse
+          # the report back out. Same variable as above, so the two cannot
+          # disagree, and `bash -e` means a failure above skips this entirely.
+          echo "$PR_NUMBER" > pr_number.txt
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
@@ -136,5 +121,6 @@ jobs:
             current_benchmarks.json
             baseline/baseline_benchmarks.json
             benchmark_report.md
+            pr_number.txt
           if-no-files-found: ignore
           retention-days: 30
