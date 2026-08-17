@@ -56,22 +56,39 @@ jobs:
           fi
           echo "found=true" >> "$GITHUB_OUTPUT"
 
-      # `pr_number.txt` comes from a workflow file that a fork controls, so
-      # strip it to digits rather than trusting it. This can never reach a
-      # shell as anything but an integer.
-      - name: Read PR number
+      # `pr_number.txt` is fork-controlled: on `pull_request` the producer
+      # workflow file comes from the PR head, so a fork could name any PR and
+      # make the bot comment on an unrelated thread. Two defences:
+      #   1. Strip to digits, so it can never reach a shell as anything else.
+      #   2. Confirm the PR really belongs to this run, by matching its head SHA
+      #      against `workflow_run.head_sha` from the trusted event payload.
+      # A mismatch also happens benignly when the PR is force-pushed mid-run, so
+      # it warns and skips rather than failing; the new push posts its own run.
+      - name: Resolve and verify PR number
         id: pr
         if: steps.check.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           number=$(tr -dc '0-9' < benchmark-results/pr_number.txt | head -c 9)
           if [ -z "$number" ]; then
             echo "::error::Artifact contained no valid PR number"
             exit 1
           fi
+
+          pr_sha=$(gh api "/repos/$REPO/pulls/$number" -q .head.sha 2>/dev/null \
+            | grep -oE '^[0-9a-f]{40}$' || true)
+          if [ "$pr_sha" != "$RUN_SHA" ]; then
+            echo "::warning::PR #$number head '$pr_sha' does not match run SHA '$RUN_SHA'; refusing to comment"
+            exit 0
+          fi
+
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
       - name: Find existing comment
-        if: steps.check.outputs.found == 'true'
+        if: steps.pr.outputs.number != ''
         uses: peter-evans/find-comment@v4
         id: find-comment
         with:
@@ -82,7 +99,7 @@ jobs:
       # `body-path` rather than `body`, so the report is never interpolated into
       # a `run:` block or a `$GITHUB_OUTPUT` heredoc it could break out of.
       - name: Create or update PR comment
-        if: steps.check.outputs.found == 'true'
+        if: steps.pr.outputs.number != ''
         uses: peter-evans/create-or-update-comment@v5
         with:
           token: ${{ secrets.PL_PASTEURBOT_PAT_PUBLIC }}
