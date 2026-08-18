@@ -683,3 +683,71 @@ def test_vjp_with_static_input_between_arrays(static_input_tess):
     grad_raw = jax.jit(jax.grad(loss_raw, argnums=0))(a, z)
 
     np.testing.assert_allclose(grad, grad_raw, rtol=1e-5)
+
+
+def test_list_index_survives_static_pruning():
+    """Regression test: a list path keeps its index when siblings are static.
+
+    ``unflatten_args(..., remove_static_args=True)`` replaces non-differentiated
+    leaves with ``None``, and ``_pytree_to_tesseract_flat`` derives list paths
+    positionally. Dropping the ``None`` entries therefore renumbered the
+    survivors, so a tangent for ``w[1]`` was shipped to the Tesseract under the
+    path ``w.[0]`` — a silently wrong forward-mode gradient.
+
+    ``None`` is an empty pytree node in JAX, so it contributes no leaf either
+    way; keeping it is what preserves the sibling index.
+
+    See https://github.com/pasteurlabs/tesseract-jax/issues/235.
+    """
+    from tesseract_jax.tree_util import _pytree_to_tesseract_flat, unflatten_args
+
+    tree = {"w": [jnp.zeros(3), jnp.ones(3)]}
+    leaves, treedef = jax.tree.flatten(tree)
+
+    # w[0] static, w[1] differentiated.
+    result = unflatten_args(
+        array_args=(leaves[1],),
+        static_args=(leaves[0],),
+        input_pytreedef=treedef,
+        is_static_mask=(True, False),
+        remove_static_args=True,
+    )
+
+    # schema_paths mirrors the OpenAPI ``differentiable_arrays`` mapping.
+    flat = _pytree_to_tesseract_flat(result, {"w.[]": {}})
+    assert list(flat) == ["w.[1]"]
+
+
+@pytest.mark.parametrize("use_jit", [False, True], ids=["nojit", "jit"])
+def test_pytree_tesseract_jvp_preserves_list_order(
+    pytree_tess, pytree_tess_inputs, use_jit
+):
+    """Regression test: JVP w.r.t. a non-zero list index only.
+
+    ``merge_dicts`` concatenates lists diffable-first, so the parametrised
+    ``delta.1`` case in this file puts the traced array back at index 0 — the
+    one position where renumbering is invisible. Building the list in its
+    original order is what exercises the bug.
+
+    See https://github.com/pasteurlabs/tesseract-jax/issues/235.
+    """
+    d0 = pytree_tess_inputs["delta"][0]
+    d1 = pytree_tess_inputs["delta"][1]
+
+    def f(d1_):
+        inputs = {**pytree_tess_inputs, "delta": [d0, d1_]}
+        return apply_tesseract(pytree_tess, inputs=inputs)["result"]
+
+    def f_raw(d1_):
+        inputs = {**pytree_tess_inputs, "delta": [d0, d1_]}
+        return pytree_apply_impl(inputs)["result"]
+
+    tangent = jnp.ones_like(d1)
+    jvp = (
+        jax.jit(lambda p, t: jax.jvp(f, (p,), (t,))[1])
+        if use_jit
+        else (lambda p, t: jax.jvp(f, (p,), (t,))[1])
+    )
+
+    _, expected = jax.jvp(f_raw, (d1,), (tangent,))
+    np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
