@@ -5,7 +5,7 @@ readme = "README.md"
 authors = [
     {name = "The tesseract-jax team @ Pasteur Labs", email = "info@simulation.science"},
 ]
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12,<4"
 # TODO: add your dependencies here *and* in requirements.txt
 dependencies = [
     "jax>=0.7.0",
@@ -46,6 +46,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.version]
 source = "vcs"
+fallback-version = "0.0.0+unknown"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "tesseract_jax/_version.py"
