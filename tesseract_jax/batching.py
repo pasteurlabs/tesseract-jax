@@ -41,8 +41,6 @@ def _is_ellipsis_template(template: str | None, diff_paths: dict[str, Any]) -> b
     return template is not None and "shape" not in diff_paths[template]
 
 
-
-
 def _dispatch_vectorized(
     new_args: list,
     is_batched_mask: list[bool],
