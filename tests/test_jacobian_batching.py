@@ -527,8 +527,43 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
 # Nested batching: an outer vmap over a jacobian shortcut
 # ---------------------------------------------------------------------------
 
+# Fixed-shape schemas cannot take a batch dimension, so expand_dims and
+# broadcast_all legitimately fail validation on them. batched_tesseract is
+# ellipsis-shaped, so all four are testable there.
+FIXED_SHAPE_METHODS = ["sequential", "auto_experimental"]
+ALL_VMAP_METHODS = [
+    "sequential",
+    "auto_experimental",
+    "expand_dims",
+    "broadcast_all",
+]
 
-def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess):
+
+@pytest.mark.parametrize("vmap_method", ALL_VMAP_METHODS)
+def test_vmap_of_jacfwd_agrees_across_vmap_methods(batched_tess, vmap_method):
+    """Every vmap method must agree with the unbatched Jacobian.
+
+    A jacobian bind can only be batched sequentially: the vectorized
+    strategies hand batched primals to the endpoint, which answers with a
+    (batch, *out, batch, *in) block instead of (batch, *out, *in). Nothing
+    raises, so this asserts the value rather than merely that it runs.
+    """
+
+    def f(x):
+        return apply_tesseract(
+            batched_tess, {"x": x, "y": jnp.ones(3)}, vmap_method=vmap_method
+        )["result"]
+
+    xs = jnp.stack([jnp.ones(3) * s for s in (1.0, 2.0)])
+    got = jax.vmap(jax.jacfwd(f))(xs)
+    expected = jnp.stack([jax.jacfwd(f)(x) for x in xs])
+
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess, vmap_method):
     """``vmap(jacfwd(f))`` works when a vmap_method is supplied.
 
     The jacobian shortcut binds a nested ``jacobian`` call. That bind used to
@@ -538,7 +573,7 @@ def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess):
     """
 
     def f(x):
-        return apply_tesseract(univariate_tess, {"x": x}, vmap_method="sequential")
+        return apply_tesseract(univariate_tess, {"x": x}, vmap_method=vmap_method)
 
     xs = jnp.arange(3.0, dtype="float32")
     got = jax.vmap(jax.jacfwd(f))(xs)["result"]
@@ -546,7 +581,8 @@ def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess):
     np.testing.assert_allclose(got, expected, rtol=1e-6)
 
 
-def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess):
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess, vmap_method):
     """The nested bind must keep its jacobian path restriction and mode.
 
     Threading only ``vmap_method`` is not enough: with the path parameters
@@ -566,7 +602,7 @@ def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess):
 
     def f(x):
         inputs = {**base, "alpha": {**base["alpha"], "x": x}}
-        return apply_tesseract(pytree_tess, inputs, vmap_method="sequential")["result"]
+        return apply_tesseract(pytree_tess, inputs, vmap_method=vmap_method)["result"]
 
     xs = jnp.stack([jnp.ones(3, "float32") * s for s in (1.0, 2.0)])
     got = jax.vmap(jax.jacfwd(f))(xs)
@@ -574,8 +610,9 @@ def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess):
     np.testing.assert_allclose(got, expected, rtol=1e-6)
 
 
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
 def test_materialize_jacobian_false_survives_a_batching_rebind(
-    univariate_tess, monkeypatch
+    univariate_tess, monkeypatch, vmap_method
 ):
     """``materialize_jacobian=False`` must still hold after an inner re-bind.
 
@@ -588,7 +625,7 @@ def test_materialize_jacobian_false_survives_a_batching_rebind(
         return apply_tesseract(
             univariate_tess,
             {"x": x},
-            vmap_method="sequential",
+            vmap_method=vmap_method,
             materialize_jacobian=False,
         )
 

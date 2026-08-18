@@ -41,29 +41,6 @@ def _is_ellipsis_template(template: str | None, diff_paths: dict[str, Any]) -> b
     return template is not None and "shape" not in diff_paths[template]
 
 
-def _jac_bind_kwargs(
-    materialize_jacobian: bool | None,
-    jac_input_paths: tuple[str, ...] | None,
-    jac_output_paths: tuple[str, ...] | None,
-    jac_mode: str,
-) -> dict:
-    """Parameters an inner re-bind must carry to stay the same call.
-
-    Returns an empty dict for a non-jacobian bind, so binds that never had
-    these parameters are unchanged.
-    """
-    if jac_input_paths is None and jac_output_paths is None:
-        return (
-            {}
-            if materialize_jacobian is None
-            else {"materialize_jacobian": materialize_jacobian}
-        )
-    return {
-        "materialize_jacobian": materialize_jacobian,
-        "jac_input_paths": jac_input_paths,
-        "jac_output_paths": jac_output_paths,
-        "jac_mode": jac_mode,
-    }
 
 
 def _dispatch_vectorized(
@@ -111,9 +88,10 @@ def _dispatch_vectorized(
         client=client,
         eval_func=eval_func,
         vmap_method=vmap_method,
-        **_jac_bind_kwargs(
-            materialize_jacobian, jac_input_paths, jac_output_paths, jac_mode
-        ),
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
     return tuple(outvals), (0,) * len(outvals)
 
@@ -158,9 +136,10 @@ def sequential(
             client=client,
             eval_func=eval_func,
             vmap_method=vmap_method,
-            **_jac_bind_kwargs(
-                materialize_jacobian, jac_input_paths, jac_output_paths, jac_mode
-            ),
+            materialize_jacobian=materialize_jacobian,
+            jac_input_paths=jac_input_paths,
+            jac_output_paths=jac_output_paths,
+            jac_mode=jac_mode,
         )
 
     outvals = jax.lax.map(_batch_fun, batched_args)
