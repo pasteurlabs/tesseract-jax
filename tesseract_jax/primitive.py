@@ -153,6 +153,9 @@ def tesseract_dispatch_jvp_rule(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -559,6 +562,7 @@ def tesseract_dispatch_batching(
                 has_tangent=has_tangent,
                 client=client,
                 eval_func=eval_func,
+                vmap_method=vmap_method,
             )
 
     new_args = [
@@ -566,6 +570,13 @@ def tesseract_dispatch_batching(
         for arg, ax in zip(array_args, axes, strict=True)
     ]
     is_batched_mask = [ax is not None for ax in axes]
+
+    if eval_func == "jacobian":
+        # The vectorized strategies hand batched primals to the endpoint, which
+        # then answers with a (batch, *out, batch, *in) block rather than
+        # (batch, *out, *in). Only sequential wraps a jacobian call correctly,
+        # and the mismatch is silent rather than an error, so pin it here.
+        vmap_method = "sequential"
 
     batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
     return batch_fn(
@@ -581,6 +592,10 @@ def tesseract_dispatch_batching(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
 
 
@@ -596,6 +611,7 @@ def _batched_via_jacobian(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -665,7 +681,7 @@ def _batched_via_jacobian(
         has_tangent=has_tangent,
         client=client,
         eval_func="jacobian",
-        vmap_method=None,
+        vmap_method=vmap_method,
         jac_input_paths=tuple(diff_input_path_to_pos),
         jac_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
