@@ -12,31 +12,34 @@ that path:
 * a process-global registry mapping an integer ``token`` (passed to the handler
   as an FFI attribute) to the Python dispatch closure for that call, and
 * the single callback the handler invokes, which wraps the XLA input device
-  pointers as CuPy views, runs the dispatch, and returns the result device
-  arrays for the handler to copy into XLA's output buffers.
+  pointers as ``__cuda_array_interface__`` views, runs the dispatch, and returns
+  the result device arrays for the handler to copy into XLA's output buffers.
 
 The dispatch closure is endpoint-generic: it is exactly the same
 ``getattr(client, eval_func)(...)`` closure the CPU (host-callback) lowering
 builds, so every endpoint the CPU path supports (apply / jvp / vjp / jacobian)
 routes through here unchanged. See :mod:`tesseract_jax.primitive`.
 
-Importing this module does not require CUDA; it only touches the native shim and
-CuPy lazily, when the GPU path is actually used, so CPU-only installs are
-unaffected.
+Importing this module does not require CUDA; it only touches the native shim
+lazily, when the GPU path is actually used, so CPU-only installs are unaffected.
+The dispatch itself needs no CUDA array library (CuPy/Torch): input buffers are
+wrapped as bare ``__cuda_array_interface__`` views and outputs come back as the
+runtime's framework-agnostic ``IpcDeviceArray``.
 """
 
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 FFI_TARGET_NAME = "tesseract_jax_dispatch"
 
 _registered = False
 _register_lock = threading.Lock()
 
-# token -> dispatch closure. The closure takes the tuple of input arrays (CuPy
-# views) and returns a tuple of output arrays.
+# token -> dispatch closure. The closure takes the tuple of input arrays
+# (__cuda_array_interface__ views) and returns a tuple of output arrays.
 _registry: dict[int, Callable[..., tuple]] = {}
 _registry_lock = threading.Lock()
 _next_token = 0
@@ -47,7 +50,7 @@ def is_available() -> bool:
     """Whether the native GPU FFI shim is importable (compiled and loadable)."""
     try:
         from tesseract_jax import _cuda_shim  # noqa: F401
-    except Exception:
+    except Exception:  # noqa: BLE001 - any import failure means "unavailable"
         return False
     return True
 
@@ -88,21 +91,35 @@ def register_dispatch(fn: Callable[..., tuple]) -> int:
 
 
 def release_dispatch(token: int) -> None:
+    """Drop the dispatch closure registered under ``token`` (idempotent)."""
     with _registry_lock:
         _registry.pop(token, None)
 
 
-def _cupy_view(ptr: int, typestr: str, shape: tuple[int, ...]):
-    """Wrap a raw device pointer as an unowned CuPy view (no copy)."""
-    import cupy
-    import numpy as np
+class _DeviceArrayView:
+    """Zero-copy, unowned view of a raw device pointer as a CUDA array.
 
-    dtype = np.dtype(typestr)
-    n = int(np.prod(shape)) if shape else 1
-    nbytes = n * dtype.itemsize
-    mem = cupy.cuda.UnownedMemory(ptr, nbytes, owner=None)
-    memptr = cupy.cuda.MemoryPointer(mem, 0)
-    return cupy.ndarray(tuple(shape), dtype=dtype, memptr=memptr)
+    The Tesseract client's ``cuda_ipc`` encoder consumes an input array purely
+    through the ``__cuda_array_interface__`` protocol -- it reads the pointer,
+    shape, dtype, and strides, then takes an IPC handle on the backing
+    allocation. It never adopts, frees, or runs kernels on the object. So the
+    minimal thing we must hand it is an object exposing that one attribute; a
+    full array library (CuPy) is not needed, which keeps CUDA-array-library
+    dependencies off the GPU-direct input path.
+
+    The view owns nothing: the memory is XLA's input buffer, valid for the
+    duration of the dispatch. ``data``'s read-only flag is ``False`` because the
+    encoder may read it via an on-GPU copy.
+    """
+
+    def __init__(self, ptr: int, typestr: str, shape: tuple[int, ...]) -> None:
+        self.__cuda_array_interface__ = {
+            "shape": tuple(shape),
+            "typestr": typestr,
+            "data": (ptr, False),
+            "strides": None,  # XLA hands us C-contiguous buffers
+            "version": 3,
+        }
 
 
 def _native_dispatch(
@@ -119,7 +136,7 @@ def _native_dispatch(
     if fn is None:
         raise RuntimeError(f"tesseract_jax gpu_ffi: unknown dispatch token {token}")
     views = tuple(
-        _cupy_view(ptr, typestr, tuple(shape)) for ptr, typestr, shape in inputs
+        _DeviceArrayView(ptr, typestr, tuple(shape)) for ptr, typestr, shape in inputs
     )
     out = fn(views)
     return list(out)

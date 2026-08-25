@@ -1,21 +1,26 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reproducer: is cuda_ipc accepted as an array INPUT encoding?
+"""Conformance check: is cuda_ipc accepted as an array INPUT encoding?
 
-History: tesseract-core initially accepted ``cuda_ipc`` as an *output* encoding
-(flag-gated behind ``TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC``) but rejected it as
-an *input* encoding -- the per-field input model built by ``get_array_model``
-omitted ``CudaIpcArrayData`` from its ``data`` union. That gap forced GPU-direct
-dispatch to send inputs base64-over-host. It has since been fixed.
+``cuda_ipc`` (flag-gated behind ``TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC``) is a
+valid encoding for both array *inputs* and *outputs*: ``CudaIpcArrayData`` is a
+member of the shared ``data`` union used by ``EncodedArrayModel`` and by the
+per-field input model built by ``get_array_model``. This lets GPU-direct dispatch
+send GPU inputs by IPC handle instead of base64-over-host. This script guards
+against a regression of that input-direction support.
+
+The descriptor is a single packed string
+``<device>:<handle_b64>:<storage_offset>:<storage_size>`` (see
+``tesseract_core.runtime.cuda_ipc.dump_cuda_ipc_arraydict``).
 
 This script needs no GPU, CuPy, or server: it exercises the exact Pydantic
 validation the server applies to request bodies. It turns the experimental flag
 ON throughout, so it distinguishes "input rejected because the encoding is
 structurally absent" from "input rejected because the flag is off".
 
-Exit code 0  -> input ACCEPTED (the fix is in / claim no longer holds)
-Exit code 1  -> input REJECTED (the input-direction gap is present)
+Exit code 0  -> input ACCEPTED (cuda_ipc is a valid input encoding)
+Exit code 1  -> input REJECTED (input-direction support has regressed)
 """
 
 from __future__ import annotations
@@ -24,21 +29,21 @@ import base64
 import sys
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
-
 from tesseract_core.runtime.array_encoding import EncodedArrayModel, get_array_model
 
 
 def _cuda_ipc_array_dict() -> dict:
+    # The IPC descriptor is a single packed string
+    # ``<device>:<handle_b64>:<storage_offset>:<storage_size>`` (see
+    # tesseract_core.runtime.cuda_ipc.dump_cuda_ipc_arraydict). The handle is a
+    # base64-encoded 64-byte cudaIpcMemHandle_t.
     handle = base64.b64encode(b"\x00" * 64).decode()  # 64-byte cudaIpcMemHandle_t
     return {
         "object_type": "array",
         "shape": [3],
         "dtype": "float32",
         "data": {
-            "handle": handle,
-            "device": 0,
-            "storage_offset": 0,
-            "storage_size": 12,
+            "buffer": f"0:{handle}:0:12",
             "encoding": "cuda_ipc",
         },
     }
@@ -94,13 +99,17 @@ def main() -> int:
         print("[repro] per-field INPUT model REJECTS cuda_ipc (flag ON):")
         for err in e.errors():
             print(f"          {'.'.join(map(str, err['loc']))}: {err['type']}")
-        print("\nINPUT-DIRECTION GAP PRESENT: cuda_ipc is a valid output encoding "
-              "but not a valid input encoding; no flag enables it.")
+        print(
+            "\nINPUT-DIRECTION GAP PRESENT: cuda_ipc is a valid output encoding "
+            "but not a valid input encoding; no flag enables it."
+        )
         return 1
 
     print("[ok]  per-field INPUT model ACCEPTS cuda_ipc")
-    print("\nINPUT DIRECTION SUPPORTED: cuda_ipc inputs validate; GPU-direct "
-          "dispatch can send GPU inputs without a base64 host copy.")
+    print(
+        "\nINPUT DIRECTION SUPPORTED: cuda_ipc inputs validate; GPU-direct "
+        "dispatch can send GPU inputs without a base64 host copy."
+    )
     return 0
 
 

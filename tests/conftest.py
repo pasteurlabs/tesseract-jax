@@ -149,7 +149,7 @@ def _load_tesseract(folder_name: str) -> Tesseract:
 def _gpu_available() -> bool:
     try:
         return any(d.platform == "gpu" for d in jax.devices())
-    except Exception:
+    except Exception:  # noqa: BLE001 - probing for a GPU must never raise
         return False
 
 
@@ -172,6 +172,9 @@ def served_gpu_tesseract(tmp_path_factory):
     """A served GPU Tesseract (base64 default output). Skips without a GPU/CuPy."""
     if not _gpu_available():
         pytest.skip("no GPU backend for JAX")
+    # CuPy is required by the *test Tesseract's* compute (gpu_tesseract runs its
+    # apply with cupy), not by tesseract-jax's transport, which is now
+    # CUDA-array-library-free.
     pytest.importorskip("cupy")
     gen = serve_gpu_tesseract(tmp_path_factory)
     url = next(gen)

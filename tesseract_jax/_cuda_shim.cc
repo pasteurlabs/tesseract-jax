@@ -23,6 +23,7 @@
 //   into XLA's output buffers.
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
 #include <mutex>
@@ -51,6 +52,26 @@ using cudaStream_t = void*;
 constexpr int cudaSuccess = 0;
 constexpr int cudaMemcpyDeviceToDevice = 3;
 
+// cudaMemoryType values (stable across CUDA 10-13). Device and Managed memory
+// are dereferenceable on-device; Host/Unregistered means the pointer is (or may
+// be) host memory -- the signature of an accidental host round-trip.
+constexpr int cudaMemoryTypeUnregistered = 0;
+constexpr int cudaMemoryTypeHost = 1;
+constexpr int cudaMemoryTypeDevice = 2;
+constexpr int cudaMemoryTypeManaged = 3;
+
+// Mirror of `struct cudaPointerAttributes` for CUDA 11/12/13. Only the leading
+// `type` field is read here; the rest is present to size the struct correctly
+// for the ABI (cudaPointerGetAttributes writes all of it). Layout:
+//   enum cudaMemoryType type;  int device;  void* devicePointer;
+//   void* hostPointer;
+struct CudaPointerAttributes {
+  int type;
+  int device;
+  void* devicePointer;
+  void* hostPointer;
+};
+
 struct CudaRuntime {
   void* handle = nullptr;
   cudaError_t (*Memcpy)(void*, const void*, size_t, int) = nullptr;
@@ -58,6 +79,10 @@ struct CudaRuntime {
       nullptr;
   cudaError_t (*StreamSynchronize)(void* /*stream*/) = nullptr;
   const char* (*GetErrorString)(cudaError_t) = nullptr;
+  // Optional: only used by the debug pointer-residency check. May be null if the
+  // symbol is unavailable; the check degrades to a no-op in that case.
+  cudaError_t (*PointerGetAttributes)(void* /*attrs*/, const void*) = nullptr;
+  cudaError_t (*GetLastError)() = nullptr;
 };
 
 CudaRuntime& cuda_rt() {
@@ -82,6 +107,12 @@ CudaRuntime& cuda_rt() {
         dlsym(rt.handle, "cudaStreamSynchronize"));
     rt.GetErrorString = reinterpret_cast<decltype(rt.GetErrorString)>(
         dlsym(rt.handle, "cudaGetErrorString"));
+    // Optional symbols for the debug residency check; tolerated if missing.
+    rt.PointerGetAttributes =
+        reinterpret_cast<decltype(rt.PointerGetAttributes)>(
+            dlsym(rt.handle, "cudaPointerGetAttributes"));
+    rt.GetLastError = reinterpret_cast<decltype(rt.GetLastError)>(
+        dlsym(rt.handle, "cudaGetLastError"));
     if (!rt.Memcpy || !rt.MemcpyAsync || !rt.StreamSynchronize) {
       throw std::runtime_error(
           "tesseract_jax: failed to resolve required cudaMemcpy symbols");
@@ -97,6 +128,63 @@ std::string cuda_err(cudaError_t e) {
     if (s) return std::string(s);
   }
   return "cuda error " + std::to_string(e);
+}
+
+// Whether the debug pointer-residency check is enabled. Gated on the
+// TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS env var, read once. When on, every
+// buffer that crosses the FFI boundary (XLA inputs and the Python callback's
+// results) is asserted to live in device (or managed) memory, so an accidental
+// host round-trip -- e.g. a np.asarray/np.full slipping onto a dispatch return
+// path -- fails loudly at the boundary instead of silently copying through host.
+bool debug_check_device_ptrs() {
+  static const bool on = [] {
+    const char* v = std::getenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS");
+    return v != nullptr && v[0] != '\0' && std::string(v) != "0";
+  }();
+  return on;
+}
+
+const char* memory_type_name(int t) {
+  switch (t) {
+    case cudaMemoryTypeUnregistered: return "unregistered (host)";
+    case cudaMemoryTypeHost:         return "host";
+    case cudaMemoryTypeDevice:       return "device";
+    case cudaMemoryTypeManaged:      return "managed";
+    default:                         return "unknown";
+  }
+}
+
+// Assert `ptr` is device-resident. Returns an ffi::Error (so the caller can
+// propagate it) when the pointer is host/unregistered memory; success otherwise.
+// `what` labels the buffer in the message (e.g. "input 0", "result 2").
+ffi::Error assert_device_ptr(const void* ptr, const std::string& what) {
+  auto& rt = cuda_rt();
+  if (!rt.PointerGetAttributes) {
+    // Symbol unavailable: cannot check, so do not block. (Should be rare.)
+    return ffi::Error::Success();
+  }
+  CudaPointerAttributes attrs{};
+  cudaError_t e = rt.PointerGetAttributes(&attrs, ptr);
+  if (e != cudaSuccess) {
+    // A plain host pointer makes older drivers return cudaErrorInvalidValue.
+    // Clear the sticky error so we don't poison a later real check, then treat
+    // it as a residency failure -- an unrecognized pointer is not device memory.
+    if (rt.GetLastError) rt.GetLastError();
+    return ffi::Error::Internal(
+        "tesseract_jax [debug]: " + what +
+        " pointer is not device-resident (cudaPointerGetAttributes failed: " +
+        cuda_err(e) + "). An accidental host copy likely reached the FFI "
+        "boundary.");
+  }
+  if (attrs.type != cudaMemoryTypeDevice &&
+      attrs.type != cudaMemoryTypeManaged) {
+    return ffi::Error::Internal(
+        "tesseract_jax [debug]: " + what + " pointer is in " +
+        std::string(memory_type_name(attrs.type)) +
+        " memory, expected device. An accidental host copy reached the FFI "
+        "boundary (e.g. a np.asarray/np.full on a GPU dispatch return path).");
+  }
+  return ffi::Error::Success();
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +273,19 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     out_descs.push_back(describe(**ret));
   }
 
+  // Debug: XLA inputs must be device memory. They always should be (they are
+  // XLA device buffers); checking them validates the check itself and would
+  // catch a platform/lowering mishap.
+  if (debug_check_device_ptrs()) {
+    for (size_t i = 0; i < in_descs.size(); ++i) {
+      if (auto e = assert_device_ptr(reinterpret_cast<void*>(in_descs[i].ptr),
+                                     "input " + std::to_string(i));
+          e.failure()) {
+        return e;
+      }
+    }
+  }
+
   // XLA's input buffers are only valid once prior stream work completes. For a
   // correct-first implementation we synchronize the stream so the Python side
   // (which operates on CUDA's default/per-thread stream via CuPy/ctypes) sees
@@ -227,6 +328,7 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
       return ffi::Error::Internal(
           "dispatch callback returned wrong number of results");
     }
+    const bool check_ptrs = debug_check_device_ptrs();
     for (size_t i = 0; i < out_descs.size(); ++i) {
       py::object item = seq[i];
       results_keepalive.push_back(item);  // keep alive through the copy
@@ -236,6 +338,17 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
       rd.ptr = data[0].cast<uintptr_t>();
       rd.nbytes = out_descs[i].nbytes;  // trust XLA's expected size
       result_descs.push_back(rd);
+      // Debug: the dispatch's returned buffers must be device-resident.
+      // This is the check that matters: a host copy on a derivative return path
+      // (np.asarray/np.full materializing a host array) surfaces here as a host
+      // pointer, and we fail instead of silently copying host->"device".
+      if (check_ptrs) {
+        if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
+                                       "result " + std::to_string(i));
+            e.failure()) {
+          return e;
+        }
+      }
     }
   }  // release GIL before the device copies
 

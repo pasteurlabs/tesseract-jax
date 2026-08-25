@@ -16,11 +16,10 @@ unavailable.
 
 from __future__ import annotations
 
-import numpy as np
-import pytest
-
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
 
 from tesseract_jax import apply_tesseract
 

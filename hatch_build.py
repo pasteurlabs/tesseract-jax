@@ -40,6 +40,7 @@ class CudaShimBuildHook(BuildHookInterface):
     PLUGIN_NAME = "custom"
 
     def initialize(self, version: str, build_data: dict) -> None:
+        """Compile the shim and register it for inclusion in the wheel."""
         # Only relevant for the wheel target; the sdist ships sources instead.
         if self.target_name != "wheel":
             return
@@ -74,6 +75,7 @@ class CudaShimBuildHook(BuildHookInterface):
         self.app.display_info(f"Built native FFI shim: {rel}")
 
     def clean(self, versions: list[str]) -> None:
+        """Remove the compiled shim so a rebuild starts from a clean slate."""
         ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
         out = Path(self.root) / PACKAGE_DIR / f"_cuda_shim{ext_suffix}"
         if out.exists():
@@ -101,10 +103,30 @@ class CudaShimBuildHook(BuildHookInterface):
             str(source),
             "-o",
             str(out),
-            "-ldl",
+            *_platform_link_args(),
         ]
         self.app.display_info("Compiling native FFI shim: " + " ".join(args))
         subprocess.run(args, check=True, env=os.environ.copy())
+
+
+def _platform_link_args() -> list[str]:
+    """Linker args for building a Python extension module, per platform.
+
+    The extension references Python C-API symbols (``PyBaseObject_Type`` etc.)
+    and pybind11's, which live in the interpreter and are only available once the
+    module is loaded, not at link time. Each platform expresses "leave these
+    undefined, resolve them at load" differently:
+
+    * macOS: ``-undefined dynamic_lookup``. Without it, ``ld`` errors on every
+      Python symbol. ``dlopen`` is in libSystem, so no ``-ldl`` is needed.
+    * Linux/other ELF: undefined symbols in a shared object are permitted by
+      default (resolved against the loading process at ``dlopen`` time), so no
+      special flag is required. ``-ldl`` provides ``dlopen`` for the CUDA runtime
+      lookup in the shim.
+    """
+    if sys.platform == "darwin":
+        return ["-undefined", "dynamic_lookup"]
+    return ["-ldl"]
 
 
 def _jaxlib_include() -> str:

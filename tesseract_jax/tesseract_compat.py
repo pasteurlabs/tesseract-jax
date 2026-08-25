@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+from collections.abc import Generator
 from typing import Any, Literal
 
 import jax.tree
@@ -57,7 +58,7 @@ class Jaxeract:
         self.available_methods = self.client.available_endpoints
 
     @contextlib.contextmanager
-    def cuda_ipc(self):
+    def cuda_ipc(self) -> Generator[None]:
         """Temporarily make the underlying HTTP client use ``cuda_ipc`` encoding.
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,

@@ -33,6 +33,7 @@ dev = [
     "pytest",
     "pytest-benchmark",
     "pytest-cov",
+    "pytest-timeout",
     "typeguard",
     "requests",
     "equinox",

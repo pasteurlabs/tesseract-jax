@@ -14,15 +14,15 @@ Run:
 from __future__ import annotations
 
 import contextlib
+
+# Load the shared serve helper from *this* repo's tests/conftest.py by file path,
+# so the import doesn't depend on cwd / which ``tests`` package is importable.
+import importlib.util
 import statistics
 import sys
 import tempfile
 import time
 from pathlib import Path
-
-# Load the shared serve helper from *this* repo's tests/conftest.py by file path,
-# so the import doesn't depend on cwd / which ``tests`` package is importable.
-import importlib.util
 
 _CONFTEST = Path(__file__).resolve().parents[1] / "conftest.py"
 _spec = importlib.util.spec_from_file_location("_tjax_tests_conftest", _CONFTEST)
@@ -32,7 +32,6 @@ _serve_gpu_tesseract = _conftest.serve_gpu_tesseract
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
@@ -54,6 +53,7 @@ def serve_gpu_tesseract(output_format: str = "json+base64"):
         yield url
     finally:
         gen.close()
+
 
 SIZES = [1_000, 10_000, 100_000, 1_000_000, 10_000_000]
 N_ITERS = 40
