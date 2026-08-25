@@ -6,15 +6,15 @@ annotated-types==0.8.0
     # via pydantic
 certifi==2026.7.22
     # via requests
-charset-normalizer==3.4.9
+charset-normalizer==3.5.1
     # via requests
 colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
-idna==3.18
+idna==3.19
     # via requests
-jax==0.11.0
+jax==0.11.1
     # via tesseract-jax
-jaxlib==0.11.0
+jaxlib==0.11.1
     # via jax
 jinja2==3.1.6
     # via tesseract-core
@@ -24,7 +24,7 @@ markupsafe==3.0.3
     # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
-ml-dtypes==0.5.4
+ml-dtypes==0.6.0
     # via
     #   jax
     #   jaxlib
@@ -49,7 +49,7 @@ pydantic==2.13.4
     # via tesseract-core
 pydantic-core==2.46.4
     # via pydantic
-pygments==2.20.0
+pygments==2.21.0
     # via rich
 pyyaml==6.0.3
     # via tesseract-core
@@ -59,7 +59,7 @@ rich==15.0.0
     # via
     #   tesseract-core
     #   typer
-scipy==1.18.0
+scipy==1.18.1
     # via
     #   jax
     #   jaxlib
@@ -74,7 +74,7 @@ typing-extensions==4.16.0
     #   pydantic
     #   pydantic-core
     #   typing-inspection
-typing-inspection==0.4.2
+typing-inspection==0.4.4
     # via pydantic
 urllib3==2.7.0
     # via requests

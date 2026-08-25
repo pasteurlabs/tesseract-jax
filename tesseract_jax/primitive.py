@@ -46,6 +46,14 @@ class _Hashable:
             return id(self.wrapped)
 
 
+def _instantiate_zeros(tangents: Sequence[Any]) -> tuple[ArrayLike, ...]:
+    """Densify symbolic zeros, which cannot be passed to ``bind`` as-is."""
+    return tuple(
+        jax.numpy.zeros_like(t.aval) if isinstance(t, jax._src.ad_util.Zero) else t
+        for t in tangents
+    )
+
+
 @tesseract_dispatch_p.def_abstract_eval
 def tesseract_dispatch_abstract_eval(
     *array_args: ArrayLike | ShapedArray,
@@ -145,6 +153,9 @@ def tesseract_dispatch_jvp_rule(
     eval_func: str,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: Literal["fwd", "bwd"] = "bwd",
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -152,8 +163,8 @@ def tesseract_dispatch_jvp_rule(
     reverse-mode autodiff.
 
     """
-    if eval_func != "apply":
-        raise RuntimeError("Cannot take higher-order derivatives")
+    if eval_func not in ("apply", "jacobian_vector_product", "vector_jacobian_product"):
+        raise RuntimeError(f"Cannot take higher-order derivatives of {eval_func!r}")
 
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
@@ -161,52 +172,84 @@ def tesseract_dispatch_jvp_rule(
     #          (not in ad.py's backward_pass), you probably want to instantiate
     #          it so that it's no longer symbolic
 
-    # Compute which primals have non-zero tangents
-    has_tangent = tuple(
-        not (isinstance(t, jax._src.ad_util.Zero) or t is None) for t in tan_args
-    )
+    n_primals = len(is_static_mask) - sum(is_static_mask)
 
-    # Raise if a non-symbolic-zero tangent is provided for a non-differentiable input.
-    _tangents_for_check = tuple(
-        t if h else None for t, h in zip(tan_args, has_tangent, strict=True)
-    )
-    _tangent_inputs = unflatten_args(
-        _tangents_for_check,
-        static_args,
-        input_pytreedef,
-        is_static_mask,
-        remove_static_args=True,
-    )
-    _flat_tangents = _pytree_to_tesseract_flat(
-        _tangent_inputs, schema_paths=client.differentiable_input_paths
-    )
-    for path, val in _flat_tangents.items():
-        if val is None:
-            raise ValueError(
-                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
-                f"If this input should be differentiable, mark it as "
-                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
-                f"exclude it from the differentiated function's argument list "
-                f"(using a closure or the `argnums` parameter), or apply "
-                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
+    if eval_func == "apply":
+        # Compute which primals have non-zero tangents
+        has_tangent = tuple(not isinstance(t, jax._src.ad_util.Zero) for t in tan_args)
+
+        # Raise if a non-symbolic-zero tangent is provided for a non-differentiable input.
+        _tangents_for_check = tuple(
+            t if h else None for t, h in zip(tan_args, has_tangent, strict=True)
+        )
+        _tangent_inputs = unflatten_args(
+            _tangents_for_check,
+            static_args,
+            input_pytreedef,
+            is_static_mask,
+            remove_static_args=True,
+        )
+        _flat_tangents = _pytree_to_tesseract_flat(
+            _tangent_inputs, schema_paths=client.differentiable_input_paths
+        )
+        for path, val in _flat_tangents.items():
+            if val is None:
+                raise ValueError(
+                    f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
+                    f"If this input should be differentiable, mark it as "
+                    f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
+                    f"exclude it from the differentiated function's argument list "
+                    f"(using a closure or the `argnums` parameter), or apply "
+                    f"jax.lax.stop_gradient to it before passing to apply_tesseract."
+                )
+        # Differentiating `apply` means differentiating wrt its primals.
+        tan_args_ = _instantiate_zeros(tan_args)
+    else:
+        # A derivative endpoint is linear in its (co)tangent slots, so its JVP is
+        # that same endpoint at the new (co)tangents. Its primals are another
+        # matter: that needs a second derivative, which Tesseract does not expose.
+        if not all(isinstance(t, jax._src.ad_util.Zero) for t in tan_args[:n_primals]):
+            raise RuntimeError(
+                "Cannot differentiate a Tesseract derivative endpoint with respect "
+                "to its primal inputs, as this needs a second derivative."
             )
+        tan_args_ = _instantiate_zeros(tan_args[n_primals:])
 
-    tan_args_ = tuple(
-        (jax.numpy.zeros_like(arg.aval) if not has_tan else arg)
-        for arg, has_tan in zip(tan_args, has_tangent, strict=True)
-    )
+    # `has_tangent` describes a bind's own (co)tangent operands, so the derivative
+    # bind below needs one for `tan_args_` rather than the mask it inherited. Only
+    # a `jacobian_vector_product` can have one: its linear slots are tangents, one
+    # per primal, which is how `has_tangent` is indexed. A
+    # `vector_jacobian_product`'s are cotangents, one per output, so they cannot
+    # size such a mask and it keeps the inherited value -- as does `res`, which
+    # reproduces the original call over the original operands.
+    #
+    # Not cosmetic: the batching rule turns `has_tangent` into `jac_input_paths`,
+    # i.e. which columns of the Jacobian get requested, so an inherited mask
+    # over-fetches whenever only some arguments are differentiated.
+    # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the
+    # unwanted ones by the zeros instantiated above.
+    deriv_has_tangent = has_tangent
+    if eval_func == "jacobian_vector_product":
+        deriv_has_tangent = tuple(
+            not isinstance(t, jax._src.ad_util.Zero) for t in tan_args[n_primals:]
+        )
+
     # this leads to an abstract_eval call and a jvp
     jvp = tesseract_dispatch_p.bind(
-        *in_args,
+        *in_args[:n_primals],
         *tan_args_,
         static_args=static_args,
         input_pytreedef=input_pytreedef,
         output_pytreedef=output_pytreedef,
         output_avals=output_avals,
         is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
+        has_tangent=deriv_has_tangent,
         client=client,
-        eval_func="jacobian_vector_product",
+        eval_func=(
+            "vector_jacobian_product"
+            if eval_func == "vector_jacobian_product"
+            else "jacobian_vector_product"
+        ),
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
     )
@@ -220,7 +263,7 @@ def tesseract_dispatch_jvp_rule(
         is_static_mask=is_static_mask,
         has_tangent=has_tangent,
         client=client,
-        eval_func="apply",
+        eval_func=eval_func,
         vmap_method=vmap_method,
         materialize_jacobian=materialize_jacobian,
     )
@@ -233,7 +276,7 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 
 def tesseract_dispatch_transpose_rule(
     cotangent: Sequence[ArrayLike | ad.Zero],
-    *args: ArrayLike,
+    *args: ArrayLike | ad.UndefinedPrimal,
     static_args: tuple[_Hashable, ...],
     input_pytreedef: PyTreeDef,
     output_pytreedef: PyTreeDef,
@@ -250,6 +293,22 @@ def tesseract_dispatch_transpose_rule(
 
     n_primals = len(is_static_mask) - sum(is_static_mask)
     primal_args = args[:n_primals]
+
+    # Primal slots must hold concrete residuals. An UndefinedPrimal here means the
+    # caller asked us to transpose with respect to a primal -- J(x)·v is linear in
+    # the tangent v but not in x, so no endpoint can serve it. JAX itself refuses
+    # the equivalent transpose, so bail with guidance instead of letting the
+    # UndefinedPrimal fall through into the checks below.
+    if any(ad.is_undefined_primal(p) for p in primal_args):
+        raise ValueError(
+            "Transpose of the Tesseract primitive requires concrete primal "
+            "values, but received UndefinedPrimal. This typically happens when "
+            "jax.linear_transpose is applied to a function whose arguments "
+            "include both primals and tangents. Close over the primals instead, "
+            "e.g.:\n"
+            "  primals = (x,)\n"
+            "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
+        )
 
     # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
     # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
@@ -294,14 +353,7 @@ def tesseract_dispatch_transpose_rule(
                 f"jax.lax.stop_gradient to it before passing to apply_tesseract."
             )
 
-    cotan_args_ = tuple(
-        (
-            jax.numpy.zeros_like(arg.aval)
-            if isinstance(arg, jax._src.ad_util.Zero)
-            else arg
-        )
-        for arg in cotangent
-    )
+    cotan_args_ = _instantiate_zeros(cotangent)
 
     vjp = tesseract_dispatch_p.bind(
         *primal_args,
@@ -466,6 +518,16 @@ def tesseract_dispatch_lowering(
         jac_mode=jac_mode,
     )
 
+    # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
+    # This is what lets XLA's CSE fold repeated identical calls into a single
+    # request -- the same treatment a LAPACK custom call such as ``lu_factor``
+    # already gets. It relies on the bind params comparing equal for identical
+    # calls, which is why ``Jaxeract`` defines ``__eq__`` / ``__hash__``.
+    #
+    # Marking the callback side-effecting would *not* buy a guarantee that it
+    # always runs: JAX's own DCE already drops a Tesseract call whose outputs are
+    # unused, before XLA ever sees it. All it did was suppress CSE and pin the
+    # call's order against other effects.
     result, _, keepalive = mlir.emit_python_callback(
         ctx,
         dispatch,
@@ -473,7 +535,7 @@ def tesseract_dispatch_lowering(
         array_args,
         ctx.avals_in,
         ctx.avals_out,
-        has_side_effect=True,
+        has_side_effect=False,
     )
     ctx.module_context.add_keepalive(keepalive)
     return result
@@ -618,6 +680,7 @@ def tesseract_dispatch_batching(
                 has_tangent=has_tangent,
                 client=client,
                 eval_func=eval_func,
+                vmap_method=vmap_method,
             )
 
     new_args = [
@@ -625,6 +688,13 @@ def tesseract_dispatch_batching(
         for arg, ax in zip(array_args, axes, strict=True)
     ]
     is_batched_mask = [ax is not None for ax in axes]
+
+    if eval_func == "jacobian":
+        # The vectorized strategies hand batched primals to the endpoint, which
+        # then answers with a (batch, *out, batch, *in) block rather than
+        # (batch, *out, *in). Only sequential wraps a jacobian call correctly,
+        # and the mismatch is silent rather than an error, so pin it here.
+        vmap_method = "sequential"
 
     batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
     return batch_fn(
@@ -640,6 +710,10 @@ def tesseract_dispatch_batching(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
 
 
@@ -655,6 +729,7 @@ def _batched_via_jacobian(
     has_tangent: tuple[bool, ...],
     client: Jaxeract,
     eval_func: str,
+    vmap_method: VmapMethod = None,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -724,7 +799,7 @@ def _batched_via_jacobian(
         has_tangent=has_tangent,
         client=client,
         eval_func="jacobian",
-        vmap_method=None,
+        vmap_method=vmap_method,
         jac_input_paths=tuple(diff_input_path_to_pos),
         jac_output_paths=tuple(diff_output_path_to_pos),
         jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",

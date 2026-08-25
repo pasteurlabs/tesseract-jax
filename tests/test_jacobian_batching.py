@@ -19,14 +19,20 @@ import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
+from tesseract_jax.tesseract_compat import Jaxeract
 
 
 def _spy_endpoints(tess, monkeypatch):
-    """Wrap jacobian / jvp / vjp endpoints with counters."""
-    counts = {"jacobian": 0, "jvp": 0, "vjp": 0}
+    """Wrap apply / jacobian / jvp / vjp endpoints with counters."""
+    counts = {"apply": 0, "jacobian": 0, "jvp": 0, "vjp": 0}
+    orig_apply = tess.apply
     orig_jac = tess.jacobian
     orig_jvp = tess.jacobian_vector_product
     orig_vjp = tess.vector_jacobian_product
+
+    def wa(*a, **kw):
+        counts["apply"] += 1
+        return orig_apply(*a, **kw)
 
     def wj(*a, **kw):
         counts["jacobian"] += 1
@@ -40,6 +46,7 @@ def _spy_endpoints(tess, monkeypatch):
         counts["vjp"] += 1
         return orig_vjp(*a, **kw)
 
+    monkeypatch.setattr(tess, "apply", wa)
     monkeypatch.setattr(tess, "jacobian", wj)
     monkeypatch.setattr(tess, "jacobian_vector_product", wjvp)
     monkeypatch.setattr(tess, "vector_jacobian_product", wvjp)
@@ -111,6 +118,37 @@ def test_jacfwd_through_jit(vectoradd_tess, monkeypatch):
     M = jax.jacfwd(f)(a)
 
     np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_jacfwd_of_linearized_uses_jacobian_endpoint(vectoradd_tess, monkeypatch):
+    """``jacfwd`` of a ``jax.linearize`` tangent function uses the shortcut too.
+
+    The spy covers the ``linearize`` call as well, so the counts are the whole cost
+    of the pattern: one ``apply`` (the forward evaluation ``linearize`` itself
+    needs, and differentiating the tangent function adds none) plus one
+    ``jacobian`` (the batching shortcut), and no ``jvp`` at all.
+
+    That last one is the interesting part. The JVP rule for a derivative endpoint
+    emits two binds -- the undifferentiated output and the endpoint re-applied at
+    the new tangent -- and ``jacfwd`` discards the former. Under ``jit`` DCE drops
+    it, so this costs exactly what ``jacfwd(f)`` costs. Un-jitted, DCE does not
+    fire and the discarded bind is paid for; hence the ``jit`` here.
+    """
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    def f(a):
+        return apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    _primal_out, tangent_fn = jax.linearize(f, a)
+    M = jax.jit(jax.jacfwd(tangent_fn))(a)
+
+    # tangent_fn is linear with f's Jacobian, so this is df/da = I.
+    np.testing.assert_allclose(M, np.eye(3, dtype="float32"), atol=1e-6)
+    assert counts["apply"] == 1
     assert counts["jacobian"] == 1
     assert counts["jvp"] == 0
 
@@ -340,6 +378,39 @@ def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
     assert captured["jac_inputs"] == ["x"]
 
 
+def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
+    """``jacfwd`` of a linearized function wrt one argument narrows the request too.
+
+    The tangent function's other argument gets a symbolic-zero tangent, which is
+    instantiated to dense zeros before it can cross a bind. Its Jacobian column
+    would then be fetched only to be multiplied by those zeros, so the JVP rule
+    recomputes ``has_tangent`` for the tangent bind rather than inheriting it.
+    """
+    x = jnp.array(1.0, dtype="float64")
+    y = jnp.array(2.0, dtype="float64")
+
+    def f(x, y):
+        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
+
+    _primal, tangent_fn = jax.linearize(f, x, y)
+    expected = jax.jacfwd(f, argnums=0)(x, y)  # before the spy, so it is not captured
+
+    captured: dict[str, Any] = {}
+    orig = univariate_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_inputs"] = list(jac_inputs)
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(univariate_tess, "jacobian", spy)
+    g = jax.jacfwd(tangent_fn, argnums=0)(x, y)
+
+    np.testing.assert_allclose(g, expected, rtol=1e-5)
+    assert captured["jac_inputs"] == ["x"], (
+        f"expected only 'x' to be requested, got {captured['jac_inputs']}"
+    )
+
+
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
     """The shortcut's numerical result matches a pure-JAX implementation."""
@@ -359,3 +430,206 @@ def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
     M_tess = jax.jacfwd(f_tess)(a)
     M_jax = jax.jacfwd(f_jax)(a)
     np.testing.assert_allclose(M_tess, M_jax, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Common subexpression elimination of Tesseract calls
+#
+# A Tesseract endpoint is a pure function of its inputs, so XLA is free to fold
+# repeated identical calls into one request -- as it already does for LAPACK
+# custom calls. Two things are needed: the callback must be lowered as pure, and
+# the bind params (including the Jaxeract client) must compare equal.
+# ---------------------------------------------------------------------------
+
+
+def test_chunked_jacobian_calls_endpoint_once(vectoradd_tess, monkeypatch):
+    """Chunking the identity matrix must not multiply the ``jacobian`` requests.
+
+    Splitting the eye-vmap into chunks is a way to cap peak memory when the
+    Tesseract is one component of a larger function. The Jacobian does not depend
+    on the tangents, so every chunk issues an identical request and only one of
+    them needs to reach the Tesseract.
+    """
+    n = 6
+    a = jnp.arange(n, dtype="float32") + 1.0
+    b = jnp.full((n,), 0.5, dtype="float32")
+
+    def f(a):
+        # tanh stands in for the other, memory-hungry components that motivate
+        # chunking in the first place.
+        return jnp.tanh(apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"])
+
+    expected = jax.jacfwd(f)(a)
+    _primal, tangent_fn = jax.linearize(f, a)
+    batched = jax.vmap(tangent_fn)
+    eye = jnp.eye(n, dtype="float32")
+
+    # Spy only over the chunked computation, so the reference above is not counted.
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    M = jax.jit(lambda e: jnp.concatenate([batched(c) for c in jnp.split(e, 3)]))(eye)
+
+    np.testing.assert_allclose(M, expected, atol=1e-6)
+    assert counts["jacobian"] == 1
+    assert counts["jvp"] == 0
+
+
+def test_identical_calls_are_commoned_up(vectoradd_tess, monkeypatch):
+    """Two identical ``apply_tesseract`` calls in one trace issue one request.
+
+    Both operands are passed as arguments rather than closed over: a concrete
+    closed-over array becomes a static arg wrapped in ``_Hashable``, which
+    compares by identity and so defeats CSE for unrelated reasons.
+    """
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    @jax.jit
+    def twice(a, b):
+        c1 = apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+        c2 = apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
+        return c1 + c2
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    out = twice(a, b)
+
+    np.testing.assert_allclose(out, 2.0 * (a + b), atol=1e-6)
+    assert counts["apply"] == 1
+
+
+def test_distinct_calls_are_not_commoned_up(vectoradd_tess, monkeypatch):
+    """Calls that differ in their inputs must stay separate requests."""
+    a1 = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    a2 = jnp.array([100.0, 200.0, 300.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+
+    @jax.jit
+    def two_different(a1, a2, b):
+        c1 = apply_tesseract(vectoradd_tess, dict(a=a1, b=b))["c"]
+        c2 = apply_tesseract(vectoradd_tess, dict(a=a2, b=b))["c"]
+        return c1, c2
+
+    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
+    c1, c2 = two_different(a1, a2, b)
+
+    np.testing.assert_allclose(c1, a1 + b, atol=1e-6)
+    np.testing.assert_allclose(c2, a2 + b, atol=1e-6)
+    assert counts["apply"] == 2
+
+
+def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
+    """Distinct wrappers around one Tesseract are equal, so bind params match."""
+    assert Jaxeract(vectoradd_tess) == Jaxeract(vectoradd_tess)
+    assert hash(Jaxeract(vectoradd_tess)) == hash(Jaxeract(vectoradd_tess))
+    assert Jaxeract(vectoradd_tess) != object()
+
+
+# ---------------------------------------------------------------------------
+# Nested batching: an outer vmap over a jacobian shortcut
+# ---------------------------------------------------------------------------
+
+# Fixed-shape schemas cannot take a batch dimension, so expand_dims and
+# broadcast_all legitimately fail validation on them. batched_tesseract is
+# ellipsis-shaped, so all four are testable there.
+FIXED_SHAPE_METHODS = ["sequential", "auto_experimental"]
+ALL_VMAP_METHODS = [
+    "sequential",
+    "auto_experimental",
+    "expand_dims",
+    "broadcast_all",
+]
+
+
+@pytest.mark.parametrize("vmap_method", ALL_VMAP_METHODS)
+def test_vmap_of_jacfwd_agrees_across_vmap_methods(batched_tess, vmap_method):
+    """Every vmap method must agree with the unbatched Jacobian.
+
+    A jacobian bind can only be batched sequentially: the vectorized
+    strategies hand batched primals to the endpoint, which answers with a
+    (batch, *out, batch, *in) block instead of (batch, *out, *in). Nothing
+    raises, so this asserts the value rather than merely that it runs.
+    """
+
+    def f(x):
+        return apply_tesseract(
+            batched_tess, {"x": x, "y": jnp.ones(3)}, vmap_method=vmap_method
+        )["result"]
+
+    xs = jnp.stack([jnp.ones(3) * s for s in (1.0, 2.0)])
+    got = jax.vmap(jax.jacfwd(f))(xs)
+    expected = jnp.stack([jax.jacfwd(f)(x) for x in xs])
+
+    assert got.shape == expected.shape
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess, vmap_method):
+    """``vmap(jacfwd(f))`` works when a vmap_method is supplied.
+
+    The jacobian shortcut binds a nested ``jacobian`` call. That bind used to
+    hard-code ``vmap_method=None``, so an outer vmap batching it resolved to
+    the not-implemented handler and told the caller to pass the vmap_method
+    they had already passed. Regression from the shortcut landing in #191.
+    """
+
+    def f(x):
+        return apply_tesseract(univariate_tess, {"x": x}, vmap_method=vmap_method)
+
+    xs = jnp.arange(3.0, dtype="float32")
+    got = jax.vmap(jax.jacfwd(f))(xs)["result"]
+    expected = jnp.stack([jax.jacfwd(f)(x)["result"] for x in xs])
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess, vmap_method):
+    """The nested bind must keep its jacobian path restriction and mode.
+
+    Threading only ``vmap_method`` is not enough: with the path parameters
+    dropped, the inner bind reverts to every differentiable path and the
+    contraction fails with mismatched shapes on any multi-input schema.
+    """
+    base = {
+        "alpha": {"x": jnp.ones(3, "float32"), "y": jnp.ones(4, "float32")},
+        "beta": {
+            "z": jnp.ones(5, "float32"),
+            "gamma": {"u": jnp.ones(6, "float32"), "v": jnp.ones(7, "float32")},
+        },
+        "delta": [jnp.ones(8, "float32"), jnp.ones(9, "float32")],
+        "epsilon": {"k": jnp.ones(2, "float32"), "m": jnp.ones(10, "float32")},
+        "zeta": [jnp.ones(11, "float32"), jnp.ones(12, "float32")],
+    }
+
+    def f(x):
+        inputs = {**base, "alpha": {**base["alpha"], "x": x}}
+        return apply_tesseract(pytree_tess, inputs, vmap_method=vmap_method)["result"]
+
+    xs = jnp.stack([jnp.ones(3, "float32") * s for s in (1.0, 2.0)])
+    got = jax.vmap(jax.jacfwd(f))(xs)
+    expected = jnp.stack([jax.jacfwd(f)(x) for x in xs])
+    np.testing.assert_allclose(got, expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_materialize_jacobian_false_survives_a_batching_rebind(
+    univariate_tess, monkeypatch, vmap_method
+):
+    """``materialize_jacobian=False`` must still hold after an inner re-bind.
+
+    The flag is the documented escape hatch for when materializing the
+    Jacobian is too expensive, so silently taking the shortcut anyway is the
+    cost the caller asked to avoid.
+    """
+
+    def f(x):
+        return apply_tesseract(
+            univariate_tess,
+            {"x": x},
+            vmap_method=vmap_method,
+            materialize_jacobian=False,
+        )
+
+    counts = _spy_endpoints(univariate_tess, monkeypatch)
+    jax.jacfwd(jax.vmap(f))(jnp.arange(3.0, dtype="float32"))
+
+    assert counts["jacobian"] == 0

@@ -281,6 +281,12 @@ def univariate_tess() -> Tesseract:
 
 
 @pytest.fixture
+def batched_tess() -> Tesseract:
+    """Ellipsis-shaped schema, so the vectorized vmap methods are legal here."""
+    return _load_tesseract("batched_tesseract")
+
+
+@pytest.fixture
 def vectoradd_tess() -> Tesseract:
     return _load_tesseract("vectoradd_tesseract")
 
@@ -293,6 +299,11 @@ def static_input_tess() -> Tesseract:
 @pytest.fixture
 def mixed_dtype_tess() -> Tesseract:
     return _load_tesseract("mixed_dtype_tesseract")
+
+
+@pytest.fixture
+def validating_tess() -> Tesseract:
+    return _load_tesseract("validating_tesseract")
 
 
 # ---------------------------------------------------------------------------

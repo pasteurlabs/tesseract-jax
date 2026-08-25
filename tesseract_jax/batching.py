@@ -57,6 +57,10 @@ def _dispatch_vectorized(
     eval_func: str,
     vmap_method: "VmapMethod",
     tesseract_dispatch_p: Any,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Common vectorized dispatch: broadcast JVP tangents, prepend batch dim, bind."""
     # JVP: broadcast primal/tangent to match if batch dims differ
@@ -82,6 +86,10 @@ def _dispatch_vectorized(
         client=client,
         eval_func=eval_func,
         vmap_method=vmap_method,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
     return tuple(outvals), (0,) * len(outvals)
 
@@ -105,6 +113,10 @@ def sequential(
     eval_func: str,
     vmap_method: "VmapMethod",
     tesseract_dispatch_p: Any,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """One Tesseract call per batch element via ``jax.lax.map``."""
     unbatched_args, batched_args = split_args(new_args, is_batched_mask)
@@ -122,6 +134,10 @@ def sequential(
             client=client,
             eval_func=eval_func,
             vmap_method=vmap_method,
+            materialize_jacobian=materialize_jacobian,
+            jac_input_paths=jac_input_paths,
+            jac_output_paths=jac_output_paths,
+            jac_mode=jac_mode,
         )
 
     outvals = jax.lax.map(_batch_fun, batched_args)
@@ -142,6 +158,10 @@ def expand_dims(
     eval_func: str,
     vmap_method: "VmapMethod",
     tesseract_dispatch_p: Any,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Add a leading ``(1,)`` dim to unbatched array args; single Tesseract call.
 
@@ -159,6 +179,10 @@ def expand_dims(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
     n_primals = len(is_static_mask) - sum(is_static_mask)
     batch_size = _get_batch_size(new_args, is_batched_mask)
@@ -191,6 +215,10 @@ def broadcast_all(
     eval_func: str,
     vmap_method: "VmapMethod",
     tesseract_dispatch_p: Any,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Broadcast unbatched array args to ``(batch, ...)``; single Tesseract call.
 
@@ -209,6 +237,10 @@ def broadcast_all(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
     n_primals = len(is_static_mask) - sum(is_static_mask)
     batch_size = _get_batch_size(new_args, is_batched_mask)
@@ -241,6 +273,10 @@ def auto_experimental(
     eval_func: str,
     vmap_method: "VmapMethod",
     tesseract_dispatch_p: Any,
+    materialize_jacobian: bool | None = None,
+    jac_input_paths: tuple[str, ...] | None = None,
+    jac_output_paths: tuple[str, ...] | None = None,
+    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Auto-detect whether to vectorize based on the schema.
 
@@ -260,6 +296,10 @@ def auto_experimental(
         eval_func=eval_func,
         vmap_method=vmap_method,
         tesseract_dispatch_p=tesseract_dispatch_p,
+        materialize_jacobian=materialize_jacobian,
+        jac_input_paths=jac_input_paths,
+        jac_output_paths=jac_output_paths,
+        jac_mode=jac_mode,
     )
     n_primals = len(is_static_mask) - sum(is_static_mask)
     batch_size = _get_batch_size(new_args, is_batched_mask)
