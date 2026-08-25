@@ -30,8 +30,10 @@ runtime's framework-agnostic ``IpcDeviceArray``.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
+
+import numpy as np
 
 FFI_TARGET_NAME = "tesseract_jax_dispatch"
 
@@ -121,16 +123,33 @@ class _DeviceArrayView:
             "version": 3,
         }
 
+    # ``.shape`` / ``.dtype`` mirror the metadata already carried in the CUDA
+    # array interface, so the view answers the same shape/dtype queries a real
+    # array does. The transport-agnostic dispatch code reads these off its
+    # arguments (e.g. to size a return slot); exposing them keeps that code from
+    # having to special-case the GPU path.
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.__cuda_array_interface__["shape"]
+
+    @property
+    def dtype(self) -> np.dtype:
+        return np.dtype(self.__cuda_array_interface__["typestr"])
+
 
 def _native_dispatch(
-    token: int, inputs: list[tuple[int, str, tuple[int, ...]]]
+    token: int, inputs: Sequence[tuple[int, str, Sequence[int]]]
 ) -> list[Any]:
     """Invoked by the native FFI handler under the GIL.
 
-    ``inputs`` is a list of ``(device_ptr, numpy_typestr, shape)`` for the XLA
-    input buffers (still on device). Returns a list of arrays exposing
+    ``inputs`` is a sequence of ``(device_ptr, numpy_typestr, shape)`` for the
+    XLA input buffers (still on device). Returns a list of arrays exposing
     ``__cuda_array_interface__`` whose bytes the handler copies into the XLA
     output buffers.
+
+    The native shim marshals each entry across the pybind11 boundary, where
+    ``shape`` arrives as a Python ``list`` rather than a ``tuple``; the sequence
+    annotations describe that faithfully (and are normalized to tuples below).
     """
     fn = _registry.get(token)
     if fn is None:
