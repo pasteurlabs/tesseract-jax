@@ -77,6 +77,7 @@ struct CudaRuntime {
   cudaError_t (*Memcpy)(void*, const void*, size_t, int) = nullptr;
   cudaError_t (*MemcpyAsync)(void*, const void*, size_t, int, void* /*stream*/) =
       nullptr;
+  cudaError_t (*MemsetAsync)(void*, int, size_t, void* /*stream*/) = nullptr;
   cudaError_t (*StreamSynchronize)(void* /*stream*/) = nullptr;
   const char* (*GetErrorString)(cudaError_t) = nullptr;
   // Optional: only used by the debug pointer-residency check. May be null if the
@@ -103,6 +104,8 @@ CudaRuntime& cuda_rt() {
         dlsym(rt.handle, "cudaMemcpy"));
     rt.MemcpyAsync = reinterpret_cast<decltype(rt.MemcpyAsync)>(
         dlsym(rt.handle, "cudaMemcpyAsync"));
+    rt.MemsetAsync = reinterpret_cast<decltype(rt.MemsetAsync)>(
+        dlsym(rt.handle, "cudaMemsetAsync"));
     rt.StreamSynchronize = reinterpret_cast<decltype(rt.StreamSynchronize)>(
         dlsym(rt.handle, "cudaStreamSynchronize"));
     rt.GetErrorString = reinterpret_cast<decltype(rt.GetErrorString)>(
@@ -113,9 +116,10 @@ CudaRuntime& cuda_rt() {
             dlsym(rt.handle, "cudaPointerGetAttributes"));
     rt.GetLastError = reinterpret_cast<decltype(rt.GetLastError)>(
         dlsym(rt.handle, "cudaGetLastError"));
-    if (!rt.Memcpy || !rt.MemcpyAsync || !rt.StreamSynchronize) {
+    if (!rt.Memcpy || !rt.MemcpyAsync || !rt.MemsetAsync ||
+        !rt.StreamSynchronize) {
       throw std::runtime_error(
-          "tesseract_jax: failed to resolve required cudaMemcpy symbols");
+          "tesseract_jax: failed to resolve required cudaMemcpy/Memset symbols");
     }
   });
   return rt;
@@ -299,6 +303,19 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
   // Call into Python under the GIL.
   std::vector<py::object> results_keepalive;
   std::vector<BufferDesc> result_descs;
+  // The keepalive vector holds Python objects, so it must be emptied while the
+  // GIL is held -- otherwise the py::object destructors call dec_ref() with no
+  // GIL and abort the process. This guard clears it under the GIL on *every*
+  // exit path (including early error returns), so a residency-check failure
+  // surfaces as a clean ffi::Error instead of a crash.
+  struct KeepaliveGuard {
+    std::vector<py::object>& v;
+    ~KeepaliveGuard() {
+      if (v.empty()) return;
+      py::gil_scoped_acquire gil;
+      v.clear();
+    }
+  } keepalive_guard{results_keepalive};
   {
     py::gil_scoped_acquire gil;
     py::object& cb = dispatch_callable();
@@ -332,9 +349,19 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     for (size_t i = 0; i < out_descs.size(); ++i) {
       py::object item = seq[i];
       results_keepalive.push_back(item);  // keep alive through the copy
+      BufferDesc rd;
+      // A ``None`` result marks a placeholder slot: a discarded gradient/tangent
+      // for a non-differentiable input or output that no consumer reads. There is
+      // no source array to copy; rd.ptr == 0 flags it for a NaN-fill (rather than
+      // a copy) of XLA's output buffer below -- no source buffer is fabricated.
+      if (item.is_none()) {
+        rd.ptr = 0;
+        rd.nbytes = 0;
+        result_descs.push_back(rd);
+        continue;
+      }
       py::object cai = item.attr("__cuda_array_interface__");
       py::tuple data = cai["data"].cast<py::tuple>();
-      BufferDesc rd;
       rd.ptr = data[0].cast<uintptr_t>();
       rd.nbytes = out_descs[i].nbytes;  // trust XLA's expected size
       result_descs.push_back(rd);
@@ -352,8 +379,23 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     }
   }  // release GIL before the device copies
 
-  // Copy each result device->device into the XLA-owned output buffer.
+  // Fill each XLA-owned output buffer. A null pointer marks a placeholder slot
+  // (the dispatch returned ``None``): its value is a discarded gradient/tangent
+  // that no consumer reads, so instead of copying we fill it with the byte
+  // pattern 0xff -- which is a (quiet) NaN for every IEEE float width. This keeps
+  // the device path's poison semantics identical to the host path (np.full(nan))
+  // and leaves no output buffer undefined, all without allocating a source
+  // buffer. Every other slot is a real device result we copy device->device.
   for (size_t i = 0; i < out_descs.size(); ++i) {
+    if (result_descs[i].ptr == 0) {
+      if (cudaError_t e = rt.MemsetAsync(reinterpret_cast<void*>(out_descs[i].ptr),
+                                         0xff, out_descs[i].nbytes, stream);
+          e != cudaSuccess) {
+        return ffi::Error::Internal("cudaMemsetAsync(placeholder) failed: " +
+                                    cuda_err(e));
+      }
+      continue;
+    }
     if (cudaError_t e = rt.MemcpyAsync(
             reinterpret_cast<void*>(out_descs[i].ptr),
             reinterpret_cast<void*>(result_descs[i].ptr), out_descs[i].nbytes,
@@ -363,15 +405,12 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
                                   cuda_err(e));
     }
   }
-  // Ensure the copies complete before the Python result buffers (held only by
-  // results_keepalive, about to be dropped) can be freed/recycled.
+  // Ensure the copies complete before the Python result buffers (held by
+  // results_keepalive) can be freed/recycled. The keepalive is then cleared
+  // under the GIL by keepalive_guard as this function returns.
   if (cudaError_t e = rt.StreamSynchronize(stream); e != cudaSuccess) {
     return ffi::Error::Internal("cudaStreamSynchronize(post) failed: " +
                                 cuda_err(e));
-  }
-  {
-    py::gil_scoped_acquire gil;
-    results_keepalive.clear();
   }
   return ffi::Error::Success();
 }

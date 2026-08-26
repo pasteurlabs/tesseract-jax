@@ -9,7 +9,6 @@ import jax.tree
 import numpy as np
 from jax import ShapeDtypeStruct
 from jax.tree_util import PyTreeDef
-from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import (
@@ -21,6 +20,66 @@ from tesseract_jax.tree_util import (
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+
+# The endpoint methods are transport-agnostic: the CPU host-callback lowering
+# passes real arrays (``ArrayLike``), while the GPU FFI lowering passes bare
+# ``__cuda_array_interface__`` device views. ``Any`` admits both so a runtime
+# type-check does not reject the duck-typed GPU views.
+TransportArray = Any
+
+
+def _on_device(values: "list | tuple") -> bool:
+    """Whether ``values`` are cuda_ipc device arrays (vs host NumPy arrays).
+
+    The endpoint methods are transport-agnostic; this distinguishes the GPU FFI
+    lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
+    results) from the CPU host-callback lowering (real NumPy arrays).
+
+    The ``cuda_ipc`` import is deliberately lazy, not at module scope: eagerly
+    importing ``tesseract_core.runtime.cuda_ipc`` perturbs schema/typeguard state
+    in the shared interpreter and breaks in-process (``LocalClient``) Tesseracts
+    whose endpoints use ellipsis-shaped array schemas.
+    """
+    from tesseract_core.runtime.cuda_ipc import has_cuda_array_interface
+
+    return any(has_cuda_array_interface(v) for v in values)
+
+
+def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+    """Coerce a dispatch result to the return ``dtype`` without leaving the device.
+
+    On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
+    FFI handler copies straight into XLA's output buffer -- it is already the
+    right dtype (the server computed it), so it is returned untouched. Wrapping
+    it in ``np.asarray`` here would force a device->host copy and then hand a
+    host pointer back across the FFI boundary. On the host path ``value`` is a
+    NumPy array and we cast as before.
+    """
+    if _on_device([value]):
+        return value
+    return np.asarray(value, dtype=dtype)
+
+
+def _placeholder(
+    shape: tuple[int, ...], dtype: np.dtype, *, on_device: bool
+) -> TransportArray:
+    """A discarded slot in a derivative call's output tuple.
+
+    Used for the gradient of a non-differentiable input and the tangent of a
+    non-differentiable output. Such a slot exists only to satisfy the
+    output-tuple-length contract; JAX's transpose machinery never consumes it for
+    any user-requested derivative, so its *value* is immaterial (verified:
+    substituting any value leaves every user-visible gradient unchanged).
+
+    On the cuda_ipc path we return ``None``: the native FFI handler NaN-fills
+    XLA's (already-allocated) output buffer for that slot rather than copying from
+    a fabricated source array. On the host path we return an all-NaN array
+    directly. Either way the discarded slot is NaN, so an accidental consumer
+    surfaces loudly rather than silently -- the same poison on both transports.
+    """
+    if on_device:
+        return None
+    return np.full(shape, np.nan, dtype=dtype)
 
 
 class Jaxeract:
@@ -139,7 +198,7 @@ class Jaxeract:
 
     def apply(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
         output_pytreedef: PyTreeDef | None,
@@ -162,7 +221,7 @@ class Jaxeract:
 
     def jacobian_vector_product(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
         output_pytreedef: PyTreeDef,
@@ -214,18 +273,19 @@ class Jaxeract:
             tangent_vector=flat_tangents,
         )
 
+        on_device = _on_device(array_args)
         out = []
         for path, aval in zip(output_flat, output_avals, strict=False):
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
+                out.append(_placeholder(aval.shape, aval.dtype, on_device=on_device))
 
         return tuple(out)
 
     def jacobian(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
         output_pytreedef: PyTreeDef,
@@ -284,12 +344,12 @@ class Jaxeract:
         for op in jac_outputs:
             for ip in jac_inputs:
                 target = ip_to_dtype[ip] if jac_mode == "bwd" else op_to_dtype[op]
-                out.append(np.asarray(out_data[op][ip], dtype=target))
+                out.append(_cast_return(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         static_args: tuple[Any, ...],
         input_pytreedef: PyTreeDef,
         output_pytreedef: PyTreeDef,
@@ -347,17 +407,13 @@ class Jaxeract:
                 and not is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):
-                # Non-differentiable but non-static input: return a NaN
-                # placeholder of the same shape/dtype as the corresponding
-                # input array. The slot exists for tuple-length contract;
-                # JAX's transpose machinery doesn't consume it for any
-                # user-requested derivative.
+                # Non-differentiable but non-static input: emit a placeholder of
+                # the same shape/dtype as the corresponding input array. The slot
+                # exists for the tuple-length contract; JAX's transpose machinery
+                # doesn't consume it for any user-requested derivative.
+                arg = array_args[array_idx]
                 out.append(
-                    np.full(
-                        array_args[array_idx].shape,
-                        np.nan,
-                        dtype=array_args[array_idx].dtype,
-                    )
+                    _placeholder(arg.shape, arg.dtype, on_device=_on_device([arg]))
                 )
                 tan_idx += 1
 

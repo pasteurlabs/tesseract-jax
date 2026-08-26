@@ -465,7 +465,12 @@ def _build_dispatch_closure(
         extra_kwargs["jac_output_paths"] = jac_output_paths
         extra_kwargs["jac_mode"] = jac_mode
 
-    def dispatch(*args: ArrayLike) -> tuple:
+    # ``args`` is transport-dependent: the CPU host-callback lowering passes real
+    # arrays (``ArrayLike``), while the GPU FFI lowering passes bare
+    # ``__cuda_array_interface__`` device views. Annotate as ``Any`` so this
+    # shared closure accepts both without a runtime type-check rejecting the
+    # duck-typed GPU views.
+    def dispatch(*args: Any) -> tuple:
         static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
         out = getattr(client, eval_func)(
             args,

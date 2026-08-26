@@ -2,9 +2,7 @@ from collections.abc import Iterable, Sequence
 from typing import Any, TypeVar
 
 import jax.tree
-from jax.core import ShapedArray
 from jax.tree_util import PyTreeDef
-from jax.typing import ArrayLike
 
 T = TypeVar("T")
 type PyTree = Any
@@ -39,7 +37,11 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    array_args: tuple[ArrayLike | ShapedArray, ...],
+    # ``array_args`` is transport-dependent: real arrays / avals on the CPU
+    # host-callback path, or bare ``__cuda_array_interface__`` device views on
+    # the GPU FFI path. ``Any`` admits both so a runtime type-check does not
+    # reject the duck-typed GPU views.
+    array_args: tuple[Any, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
     is_static_mask: tuple[bool, ...],
