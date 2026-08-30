@@ -196,3 +196,44 @@ def test_guarded_call_is_elided_on_a_constant_predicate(validating_tess, monkeyp
 
     np.testing.assert_allclose(constant_predicate(), 0.0, rtol=1e-6)
     assert calls["n"] == 0, "a foldable guard should spare the endpoint entirely"
+
+
+# ---------------------------------------------------------------------------
+# Case 0: the OutputSchema itself is unusable, which fails before tracing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_nonarray_output_leaf_names_the_offending_field(nonarray_output_tess, use_jit):
+    """A `str` or `bool` output leaf must be reported by name.
+
+    `abstract_eval` returns a pytree mixing shape/dtype dicts with the plain
+    values of the non-array fields. Both are legal in an `OutputSchema`, so the
+    caller has no reason to expect a failure here, and the failure they get has
+    to say which field it is about.
+    """
+
+    def f(x):
+        return apply_tesseract(nonarray_output_tess, dict(x=x))["y"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    with pytest.raises(TypeError, match=r"Output \['backend'\] expects an array"):
+        f(jnp.ones(3, dtype="float64"))
+
+
+def test_nonarray_output_error_is_not_the_opaque_subscript_error(nonarray_output_tess):
+    """Pin the regression, not just the type.
+
+    Before the leaf was checked, the non-aval leaf reached `aval["shape"]` and
+    raised `TypeError: string indices must be integers`, which names neither the
+    field nor the schema and points at JAX internals.
+    """
+    with pytest.raises(TypeError) as excinfo:
+        apply_tesseract(nonarray_output_tess, dict(x=jnp.ones(3, dtype="float64")))
+
+    message = str(excinfo.value)
+    assert "string indices must be integers" not in message
+    assert "backend" in message
+    assert "apply_tesseract" in message

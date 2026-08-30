@@ -1074,15 +1074,23 @@ def apply_tesseract(
         avals = client.abstract_eval(inputs)
 
         is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
-        flat_avals, output_pytreedef = jax.tree.flatten(avals, is_leaf=is_aval)
-        for aval in flat_avals:
+        avals_with_path, output_pytreedef = jax.tree_util.tree_flatten_with_path(
+            avals, is_leaf=is_aval
+        )
+        for path, aval in avals_with_path:
             if not is_aval(aval):
-                continue
+                raise TypeError(
+                    f"Output {jax.tree_util.keystr(path)} expects an array, but "
+                    f"abstract_eval returned {type(aval).__name__}. Every output "
+                    f"leaf of a Tesseract used with apply_tesseract must be an "
+                    f"array; declare it as one in the OutputSchema, or drop it "
+                    f"from the schema and return it through another channel."
+                )
             _check_dtype(aval["dtype"])
 
         flat_avals = tuple(
             jax.ShapeDtypeStruct(shape=tuple(aval["shape"]), dtype=aval["dtype"])
-            for aval in flat_avals
+            for _, aval in avals_with_path
         )
 
         # Apply the primitive

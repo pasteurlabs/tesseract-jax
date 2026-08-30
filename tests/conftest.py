@@ -244,6 +244,12 @@ def validating_tess() -> Tesseract:
     return _load_tesseract("validating_tesseract")
 
 
+@pytest.fixture
+def nonarray_output_tess() -> Tesseract:
+    """OutputSchema mixes real arrays with a str and a bool."""
+    return _load_tesseract("nonarray_output_tesseract")
+
+
 # ---------------------------------------------------------------------------
 # Shared test inputs
 # ---------------------------------------------------------------------------
