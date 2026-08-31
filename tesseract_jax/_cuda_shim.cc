@@ -84,6 +84,14 @@ struct CudaRuntime {
   // symbol is unavailable; the check degrades to a no-op in that case.
   cudaError_t (*PointerGetAttributes)(void* /*attrs*/, const void*) = nullptr;
   cudaError_t (*GetLastError)() = nullptr;
+  // Driver API (from libcuda), used to save/restore the current CUDA context
+  // around the dispatch. The Python decode path calls runtime APIs
+  // (cudaSetDevice/cudaIpcOpenMemHandle) that bind the runtime *primary* context
+  // onto this thread, displacing the separate driver context XLA runs kernels
+  // in. We snapshot and restore XLA's context so later launches are unaffected.
+  // Null if libcuda is unavailable; the save/restore then degrades to a no-op.
+  int (*CtxGetCurrent)(void** /*CUcontext*/) = nullptr;
+  int (*CtxSetCurrent)(void* /*CUcontext*/) = nullptr;
 };
 
 CudaRuntime& cuda_rt() {
@@ -120,6 +128,29 @@ CudaRuntime& cuda_rt() {
         !rt.StreamSynchronize) {
       throw std::runtime_error(
           "tesseract_jax: failed to resolve required cudaMemcpy/Memset symbols");
+    }
+
+    // Driver API for context save/restore. libcuda is the NVIDIA driver stub,
+    // separate from the runtime (libcudart); it is normally already loaded in a
+    // GPU-enabled process (XLA depends on it). Resolving the symbols from the
+    // already-loaded image via RTLD_DEFAULT avoids guessing its soname; we fall
+    // back to dlopen for robustness. If unavailable, the pointers stay null and
+    // the save/restore becomes a no-op (see ContextGuard).
+    rt.CtxGetCurrent = reinterpret_cast<decltype(rt.CtxGetCurrent)>(
+        dlsym(RTLD_DEFAULT, "cuCtxGetCurrent"));
+    rt.CtxSetCurrent = reinterpret_cast<decltype(rt.CtxSetCurrent)>(
+        dlsym(RTLD_DEFAULT, "cuCtxSetCurrent"));
+    if (!rt.CtxGetCurrent || !rt.CtxSetCurrent) {
+      const char* driver_names[] = {"libcuda.so.1", "libcuda.so"};
+      for (const char* n : driver_names) {
+        if (void* h = dlopen(n, RTLD_NOW | RTLD_GLOBAL)) {
+          rt.CtxGetCurrent = reinterpret_cast<decltype(rt.CtxGetCurrent)>(
+              dlsym(h, "cuCtxGetCurrent"));
+          rt.CtxSetCurrent = reinterpret_cast<decltype(rt.CtxSetCurrent)>(
+              dlsym(h, "cuCtxSetCurrent"));
+          break;
+        }
+      }
     }
   });
   return rt;
@@ -257,6 +288,29 @@ BufferDesc describe(ffi::AnyBuffer buf) {
 ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
                         ffi::RemainingArgs args, ffi::RemainingRets rets) {
   auto& rt = cuda_rt();
+
+  // Snapshot the current CUDA context and restore it when this handler returns.
+  // The Python dispatch decodes cuda_ipc results via runtime APIs
+  // (cudaSetDevice/cudaMalloc/cudaIpcOpenMemHandle) that bind the runtime
+  // *primary* context onto this thread. XLA runs its kernels in a *different*
+  // (driver) context, so without this the primary context stays current and the
+  // next kernel launch fails with cudaErrorInvalidValue before cuModuleGetFunction.
+  // The guard restores XLA's context on *every* exit path (like KeepaliveGuard).
+  // A no-op if the driver symbols are unavailable or nothing was current.
+  struct ContextGuard {
+    CudaRuntime& rt;
+    void* saved = nullptr;
+    bool active = false;
+    ContextGuard(CudaRuntime& r) : rt(r) {
+      if (rt.CtxGetCurrent && rt.CtxSetCurrent &&
+          rt.CtxGetCurrent(&saved) == 0 && saved != nullptr) {
+        active = true;
+      }
+    }
+    ~ContextGuard() {
+      if (active) rt.CtxSetCurrent(saved);
+    }
+  } context_guard{rt};
 
   // Gather input buffer descriptors (device pointers stay on device).
   // args.get<T>() returns ErrorOr<T>; rets.get<T>() returns ErrorOr<Result<T>>.
