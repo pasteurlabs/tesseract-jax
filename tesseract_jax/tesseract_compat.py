@@ -14,6 +14,8 @@ from tesseract_jax.tree_util import (
     PyTree,
     _pytree_to_tesseract_flat,
     combine_args,
+    dummy_output_tree,
+    split_args,
     unflatten_args,
 )
 
@@ -103,6 +105,7 @@ class Jaxeract:
         output_avals: tuple[ShapeDtypeStruct, ...] | None,
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
+        static_output_mask: tuple[bool, ...] = (),
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         inputs = unflatten_args(
@@ -115,6 +118,12 @@ class Jaxeract:
             return out_data
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
+        if any(static_output_mask):
+            # A JAX primitive can only return arrays, so the response's static
+            # leaves are dropped here and put back by apply_tesseract once the
+            # bind has returned. The value used is the one abstract_eval gave,
+            # because that is the only one that exists under jit.
+            out_data, _ = split_args(out_data, static_output_mask)
         return out_data
 
     def jacobian_vector_product(
@@ -126,6 +135,7 @@ class Jaxeract:
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
+        static_output_mask: tuple[bool, ...] = (),
     ) -> PyTree:
         """Call the Tesseract's jvp endpoint with the given arguments."""
         n_primals = len(is_static_mask) - sum(is_static_mask)
@@ -158,7 +168,7 @@ class Jaxeract:
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            dummy_output_tree(output_pytreedef, len(output_avals), static_output_mask),
             schema_paths=self.differentiable_output_paths,
         )
 
@@ -189,6 +199,7 @@ class Jaxeract:
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
+        static_output_mask: tuple[bool, ...] = (),
         jac_input_paths: tuple[str, ...] | None = None,
         jac_output_paths: tuple[str, ...] | None = None,
         jac_mode: Literal["fwd", "bwd"] = "bwd",
@@ -217,7 +228,7 @@ class Jaxeract:
             jac_inputs = list(jac_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            dummy_output_tree(output_pytreedef, len(output_avals), static_output_mask),
             schema_paths=self.differentiable_output_paths,
         )
         if jac_output_paths is None:
@@ -253,6 +264,7 @@ class Jaxeract:
         output_avals: tuple[ShapeDtypeStruct, ...],
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
+        static_output_mask: tuple[bool, ...] = (),
     ) -> PyTree:
         """Call the Tesseract's vjp endpoint with the given arguments."""
         n_primals = len(is_static_mask) - sum(is_static_mask)
@@ -274,6 +286,16 @@ class Jaxeract:
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
+        # A static output leaf carries no cotangent, so its slot is filled with
+        # None. None is an empty pytree node, so it drops back out when the tree
+        # is flattened into schema paths, which is exactly where a static output
+        # should not appear.
+        if any(static_output_mask):
+            cotangents = combine_args(
+                tuple(cotangents),
+                (None,) * sum(static_output_mask),
+                static_output_mask,
+            )
         cotangent_pytree = jax.tree.unflatten(output_pytreedef, cotangents)
         flat_cotangents = _pytree_to_tesseract_flat(
             cotangent_pytree, schema_paths=self.differentiable_output_paths

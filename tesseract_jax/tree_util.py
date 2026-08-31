@@ -152,3 +152,23 @@ def _pytree_to_tesseract_flat(
         flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict
+
+
+def dummy_output_tree(
+    output_pytreedef: Any,
+    n_avals: int,
+    static_output_mask: Sequence[bool] = (),
+) -> Any:
+    """The output pytree carrying its own aval index at every array leaf.
+
+    Static leaves get ``None``, which is an empty pytree node, so they vanish
+    from anything that flattens this tree. That is what keeps the differentiable
+    paths honest: ``_pytree_to_tesseract_flat`` never sees a static output, so
+    every path-to-position map built from this tree still lines up with
+    ``output_avals``, which holds arrays only.
+    """
+    if not any(static_output_mask):
+        return jax.tree.unflatten(output_pytreedef, range(n_avals))
+    idx = iter(range(n_avals))
+    leaves = [None if static else next(idx) for static in static_output_mask]
+    return jax.tree.unflatten(output_pytreedef, leaves)
