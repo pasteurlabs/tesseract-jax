@@ -188,6 +188,19 @@ jobs:
           uv run --no-sync python -c "import jax; print('jax', jax.__version__, 'devices', jax.devices())"
           uv run --no-sync python -c "import tesseract_jax.gpu_ffi as g; print('shim available:', g.is_available())"
 
+      # TEMP DIAGNOSTIC: capture a native backtrace of the teardown SIGSEGV.
+      # Runs the GPU suite under gdb so we see the faulting frame (CUDA/driver
+      # teardown vs a pybind11 py::object static dtor). Non-fatal for the job.
+      - name: Diagnose teardown segfault under gdb
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq gdb || true
+          PYTHONFAULTHANDLER=1 uv run --no-sync gdb -batch \
+            -ex "run -m pytest -m gpu -p no:cacheprovider -q tests/test_gpu_direct.py" \
+            -ex "bt" \
+            -ex "thread apply all bt" \
+            --args python 2>&1 | tail -80
+
       - name: Run GPU test suite
         run: |
           set -o pipefail
