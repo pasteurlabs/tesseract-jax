@@ -410,9 +410,15 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     if (dbg_ctx && rt.CtxGetCurrent) {
       void* ctx_after = nullptr;
       int rc = rt.CtxGetCurrent(&ctx_after);
+      // cudaGetLastError both reads AND clears the sticky per-thread error. If
+      // the decode left a sticky error, this reveals it (and clearing it is
+      // itself a candidate fix to test).
+      int last_err = rt.GetLastError ? rt.GetLastError() : -999;
       std::fprintf(stderr,
-                   "[tj-ctx] after decode:  rc=%d ctx=%p (changed=%d)\n",
-                   rc, ctx_after, ctx_after != ctx_before);
+                   "[tj-ctx] after decode:  rc=%d ctx=%p (changed=%d) "
+                   "cudaGetLastError=%d (%s)\n",
+                   rc, ctx_after, ctx_after != ctx_before, last_err,
+                   cuda_err(last_err).c_str());
       std::fflush(stderr);
     }
 
