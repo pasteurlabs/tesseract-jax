@@ -137,6 +137,51 @@ jobs:
             "cupy-cuda${{ matrix.cuda.major }}x" \
             "jax[cuda${{ matrix.cuda.major }}]"
 
+      # Workaround (remove once the fix in tesseract-core is released and the
+      # lock is bumped): the installed tesseract-core loads libcudart with
+      # ctypes.util.find_library / bare sonames, which do not search the pip CUDA
+      # wheels (nvidia-cuda-runtime-cuNN, under site-packages/nvidia/*/lib). This
+      # runner has no system CUDA toolkit, so the cuda_ipc decode fails to find
+      # libcudart. Put the wheel lib dirs on LD_LIBRARY_PATH for every later step
+      # -- including the served `tesseract-runtime serve` subprocess, which
+      # inherits this environment -- so the loader resolves the bare soname.
+      - name: Expose wheel CUDA runtime on LD_LIBRARY_PATH (tesseract-core workaround)
+        run: |
+          cuda_libs=$(uv run --no-sync python - <<'PY'
+          import importlib.util
+          from pathlib import Path
+
+          dirs = []
+          seen = set()
+
+          def add(p):
+              p = str(p)
+              if p not in seen and Path(p).is_dir():
+                  seen.add(p)
+                  dirs.append(p)
+
+          def locations(name):
+              try:
+                  spec = importlib.util.find_spec(name)
+              except (ImportError, ValueError):
+                  return ()
+              return () if spec is None else (spec.submodule_search_locations or ())
+
+          for loc in locations("nvidia"):
+              for lib in Path(loc).glob("*/lib"):
+                  if any(lib.glob("libcudart.so*")):
+                      add(lib)
+
+          print(":".join(dirs))
+          PY
+          )
+          if [ -z "$cuda_libs" ]; then
+            echo "No wheel CUDA runtime dirs found; nothing to add." >&2
+          else
+            echo "Adding to LD_LIBRARY_PATH: $cuda_libs"
+            echo "LD_LIBRARY_PATH=${cuda_libs}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          fi
+
       - name: Show installed CUDA frameworks
         run: |
           uv run --no-sync python -c "import cupy; print('cupy', cupy.__version__, 'runtime', cupy.cuda.runtime.runtimeGetVersion(), 'devices', cupy.cuda.runtime.getDeviceCount())"
