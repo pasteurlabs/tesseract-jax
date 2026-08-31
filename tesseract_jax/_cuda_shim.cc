@@ -204,8 +204,15 @@ ffi::Error assert_device_ptr(const void* ptr, const std::string& what) {
 // (token, input_views) and receive back a list of result arrays.
 
 py::object& dispatch_callable() {
-  static py::object cb;  // set from Python via set_dispatch_callback
-  return cb;
+  // Heap-allocated and intentionally never freed. A function-local
+  // ``static py::object`` would run ~object() during C++ static destruction at
+  // process exit -- which happens *after* the Python interpreter is finalized --
+  // so the Py_DECREF it performs dereferences a dead interpreter and segfaults
+  // (observed as an exit-139 teardown crash in gdb: ~object() from this module).
+  // Leaking the reference is the standard fix: the process is exiting, so the
+  // holdout costs nothing and no destructor touches Python after finalization.
+  static py::object* cb = new py::object();  // set via set_dispatch_callback
+  return *cb;
 }
 
 // Map an XLA FFI dtype to a numpy typestr (little-endian) so the Python side can
