@@ -84,15 +84,9 @@ struct CudaRuntime {
   // Optional: only used by the debug pointer-residency check. May be null if the
   // symbol is unavailable; the check degrades to a no-op in that case.
   cudaError_t (*PointerGetAttributes)(void* /*attrs*/, const void*) = nullptr;
+  // Reads and clears the thread's sticky last-error slot. Used after the Python
+  // decode to drop the non-fatal error it leaves behind (see DispatchImpl).
   cudaError_t (*GetLastError)() = nullptr;
-  // Driver API (from libcuda), used to save/restore the current CUDA context
-  // around the dispatch. The Python decode path calls runtime APIs
-  // (cudaSetDevice/cudaIpcOpenMemHandle) that bind the runtime *primary* context
-  // onto this thread, displacing the separate driver context XLA runs kernels
-  // in. We snapshot and restore XLA's context so later launches are unaffected.
-  // Null if libcuda is unavailable; the save/restore then degrades to a no-op.
-  int (*CtxGetCurrent)(void** /*CUcontext*/) = nullptr;
-  int (*CtxSetCurrent)(void* /*CUcontext*/) = nullptr;
 };
 
 CudaRuntime& cuda_rt() {
@@ -129,29 +123,6 @@ CudaRuntime& cuda_rt() {
         !rt.StreamSynchronize) {
       throw std::runtime_error(
           "tesseract_jax: failed to resolve required cudaMemcpy/Memset symbols");
-    }
-
-    // Driver API for context save/restore. libcuda is the NVIDIA driver stub,
-    // separate from the runtime (libcudart); it is normally already loaded in a
-    // GPU-enabled process (XLA depends on it). Resolving the symbols from the
-    // already-loaded image via RTLD_DEFAULT avoids guessing its soname; we fall
-    // back to dlopen for robustness. If unavailable, the pointers stay null and
-    // the save/restore becomes a no-op (see ContextGuard).
-    rt.CtxGetCurrent = reinterpret_cast<decltype(rt.CtxGetCurrent)>(
-        dlsym(RTLD_DEFAULT, "cuCtxGetCurrent"));
-    rt.CtxSetCurrent = reinterpret_cast<decltype(rt.CtxSetCurrent)>(
-        dlsym(RTLD_DEFAULT, "cuCtxSetCurrent"));
-    if (!rt.CtxGetCurrent || !rt.CtxSetCurrent) {
-      const char* driver_names[] = {"libcuda.so.1", "libcuda.so"};
-      for (const char* n : driver_names) {
-        if (void* h = dlopen(n, RTLD_NOW | RTLD_GLOBAL)) {
-          rt.CtxGetCurrent = reinterpret_cast<decltype(rt.CtxGetCurrent)>(
-              dlsym(h, "cuCtxGetCurrent"));
-          rt.CtxSetCurrent = reinterpret_cast<decltype(rt.CtxSetCurrent)>(
-              dlsym(h, "cuCtxSetCurrent"));
-          break;
-        }
-      }
     }
   });
   return rt;
@@ -290,29 +261,6 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
                         ffi::RemainingArgs args, ffi::RemainingRets rets) {
   auto& rt = cuda_rt();
 
-  // Snapshot the current CUDA context and restore it when this handler returns.
-  // The Python dispatch decodes cuda_ipc results via runtime APIs
-  // (cudaSetDevice/cudaMalloc/cudaIpcOpenMemHandle) that bind the runtime
-  // *primary* context onto this thread. XLA runs its kernels in a *different*
-  // (driver) context, so without this the primary context stays current and the
-  // next kernel launch fails with cudaErrorInvalidValue before cuModuleGetFunction.
-  // The guard restores XLA's context on *every* exit path (like KeepaliveGuard).
-  // A no-op if the driver symbols are unavailable or nothing was current.
-  struct ContextGuard {
-    CudaRuntime& rt;
-    void* saved = nullptr;
-    bool active = false;
-    ContextGuard(CudaRuntime& r) : rt(r) {
-      if (rt.CtxGetCurrent && rt.CtxSetCurrent &&
-          rt.CtxGetCurrent(&saved) == 0 && saved != nullptr) {
-        active = true;
-      }
-    }
-    ~ContextGuard() {
-      if (active) rt.CtxSetCurrent(saved);
-    }
-  } context_guard{rt};
-
   // Gather input buffer descriptors (device pointers stay on device).
   // args.get<T>() returns ErrorOr<T>; rets.get<T>() returns ErrorOr<Result<T>>.
   std::vector<BufferDesc> in_descs;
@@ -387,39 +335,26 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     }
 
     py::object out;
-    // TEMP DIAGNOSTIC: log the driver context around the decode to confirm
-    // whether/what the cuda_ipc decode changes. Gated on TESSERACT_JAX_DEBUG_CTX.
-    const bool dbg_ctx = [] {
-      const char* v = std::getenv("TESSERACT_JAX_DEBUG_CTX");
-      return v != nullptr && v[0] != '\0' && std::string(v) != "0";
-    }();
-    void* ctx_before = nullptr;
-    if (dbg_ctx && rt.CtxGetCurrent) {
-      int rc = rt.CtxGetCurrent(&ctx_before);
-      std::fprintf(stderr,
-                   "[tj-ctx] before decode: rc=%d ctx=%p CtxGet=%p CtxSet=%p\n",
-                   rc, ctx_before, (void*)rt.CtxGetCurrent, (void*)rt.CtxSetCurrent);
-      std::fflush(stderr);
-    }
     try {
       out = cb(token, py_inputs);
     } catch (py::error_already_set& e) {
       return ffi::Error::Internal(std::string("dispatch callback raised: ") +
                                   e.what());
     }
-    if (dbg_ctx && rt.CtxGetCurrent) {
-      void* ctx_after = nullptr;
-      int rc = rt.CtxGetCurrent(&ctx_after);
-      // cudaGetLastError both reads AND clears the sticky per-thread error. If
-      // the decode left a sticky error, this reveals it (and clearing it is
-      // itself a candidate fix to test).
-      int last_err = rt.GetLastError ? rt.GetLastError() : -999;
-      std::fprintf(stderr,
-                   "[tj-ctx] after decode:  rc=%d ctx=%p (changed=%d) "
-                   "cudaGetLastError=%d (%s)\n",
-                   rc, ctx_after, ctx_after != ctx_before, last_err,
-                   cuda_err(last_err).c_str());
-      std::fflush(stderr);
+
+    // Clear any sticky CUDA runtime error left by the Python decode. The
+    // cuda_ipc decode drives the runtime API by ctypes (cudaSetDevice /
+    // cudaMalloc / cudaIpcOpenMemHandle / cudaIpcCloseMemHandle); on this path
+    // it leaves a non-sticky cudaErrorInvalidValue (code 1) in the thread's
+    // last-error slot without failing the decode. cudaGetLastError both reads
+    // and *clears* that slot. If we don't clear it here, JAX's next kernel
+    // launch calls cudaGetLastError first, sees the stale error, and aborts
+    // with "error before calling cuModuleGetFunction (1): cudaErrorInvalidValue"
+    // -- so the first dispatch works but every subsequent JAX op fails. The
+    // context is unaffected (verified: it is unchanged across the decode); only
+    // the last-error slot needs resetting.
+    if (rt.GetLastError) {
+      rt.GetLastError();
     }
 
     // Expect a list of objects exposing __cuda_array_interface__.

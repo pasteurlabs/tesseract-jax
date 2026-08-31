@@ -100,8 +100,6 @@ jobs:
     # keep data on-device end to end; a host round-trip becomes a hard error.
     env:
       TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS: "1"
-      # TEMP: diagnostic logging of the CUDA driver context around cuda_ipc decode.
-      TESSERACT_JAX_DEBUG_CTX: "1"
 
     steps:
       - name: Set up Git repository
@@ -195,7 +193,6 @@ jobs:
           set -o pipefail
           uv run --no-sync pytest \
             -v \
-            -s \
             -m gpu \
             --timeout=300 \
             --cov-report=term-missing:skip-covered \
