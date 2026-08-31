@@ -23,6 +23,7 @@
 //   into XLA's output buffers.
 
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
@@ -386,11 +387,33 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     }
 
     py::object out;
+    // TEMP DIAGNOSTIC: log the driver context around the decode to confirm
+    // whether/what the cuda_ipc decode changes. Gated on TESSERACT_JAX_DEBUG_CTX.
+    const bool dbg_ctx = [] {
+      const char* v = std::getenv("TESSERACT_JAX_DEBUG_CTX");
+      return v != nullptr && v[0] != '\0' && std::string(v) != "0";
+    }();
+    void* ctx_before = nullptr;
+    if (dbg_ctx && rt.CtxGetCurrent) {
+      int rc = rt.CtxGetCurrent(&ctx_before);
+      std::fprintf(stderr,
+                   "[tj-ctx] before decode: rc=%d ctx=%p CtxGet=%p CtxSet=%p\n",
+                   rc, ctx_before, (void*)rt.CtxGetCurrent, (void*)rt.CtxSetCurrent);
+      std::fflush(stderr);
+    }
     try {
       out = cb(token, py_inputs);
     } catch (py::error_already_set& e) {
       return ffi::Error::Internal(std::string("dispatch callback raised: ") +
                                   e.what());
+    }
+    if (dbg_ctx && rt.CtxGetCurrent) {
+      void* ctx_after = nullptr;
+      int rc = rt.CtxGetCurrent(&ctx_after);
+      std::fprintf(stderr,
+                   "[tj-ctx] after decode:  rc=%d ctx=%p (changed=%d)\n",
+                   rc, ctx_after, ctx_after != ctx_before);
+      std::fflush(stderr);
     }
 
     // Expect a list of objects exposing __cuda_array_interface__.
