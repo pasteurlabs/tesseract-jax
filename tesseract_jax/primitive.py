@@ -565,12 +565,14 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering if the native shim is unavailable
-    (e.g. CPU-only install), so correctness never depends on the GPU path.
+    Falls back to the host-callback lowering if the caller did not opt into
+    ``cuda_ipc`` (``client._cuda_ipc``) or the native shim is unavailable (e.g.
+    a CPU-only install), so correctness never depends on the GPU path -- GPU
+    arrays are copied to host and back exactly as on CPU.
     """
     from tesseract_jax import gpu_ffi
 
-    if not gpu_ffi.is_available():
+    if not client._cuda_ipc or not gpu_ffi.is_available():
         return tesseract_dispatch_lowering(
             ctx,
             *array_args,
@@ -1033,6 +1035,7 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    cuda_ipc: bool = False,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -1141,6 +1144,17 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
+        cuda_ipc: If ``True``, GPU array inputs are exchanged with the Tesseract
+            via CUDA IPC handles instead of a host round-trip, so array data
+            never leaves the device. Requires a served Tesseract (``HTTPClient``)
+            started with ``enable_experimental_cuda_ipc=True`` in its
+            ``runtime_config`` and a GPU-backed JAX (arrays on a ``cuda``
+            device); has no effect on CPU arrays or a local (in-process) client,
+            which already shares memory. Both processes must share the CUDA IPC
+            namespace (Docker's ``--ipc=host``). When ``False`` (default), GPU
+            arrays take the same host round-trip as CPU arrays. This is an
+            experimental tesseract-core feature; see
+            ``tesseract_core.runtime.cuda_ipc``.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -1183,7 +1197,7 @@ def apply_tesseract(
             "to the Tesseract object."
         )
 
-    client = Jaxeract(tesseract_client)
+    client = Jaxeract(tesseract_client, cuda_ipc=cuda_ipc)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)

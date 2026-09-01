@@ -255,8 +255,8 @@ def test_materialize_jacobian_true_errors_without_endpoint(vectoradd_tess, monke
 
     orig_init = Jaxeract.__init__
 
-    def patched_init(self, tess):
-        orig_init(self, tess)
+    def patched_init(self, tess, **kwargs):
+        orig_init(self, tess, **kwargs)
         self.available_methods = [m for m in self.available_methods if m != "jacobian"]
 
     monkeypatch.setattr(Jaxeract, "__init__", patched_init)
@@ -521,6 +521,17 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) == Jaxeract(vectoradd_tess)
     assert hash(Jaxeract(vectoradd_tess)) == hash(Jaxeract(vectoradd_tess))
     assert Jaxeract(vectoradd_tess) != object()
+
+
+def test_jaxeract_cuda_ipc_breaks_equality(vectoradd_tess):
+    """A cuda_ipc wrapper differs from a host one, so XLA won't common them up."""
+    assert Jaxeract(vectoradd_tess, cuda_ipc=True) != Jaxeract(vectoradd_tess)
+    assert hash(Jaxeract(vectoradd_tess, cuda_ipc=True)) != hash(
+        Jaxeract(vectoradd_tess)
+    )
+    assert Jaxeract(vectoradd_tess, cuda_ipc=True) == Jaxeract(
+        vectoradd_tess, cuda_ipc=True
+    )
 
 
 # ---------------------------------------------------------------------------

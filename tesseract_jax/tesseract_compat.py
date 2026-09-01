@@ -85,9 +85,15 @@ def _placeholder(
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
-    def __init__(self, tesseract_client: Tesseract) -> None:
-        """Initialize the Tesseract client."""
+    def __init__(self, tesseract_client: Tesseract, *, cuda_ipc: bool = False) -> None:
+        """Initialize the Tesseract client.
+
+        ``cuda_ipc`` opts this call into exchanging GPU arrays with a served
+        Tesseract via CUDA IPC handles instead of a host round-trip; it gates
+        both the GPU FFI lowering and the :meth:`cuda_ipc` context below.
+        """
         self.client = tesseract_client
+        self._cuda_ipc = cuda_ipc
 
         self.tesseract_input_args = tuple(
             arg
@@ -125,14 +131,19 @@ class Jaxeract:
     # so that distinct Tesseracts stay distinct; if ``Tesseract`` ever gains value
     # semantics of its own, this inherits them.
     def __eq__(self, other: object) -> bool:
-        """Whether ``other`` wraps the same Tesseract."""
+        """Whether ``other`` wraps the same Tesseract in the same transport mode.
+
+        ``_cuda_ipc`` participates: a cuda_ipc call and a host-transport call to
+        the same Tesseract lower to different custom calls, so they must not
+        compare equal or XLA would common them up.
+        """
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        return self.client == other.client
+        return self.client == other.client and self._cuda_ipc == other._cuda_ipc
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client))
+        return hash((Jaxeract, self.client, self._cuda_ipc))
 
     @contextlib.contextmanager
     def cuda_ipc(self) -> Generator[None]:
@@ -151,10 +162,15 @@ class Jaxeract:
 
         Scoped so the shared client is not permanently mutated (which would leak
         cuda_ipc behavior onto host-callback / CPU uses of the same client). A
-        no-op for non-HTTP clients (e.g. the in-process ``LocalClient``).
+        no-op when this call did not opt into ``cuda_ipc`` (:attr:`_cuda_ipc`),
+        or for non-HTTP clients (e.g. the in-process ``LocalClient``).
         """
         client = getattr(self.client, "_client", None)
-        if client is None or not hasattr(client, "_output_format"):
+        if (
+            not self._cuda_ipc
+            or client is None
+            or not hasattr(client, "_output_format")
+        ):
             yield
             return
         prev_fmt = client._output_format
