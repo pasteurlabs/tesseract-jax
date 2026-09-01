@@ -92,12 +92,6 @@ def register_dispatch(fn: Callable[..., tuple]) -> int:
     return token
 
 
-def release_dispatch(token: int) -> None:
-    """Drop the dispatch closure registered under ``token`` (idempotent)."""
-    with _registry_lock:
-        _registry.pop(token, None)
-
-
 class _DeviceArrayView:
     """Zero-copy, unowned view of a raw device pointer as a CUDA array.
 

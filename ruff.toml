@@ -51,10 +51,6 @@ ignore = [
 "tests/*" = ["D101", "D102", "D103", "ANN"]
 "benchmarks/*" = ["D101", "D102", "D103", "D106", "ANN"]
 "examples/*" = ["D101", "D102", "D103", "ANN"]
-# Standalone diagnostic scripts (not collected as tests): they load the shared
-# conftest by file path before importing the package (E402), and a benchmark
-# harness deliberately catches any failure per array size to report it (BLE001).
-"tests/gpu_extras/*" = ["D101", "D102", "D103", "ANN", "E402", "BLE001"]
 
 [lint.pydocstyle]
 convention = "google"

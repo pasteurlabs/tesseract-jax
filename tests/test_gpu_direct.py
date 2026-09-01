@@ -16,6 +16,8 @@ unavailable.
 
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -24,6 +26,23 @@ import pytest
 from tesseract_jax import apply_tesseract
 
 pytestmark = pytest.mark.gpu
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _arm_residency_check():
+    """Arm the FFI residency check for every GPU-direct test in this module.
+
+    ``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS`` makes the native handler reject any
+    buffer that crosses the FFI boundary in host memory (an ``ffi::Error`` rather
+    than a silent host round-trip). Setting it here -- before this module runs its
+    first dispatch, and the native shim reads (and caches) the flag on first
+    dispatch -- means the on-device guarantee is enforced by the test suite
+    itself, not by an environment variable that only happens to be set in CI. So
+    every assertion below (apply / grad / jvp / vjp / jacobian) doubles as a
+    regression guard: if a host copy sneaks back onto any dispatch path, the call
+    fails loudly instead of quietly losing the GPU-direct speedup.
+    """
+    os.environ["TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS"] = "1"
 
 
 def _to_np(x):
@@ -193,13 +212,11 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
     assert np.all(np.isnan(_to_np(tangent["c_sum"])))
 
 
-def test_host_pointer_at_ffi_boundary_errors_gracefully(
-    served_gpu_tesseract, monkeypatch
-):
+def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
     """A host pointer reaching the FFI boundary must fail cleanly, not crash.
 
-    The residency check (``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS``) exists to
-    catch an accidental host copy on a dispatch return path. For it to be useful
+    The residency check (armed for this module by ``_arm_residency_check``) exists
+    to catch an accidental host copy on a dispatch return path. For it to be useful
     the failure must surface as an ``ffi::Error`` (a Python ``JaxRuntimeError``),
     not abort the process -- which it would if the native handler released the GIL
     before destroying the Python objects it kept alive across the copy.
@@ -208,8 +225,6 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(
     (so the pointer passes the interface check but fails the residency check) and
     assert we get an exception and the interpreter is still alive afterwards.
     """
-    monkeypatch.setenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS", "1")
-
     from tesseract_jax import gpu_ffi
 
     class _HostBackedCudaArray:
@@ -254,3 +269,35 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(
 
     # The interpreter survived the failure: a fresh trivial computation still runs.
     assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+
+
+@pytest.mark.parametrize("n", [100_000, 10_000_000])
+def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
+    """Timing guard for the GPU-direct ``apply`` path.
+
+    Measures steady-state per-call latency of a jitted ``apply_tesseract`` whose
+    inputs live on the GPU, so the ``cuda`` lowering routes through the native FFI
+    (cuda_ipc) path -- the code this PR adds. It lives here rather than in
+    ``benchmarks/`` because that suite is CPU-only (its Tesseracts and fixtures do
+    not build the GPU shim or require a GPU) and runs in a separate,
+    non-GPU CI job; this needs the ``served_gpu_tesseract`` fixture and a real
+    device, so it belongs with the other ``gpu``-marked tests.
+
+    This is a regression *signal*, not a hard gate: ``pytest-benchmark`` records
+    the median so a slowdown shows up in the timing report, but shared-runner
+    noise makes a fixed wall-clock threshold too flaky to fail CI on. The
+    hard, deterministic guard against the failure mode that actually matters -- a
+    silent host round-trip erasing the speedup -- is the residency check armed by
+    ``_arm_residency_check`` above, which every functional test already exercises.
+    """
+    a = jnp.arange(n, dtype=jnp.float32)
+    b = jnp.ones(n, dtype=jnp.float32)
+
+    f = jax.jit(
+        lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
+    )
+    # Warm up tracing/compilation so the timed loop measures steady-state latency.
+    f(a, b).block_until_ready()
+    assert _on_gpu(f(a, b))
+
+    benchmark(lambda: f(a, b).block_until_ready())

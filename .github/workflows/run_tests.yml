@@ -95,12 +95,6 @@ jobs:
       run:
         shell: bash -el {0}
 
-    # Fail loudly on any accidental host copy across the FFI boundary (see the
-    # residency check in tesseract_jax/_cuda_shim.cc). GPU-direct dispatch must
-    # keep data on-device end to end; a host round-trip becomes a hard error.
-    env:
-      TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS: "1"
-
     steps:
       - name: Set up Git repository
         uses: actions/checkout@v7
