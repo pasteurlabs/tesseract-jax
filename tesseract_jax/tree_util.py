@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Iterable, Sequence
 from typing import Any, TypeVar
 
@@ -152,6 +153,47 @@ def _pytree_to_tesseract_flat(
         flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict
+
+
+def _leaves_differ(returned: Any, expected: Any) -> bool:
+    """Whether two static leaves disagree.
+
+    Static leaves are decoded response data, so ``!=`` settles it. The guard is
+    for a leaf whose comparison does not answer with a bool -- an array-valued
+    one, say -- where identity is the only question left that still has an answer.
+    """
+    try:
+        return bool(returned != expected)
+    except (TypeError, ValueError):
+        return returned is not expected
+
+
+def warn_on_static_output_drift(
+    paths: Sequence[Any],
+    returned_values: Sequence[Any],
+    expected_values: Sequence[Any],
+) -> None:
+    """Warn about static output leaves whose runtime value is not the traced one.
+
+    ``apply`` runs after the trace, so a static leaf it returns arrives too late to
+    be used: ``apply_tesseract`` hands back the value ``abstract_eval`` reported.
+    A Tesseract that returns a different one from ``apply`` is therefore doing
+    something the caller cannot observe, and silence would hide that.
+    """
+    for path, returned, expected in zip(
+        paths, returned_values, expected_values, strict=True
+    ):
+        if not _leaves_differ(returned, expected):
+            continue
+        warnings.warn(
+            f"Tesseract returned the static output {jax.tree_util.keystr(path)} as "
+            f"{returned!r} from apply, but abstract_eval reported {expected!r}. "
+            f"Static outputs are read at trace time, so the value from "
+            f"abstract_eval is the one apply_tesseract returns and the value from "
+            f"apply is ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 def dummy_output_tree(

@@ -19,6 +19,8 @@ Before this was supported, all of these raised
 subscripted the leaf the line above it had just skipped.
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -104,3 +106,60 @@ def test_vmap_is_unaffected_by_a_static_leaf(nonarray_output_tess):
         )["y"]
 
     np.testing.assert_allclose(jax.vmap(f)(xs), 2.0 * xs)
+
+
+def test_no_warning_when_apply_agrees_with_abstract_eval(drifting_static_tess):
+    """The check has to be quiet in the ordinary case, or it is worthless."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = apply_tesseract(drifting_static_tess, dict(x=X))
+
+    assert out["backend"] == "reference"
+
+
+def test_a_static_leaf_that_apply_disagrees_with_is_warned_about(drifting_static_tess):
+    """`apply` runs after the trace, so its static leaf is already too late.
+
+    Dropping it in silence would let a Tesseract report one backend and have the
+    caller read another. The warning says which leaf, what `apply` returned, and
+    which of the two values the caller is holding.
+    """
+    with pytest.warns(UserWarning, match="backend") as record:
+        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+
+    assert out["backend"] == "reference"
+    message = str(record[0].message)
+    assert "'fallback'" in message
+    assert "'reference'" in message
+
+
+def test_the_warning_survives_jit(drifting_static_tess):
+    """Under jit the static leaf is fixed at trace time, which is the whole point.
+
+    The check still has to fire, because it runs inside the callback that `apply`
+    is dispatched from rather than at trace time.
+    """
+    seen = {}
+
+    @jax.jit
+    def f(x):
+        out = apply_tesseract(drifting_static_tess, dict(x=x))
+        seen["backend"] = out["backend"]
+        return out["y"]
+
+    with pytest.warns(UserWarning, match="backend"):
+        y = f(-X)
+
+    np.testing.assert_allclose(y, -2.0 * X)
+    assert seen["backend"] == "reference"
+
+
+def test_the_drift_warning_does_not_disturb_the_gradient(drifting_static_tess):
+    def loss(x):
+        return jnp.sum(apply_tesseract(drifting_static_tess, dict(x=x))["y"] ** 2)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grad = jax.grad(loss)(-X)
+
+    np.testing.assert_allclose(grad, -8.0 * X, rtol=1e-6)

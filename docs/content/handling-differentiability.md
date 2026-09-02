@@ -133,3 +133,52 @@ Note that the cotangent/tangent pytree structure must always match the function'
 ValueError: unexpected tree structure of argument to vjp function:
   got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
 ```
+
+## Non-array outputs
+
+An `OutputSchema` may carry fields that are not arrays at all — a backend name, a
+convergence flag, a content hash:
+
+```python
+class OutputSchema(BaseModel):
+    y: Differentiable[Array[(3,), Float64]]
+    backend: str = "reference"
+    converged: bool = True
+```
+
+`apply_tesseract` returns these alongside the arrays, and inside a `jit` trace they
+are ordinary Python objects, so you can branch on them:
+
+```python
+@jax.jit
+def f(x):
+    out = apply_tesseract(tess, {"x": x})
+    scale = 1.0 if out["converged"] else 0.0   # a trace-time branch
+    return out["y"] * scale
+```
+
+Two consequences are worth knowing about.
+
+**Their value comes from `abstract_eval`, not from `apply`.** A JAX primitive can only
+return arrays, so a non-array field never enters the traced computation. It is read
+from `abstract_eval` at trace time and put back into the output pytree afterwards. If
+`apply` later returns a different value for one, that value cannot be used, and
+`apply_tesseract` warns rather than discarding it silently:
+
+```
+UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
+apply, but abstract_eval reported 'reference'. ...
+```
+
+A field whose value genuinely depends on the input _values_ therefore belongs in the
+schema as an array, not as a `str` or a `bool`.
+
+**A jitted function cannot return one.** This is JAX's own rule about what a traced
+function may return — there is no JAX type for a `str` output:
+
+```
+TypeError: function f traced for jit returned a value of type <class 'str'>
+at output component ['backend'], which is not a valid JAX type
+```
+
+Consume the field inside the trace, as above, and return the arrays.

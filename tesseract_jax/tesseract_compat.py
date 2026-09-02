@@ -17,6 +17,7 @@ from tesseract_jax.tree_util import (
     dummy_output_tree,
     split_args,
     unflatten_args,
+    warn_on_static_output_drift,
 )
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
@@ -106,6 +107,7 @@ class Jaxeract:
         is_static_mask: tuple[bool, ...],
         has_tangent: tuple[bool, ...],
         static_output_mask: tuple[bool, ...] = (),
+        static_output_values: tuple[Any, ...] = (),
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         inputs = unflatten_args(
@@ -117,13 +119,22 @@ class Jaxeract:
         if output_avals is None:
             return out_data
 
-        out_data = tuple(jax.tree.flatten(out_data)[0])
+        leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
+        out_data = tuple(leaf for _, leaf in leaves_with_path)
         if any(static_output_mask):
             # A JAX primitive can only return arrays, so the response's static
             # leaves are dropped here and put back by apply_tesseract once the
             # bind has returned. The value used is the one abstract_eval gave,
             # because that is the only one that exists under jit.
-            out_data, _ = split_args(out_data, static_output_mask)
+            out_data, returned_statics = split_args(out_data, static_output_mask)
+            _, static_paths = split_args(
+                tuple(path for path, _ in leaves_with_path), static_output_mask
+            )
+            # apply runs after the trace, so a static leaf it returns is already
+            # too late to be used. Say so rather than dropping it in silence.
+            warn_on_static_output_drift(
+                static_paths, returned_statics, static_output_values
+            )
         return out_data
 
     def jacobian_vector_product(

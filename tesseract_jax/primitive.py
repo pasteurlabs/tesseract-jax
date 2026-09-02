@@ -429,6 +429,12 @@ def tesseract_dispatch(
     # drop them from its response, and the differentiable endpoints have to skip
     # them when they line schema paths up against ``output_avals``.
     extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
+    if eval_func == "apply":
+        # Only apply sees a response that carries static leaves at all, so it is
+        # the only endpoint that can check them against the traced values.
+        extra_kwargs["static_output_values"] = tuple(
+            _unpack_hashable(v) for v in static_output_values
+        )
     if eval_func == "jacobian":
         extra_kwargs["jac_input_paths"] = jac_input_paths
         extra_kwargs["jac_output_paths"] = jac_output_paths
@@ -483,6 +489,12 @@ def tesseract_dispatch_lowering(
     # drop them from its response, and the differentiable endpoints have to skip
     # them when they line schema paths up against ``output_avals``.
     extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
+    if eval_func == "apply":
+        # Only apply sees a response that carries static leaves at all, so it is
+        # the only endpoint that can check them against the traced values.
+        extra_kwargs["static_output_values"] = tuple(
+            _unpack_hashable(v) for v in static_output_values
+        )
     if eval_func == "jacobian":
         extra_kwargs["jac_input_paths"] = jac_input_paths
         extra_kwargs["jac_output_paths"] = jac_output_paths
