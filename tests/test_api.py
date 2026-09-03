@@ -776,3 +776,33 @@ def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
     path, template = _merge_path(explicit, templates)
     assert path == expected
     assert template == templates[0]
+
+
+try:  # tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707
+    from tesseract_core.runtime.tree_transforms import split_path  # noqa: F401
+
+    _CORE_ACCEPTS_WIDE_KEYS = True
+except ImportError:  # pragma: no cover
+    _CORE_ACCEPTS_WIDE_KEYS = False
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "plain",
+        pytest.param(
+            "layer.0.weight",
+            marks=pytest.mark.skipif(
+                not _CORE_ACCEPTS_WIDE_KEYS,
+                reason="runtime rejects the key until tesseract-core#707 is released",
+            ),
+        ),
+    ],
+)
+def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
+    """End to end: a state-dict key carries dots and still gets its gradient."""
+    inputs = {"params": {key: jnp.ones(3, dtype=jnp.float32)}}
+    grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
+        inputs
+    )
+    np.testing.assert_allclose(np.asarray(grads["params"][key]), np.full(3, 2.0))
