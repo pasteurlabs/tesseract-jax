@@ -751,3 +751,28 @@ def test_pytree_tesseract_jvp_preserves_list_order(
 
     _, expected = jax.jvp(f_raw, (d1,), (tangent,))
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "explicit,templates,expected",
+    [
+        (["params", "plain"], ["params.{}"], "params.{plain}"),
+        (["params", "a/b"], ["params.{}"], "params.{a/b}"),
+        (["params", "layer.0.weight"], ["params.{}"], "params.{layer.0.weight}"),
+        # Re-merging a path this function produced must not brace it twice,
+        # which batching relies on.
+        ("params.{layer.0.weight}", ["params.{}"], "params.{layer.0.weight}"),
+    ],
+)
+def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
+    """A dict key may contain dots, and the key is where the path ends.
+
+    Joining the segments first and splitting again cannot tell
+    {"a": {"b.c": v}} from {"a": {"b": {"c": v}}}, so a dotted key used to
+    miss its template and be reported as a non-differentiable input.
+    """
+    from tesseract_jax.tree_util import _merge_path
+
+    path, template = _merge_path(explicit, templates)
+    assert path == expected
+    assert template == templates[0]
