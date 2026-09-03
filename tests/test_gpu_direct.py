@@ -72,6 +72,36 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     )
 
 
+def test_apply_via_device_transport_name(served_gpu_tesseract):
+    """The generic ``device_transport="cuda_ipc"`` path matches ``cuda_ipc=True``.
+
+    Exercises the transport-name API end-to-end: a JAX program dispatches to the
+    served GPU Tesseract selecting the transport by name, stays on-device (the
+    module's residency check is armed), and produces the analytic result. This is
+    the same on-device FFI lowering the boolean opt-in uses, reached through the
+    generalized ``device_transport`` selector.
+    """
+    a = jnp.arange(64, dtype=jnp.float32)
+    b = jnp.ones(64, dtype=jnp.float32) * 3.0
+
+    by_name = jax.jit(
+        lambda a, b: apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        )["c"]
+    )(a, b)
+    by_bool = jax.jit(
+        lambda a, b: apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+        )["c"]
+    )(a, b)
+
+    assert _on_gpu(by_name)
+    np.testing.assert_array_equal(_to_np(by_name), _to_np(by_bool))
+    np.testing.assert_allclose(
+        _to_np(by_name), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+    )
+
+
 def test_apply_matches_host_callback(served_gpu_tesseract):
     """The GPU FFI lowering must match the host-callback lowering exactly.
 
