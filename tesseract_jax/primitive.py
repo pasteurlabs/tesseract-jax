@@ -18,6 +18,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
+from tesseract_jax.config import config
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
@@ -429,9 +430,10 @@ def tesseract_dispatch(
     # drop them from its response, and the differentiable endpoints have to skip
     # them when they line schema paths up against ``output_avals``.
     extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
-    if eval_func == "apply":
+    if eval_func == "apply" and config.check_static_outputs:
         # Only apply sees a response that carries static leaves at all, so it is
-        # the only endpoint that can check them against the traced values.
+        # the only endpoint that can check them against the traced values. The
+        # unpacking is skipped along with the check itself.
         extra_kwargs["static_output_values"] = tuple(
             _unpack_hashable(v) for v in static_output_values
         )
@@ -489,9 +491,10 @@ def tesseract_dispatch_lowering(
     # drop them from its response, and the differentiable endpoints have to skip
     # them when they line schema paths up against ``output_avals``.
     extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
-    if eval_func == "apply":
+    if eval_func == "apply" and config.check_static_outputs:
         # Only apply sees a response that carries static leaves at all, so it is
-        # the only endpoint that can check them against the traced values.
+        # the only endpoint that can check them against the traced values. The
+        # unpacking is skipped along with the check itself.
         extra_kwargs["static_output_values"] = tuple(
             _unpack_hashable(v) for v in static_output_values
         )

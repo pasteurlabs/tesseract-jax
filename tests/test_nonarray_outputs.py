@@ -26,7 +26,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, config
 
 X = jnp.arange(3, dtype="float64")
 
@@ -163,3 +163,43 @@ def test_the_drift_warning_does_not_disturb_the_gradient(drifting_static_tess):
         grad = jax.grad(loss)(-X)
 
     np.testing.assert_allclose(grad, -8.0 * X, rtol=1e-6)
+
+
+def test_the_check_can_be_turned_off(drifting_static_tess):
+    """Comparing every static leaf on every call is not free.
+
+    A caller who knows their Tesseract does not drift can pay nothing for the
+    check. With it off the response is flattened without keypaths, which is the
+    part that costs, and the value the caller gets is unchanged.
+    """
+    with config.set(check_static_outputs=False), warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+
+    assert out["backend"] == "reference"
+    np.testing.assert_allclose(out["y"], -2.0 * X)
+
+
+def test_turning_the_check_off_leaves_the_gradient_alone(drifting_static_tess):
+    def loss(x):
+        return jnp.sum(apply_tesseract(drifting_static_tess, dict(x=x))["y"] ** 2)
+
+    with config.set(check_static_outputs=False):
+        grad = jax.grad(loss)(-X)
+
+    np.testing.assert_allclose(grad, -8.0 * X, rtol=1e-6)
+
+
+def test_the_setting_comes_back_after_the_block(drifting_static_tess):
+    assert config.check_static_outputs
+    with config.set(check_static_outputs=False):
+        assert not config.check_static_outputs
+    assert config.check_static_outputs
+
+    with pytest.warns(UserWarning, match="backend"):
+        apply_tesseract(drifting_static_tess, dict(x=-X))
+
+
+def test_an_unknown_setting_is_an_error():
+    with pytest.raises(AttributeError, match="check_static_outputs"):
+        config.update("no_such_setting", False)

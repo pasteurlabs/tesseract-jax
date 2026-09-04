@@ -173,6 +173,23 @@ apply, but abstract_eval reported 'reference'. ...
 A field whose value genuinely depends on the input _values_ therefore belongs in the
 schema as an array, not as a `str` or a `bool`.
 
+The comparison runs on every `apply` call, so it can be turned off when a Tesseract
+is known not to drift. Set the environment variable before importing, or the setting
+afterwards:
+
+```python
+import tesseract_jax
+
+tesseract_jax.config.check_static_outputs = False        # for the rest of the process
+
+with tesseract_jax.config.set(check_static_outputs=False):   # or for a block
+    out = apply_tesseract(tess, {"x": x})
+```
+
+`TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` does the same at import time. With the check
+off, the response is flattened without keypaths, which is the part that costs. The
+value the caller receives is the same either way.
+
 **A jitted function cannot return one.** This is JAX's own rule about what a traced
 function may return — there is no JAX type for a `str` output:
 

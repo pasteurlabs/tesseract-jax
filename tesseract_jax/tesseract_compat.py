@@ -10,6 +10,7 @@ from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
+from tesseract_jax.config import config
 from tesseract_jax.tree_util import (
     PyTree,
     _pytree_to_tesseract_flat,
@@ -119,22 +120,32 @@ class Jaxeract:
         if output_avals is None:
             return out_data
 
-        leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
-        out_data = tuple(leaf for _, leaf in leaves_with_path)
+        # Keypaths cost more to build than plain leaves and are only needed to
+        # name a field in the drift warning, so they are gathered only when that
+        # warning can actually fire.
+        checking = config.check_static_outputs and any(static_output_mask)
+        if checking:
+            leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
+            out_data = tuple(leaf for _, leaf in leaves_with_path)
+        else:
+            out_data = tuple(jax.tree.leaves(out_data))
+
         if any(static_output_mask):
             # A JAX primitive can only return arrays, so the response's static
             # leaves are dropped here and put back by apply_tesseract once the
             # bind has returned. The value used is the one abstract_eval gave,
             # because that is the only one that exists under jit.
             out_data, returned_statics = split_args(out_data, static_output_mask)
-            _, static_paths = split_args(
-                tuple(path for path, _ in leaves_with_path), static_output_mask
-            )
-            # apply runs after the trace, so a static leaf it returns is already
-            # too late to be used. Say so rather than dropping it in silence.
-            warn_on_static_output_drift(
-                static_paths, returned_statics, static_output_values
-            )
+            if checking:
+                _, static_paths = split_args(
+                    tuple(path for path, _ in leaves_with_path), static_output_mask
+                )
+                # apply runs after the trace, so a static leaf it returns is
+                # already too late to be used. Say so rather than dropping it in
+                # silence.
+                warn_on_static_output_drift(
+                    static_paths, returned_statics, static_output_values
+                )
         return out_data
 
     def jacobian_vector_product(
