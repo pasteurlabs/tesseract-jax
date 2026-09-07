@@ -7,20 +7,21 @@ See :doc:`/content/vmap-methods` for a guide on choosing the right method.
 """
 
 from itertools import compress
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import jax
 import jax.numpy as jnp
 from jax import ShapeDtypeStruct
-from jax.tree_util import PyTreeDef
 
-from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     _merge_path,
     _pytree_to_tesseract_flat,
     combine_args,
     split_args,
 )
+
+if TYPE_CHECKING:
+    from tesseract_jax.dispatch_params import DispatchParams
 
 VmapMethod = (
     Literal["sequential", "auto_experimental", "expand_dims", "broadcast_all"] | None
@@ -47,24 +48,12 @@ def _dispatch_vectorized(
     batch_size: int,
     n_primals: int,
     *,
-    static_args: tuple,
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: "VmapMethod",
+    params: "DispatchParams",
     tesseract_dispatch_p: Any,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Common vectorized dispatch: broadcast JVP tangents, prepend batch dim, bind."""
     # JVP: broadcast primal/tangent to match if batch dims differ
-    if eval_func == "jacobian_vector_product":
+    if params.eval_func == "jacobian_vector_product":
         for i in range(n_primals):
             if is_batched_mask[i] != is_batched_mask[i + n_primals]:
                 new_args[i], new_args[i + n_primals] = jnp.broadcast_arrays(
@@ -73,23 +62,11 @@ def _dispatch_vectorized(
 
     batched_output_avals = tuple(
         ShapeDtypeStruct(shape=(batch_size, *aval.shape), dtype=aval.dtype)
-        for aval in output_avals
+        for aval in params.output_avals
     )
     outvals = tesseract_dispatch_p.bind(
         *new_args,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=batched_output_avals,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
-        materialize_jacobian=materialize_jacobian,
-        jac_input_paths=jac_input_paths,
-        jac_output_paths=jac_output_paths,
-        jac_mode=jac_mode,
+        params=params.replace(output_avals=batched_output_avals),
     )
     return tuple(outvals), (0,) * len(outvals)
 
@@ -103,42 +80,15 @@ def sequential(
     new_args: list,
     is_batched_mask: list[bool],
     *,
-    static_args: tuple,
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: "VmapMethod",
+    params: "DispatchParams",
     tesseract_dispatch_p: Any,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """One Tesseract call per batch element via ``jax.lax.map``."""
     unbatched_args, batched_args = split_args(new_args, is_batched_mask)
 
     def _batch_fun(batched_args: tuple):
         combined_args = combine_args(unbatched_args, batched_args, is_batched_mask)
-        return tesseract_dispatch_p.bind(
-            *combined_args,
-            static_args=static_args,
-            input_pytreedef=input_pytreedef,
-            output_pytreedef=output_pytreedef,
-            output_avals=output_avals,
-            is_static_mask=is_static_mask,
-            has_tangent=has_tangent,
-            client=client,
-            eval_func=eval_func,
-            vmap_method=vmap_method,
-            materialize_jacobian=materialize_jacobian,
-            jac_input_paths=jac_input_paths,
-            jac_output_paths=jac_output_paths,
-            jac_mode=jac_mode,
-        )
+        return tesseract_dispatch_p.bind(*combined_args, params=params)
 
     outvals = jax.lax.map(_batch_fun, batched_args)
     return tuple(outvals), (0,) * len(outvals)
@@ -148,47 +98,22 @@ def expand_dims(
     new_args: list,
     is_batched_mask: list[bool],
     *,
-    static_args: tuple,
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: "VmapMethod",
+    params: "DispatchParams",
     tesseract_dispatch_p: Any,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Add a leading ``(1,)`` dim to unbatched array args; single Tesseract call.
 
     The Tesseract is responsible for broadcasting ``(1, ...)`` against
     ``(batch, ...)`` internally (e.g. via NumPy broadcasting rules).
     """
-    kwargs = dict(
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
-        tesseract_dispatch_p=tesseract_dispatch_p,
-        materialize_jacobian=materialize_jacobian,
-        jac_input_paths=jac_input_paths,
-        jac_output_paths=jac_output_paths,
-        jac_mode=jac_mode,
-    )
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    kwargs = dict(params=params, tesseract_dispatch_p=tesseract_dispatch_p)
+    n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
     # Tesseracts don't support batched cotangents
-    if eval_func == "vector_jacobian_product" and any(is_batched_mask[n_primals:]):
+    if params.eval_func == "vector_jacobian_product" and any(
+        is_batched_mask[n_primals:]
+    ):
         return sequential(new_args, is_batched_mask, **kwargs)
 
     new_args = [
@@ -205,20 +130,8 @@ def broadcast_all(
     new_args: list,
     is_batched_mask: list[bool],
     *,
-    static_args: tuple,
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: "VmapMethod",
+    params: "DispatchParams",
     tesseract_dispatch_p: Any,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Broadcast unbatched array args to ``(batch, ...)``; single Tesseract call.
 
@@ -226,27 +139,14 @@ def broadcast_all(
     dimension. This is useful for Tesseracts that require all inputs to have
     matching shapes.
     """
-    kwargs = dict(
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
-        tesseract_dispatch_p=tesseract_dispatch_p,
-        materialize_jacobian=materialize_jacobian,
-        jac_input_paths=jac_input_paths,
-        jac_output_paths=jac_output_paths,
-        jac_mode=jac_mode,
-    )
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    kwargs = dict(params=params, tesseract_dispatch_p=tesseract_dispatch_p)
+    n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
     # Tesseracts don't support batched cotangents
-    if eval_func == "vector_jacobian_product" and any(is_batched_mask[n_primals:]):
+    if params.eval_func == "vector_jacobian_product" and any(
+        is_batched_mask[n_primals:]
+    ):
         return sequential(new_args, is_batched_mask, **kwargs)
 
     new_args = [
@@ -263,20 +163,8 @@ def auto_experimental(
     new_args: list,
     is_batched_mask: list[bool],
     *,
-    static_args: tuple,
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: "VmapMethod",
+    params: "DispatchParams",
     tesseract_dispatch_p: Any,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: str = "bwd",
 ) -> tuple[tuple, tuple]:
     """Auto-detect whether to vectorize based on the schema.
 
@@ -285,31 +173,18 @@ def auto_experimental(
     dimension to unbatched args and sends a single batched Tesseract call.
     Otherwise falls back to sequential.
     """
-    kwargs = dict(
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
-        tesseract_dispatch_p=tesseract_dispatch_p,
-        materialize_jacobian=materialize_jacobian,
-        jac_input_paths=jac_input_paths,
-        jac_output_paths=jac_output_paths,
-        jac_mode=jac_mode,
-    )
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    kwargs = dict(params=params, tesseract_dispatch_p=tesseract_dispatch_p)
+    n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
     # Tesseracts don't support batched cotangents
-    if eval_func == "vector_jacobian_product" and any(is_batched_mask[n_primals:]):
+    if params.eval_func == "vector_jacobian_product" and any(
+        is_batched_mask[n_primals:]
+    ):
         return sequential(new_args, is_batched_mask, **kwargs)
 
     # Determine which primal args need to support a batch dimension
-    if eval_func == "jacobian_vector_product":
+    if params.eval_func == "jacobian_vector_product":
         needs_ellipsis = [
             b_p or b_t
             for b_p, b_t in zip(
@@ -321,10 +196,12 @@ def auto_experimental(
 
     # Match each primal arg to its differentiable schema template.
     # A field has "ellipsis" shape if its template has no "shape" key.
-    diff_paths = client.differentiable_input_paths
-    dummy_tree = jax.tree.unflatten(input_pytreedef, range(len(is_static_mask)))
+    diff_paths = params.client.differentiable_input_paths
+    dummy_tree = jax.tree.unflatten(
+        params.input_pytreedef, range(len(params.is_static_mask))
+    )
     flat_info = _pytree_to_tesseract_flat(dummy_tree, schema_paths=diff_paths)
-    primal_info = compress(flat_info.items(), (not s for s in is_static_mask))
+    primal_info = compress(flat_info.items(), (not s for s in params.is_static_mask))
     primal_templates = [
         _merge_path(path, diff_paths)[1] if val is not None else None
         for path, val in primal_info
