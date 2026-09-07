@@ -370,7 +370,20 @@ def tesseract_dispatch_transpose_rule(
         materialize_jacobian=materialize_jacobian,
     )
 
-    return tuple([None] * len(primal_args) + list(vjp))
+    # Only the tangent slots JAX is actually transposing (its UndefinedPrimals)
+    # are linear positions that want a cotangent. A slot whose tangent was a
+    # materialised zero -- a non-differentiable or simply undifferentiated input
+    # -- is a constant, so JAX wants nothing for it, exactly as for the primal
+    # slots above. The dispatch still returns a value in those slots to satisfy
+    # the output-tuple-length contract; dropping them here keeps those discarded
+    # values out of the cotangent accumulation entirely, rather than relying on
+    # JAX to ignore them downstream.
+    tangent_args = args[n_primals:]
+    vjp_cotangents = [
+        ct if ad.is_undefined_primal(t) else None
+        for ct, t in zip(vjp, tangent_args, strict=True)
+    ]
+    return tuple([None] * len(primal_args) + vjp_cotangents)
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
