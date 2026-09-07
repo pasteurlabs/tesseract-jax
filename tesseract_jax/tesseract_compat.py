@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import functools
 from typing import Any, Literal
 
 import jax.tree
@@ -19,6 +20,31 @@ from tesseract_jax.tree_util import (
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+
+
+@functools.cache
+def _discarded_fill(dtype: np.dtype) -> np.ndarray:
+    """The value a discarded derivative slot is filled with, per dtype.
+
+    Whatever ``0/0`` yields there: NaN in every component for the inexact
+    dtypes (so a complex slot is poisoned in its imaginary part too), and zero
+    for those with no invalid value to spell. Cached because it depends only on
+    the dtype, and casting NaN per call is both slower and -- for the integer
+    dtypes, where it is an invalid cast -- a ``RuntimeWarning``.
+    """
+    zero = np.zeros((), dtype)
+    with np.errstate(invalid="ignore"):
+        fill = zero / zero if np.issubdtype(dtype, np.inexact) else zero
+    # 0-d array, not the scalar that `/` returns, and read-only because it is
+    # shared between calls.
+    fill = np.asarray(fill, dtype=dtype)
+    fill.flags.writeable = False
+    return fill
+
+
+def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
+    """A discarded slot in a derivative call's output tuple."""
+    return np.full(shape, _discarded_fill(np.dtype(dtype)), dtype=dtype)
 
 
 class Jaxeract:
@@ -176,7 +202,7 @@ class Jaxeract:
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
+                out.append(_discarded_slot(aval.shape, aval.dtype))
 
         return tuple(out)
 
@@ -310,10 +336,9 @@ class Jaxeract:
                 # JAX's transpose machinery doesn't consume it for any
                 # user-requested derivative.
                 out.append(
-                    np.full(
+                    _discarded_slot(
                         array_args[array_idx].shape,
-                        np.nan,
-                        dtype=array_args[array_idx].dtype,
+                        array_args[array_idx].dtype,
                     )
                 )
                 tan_idx += 1

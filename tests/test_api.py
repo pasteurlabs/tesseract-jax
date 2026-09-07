@@ -751,3 +751,43 @@ def test_pytree_tesseract_jvp_preserves_list_order(
 
     _, expected = jax.jvp(f_raw, (d1,), (tangent,))
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
+
+
+def test_integer_array_io_is_warning_free(gather_tess):
+    """Integer discarded slots must not emit an invalid-cast warning.
+
+    Filling a discarded slot with NaN cast to an integer dtype warns, and the
+    project's ``filterwarnings = ["error"]`` turns that into an opaque
+    ``CpuCallback`` failure from inside the host callback. Both slot kinds are
+    covered here: a non-differentiable integer input (vjp) and a
+    non-differentiable integer output (jvp). See issue #258.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def loss(weights, indices):
+        out = apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+        return jnp.sum(out["gathered"])
+
+    # `indices` only reaches the vjp slot when it is *traced*, since
+    # is_static_mask keys off tracer-ness -- hence jit rather than eager grad.
+    grad = jax.jit(jax.grad(loss, argnums=0))(weights, indices)
+    np.testing.assert_allclose(grad, [1.0, 0.0, 2.0], rtol=1e-6)
+
+    # JAX supplies its own float0 cotangent for an integer input, whatever the
+    # discarded slot held.
+    _, vjp_fn = jax.vjp(loss, weights, indices)
+    assert vjp_fn(jnp.float32(1.0))[1].dtype == jax.dtypes.float0
+
+    # The non-differentiable integer output `count` exercises the jvp slot.
+    def apply_fn(weights):
+        return apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+
+    primals, tangents = jax.jvp(apply_fn, (weights,), (np.ones_like(weights),))
+    np.testing.assert_allclose(primals["gathered"], [1.0, 3.0, 3.0], rtol=1e-6)
+    np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
+    assert tangents["count"].dtype == jnp.int32

@@ -240,6 +240,11 @@ def mixed_dtype_tess() -> Tesseract:
 
 
 @pytest.fixture
+def gather_tess() -> Tesseract:
+    return _load_tesseract("gather_tesseract")
+
+
+@pytest.fixture
 def validating_tess() -> Tesseract:
     return _load_tesseract("validating_tesseract")
 
