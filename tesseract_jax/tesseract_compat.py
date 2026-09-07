@@ -2,12 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 import jax.tree
 import numpy as np
-from jax import ShapeDtypeStruct
-from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
@@ -17,6 +15,9 @@ from tesseract_jax.tree_util import (
     combine_args,
     unflatten_args,
 )
+
+if TYPE_CHECKING:
+    from tesseract_jax.dispatch_params import DispatchParams
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
@@ -123,21 +124,19 @@ class Jaxeract:
     def apply(
         self,
         array_args: tuple[ArrayLike, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef | None,
-        output_avals: tuple[ShapeDtypeStruct, ...] | None,
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         inputs = unflatten_args(
-            array_args, static_args, input_pytreedef, is_static_mask
+            array_args,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
         )
 
         out_data = self.client.apply(inputs)
 
-        if output_avals is None:
+        if params.output_avals is None:
             return out_data
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
@@ -146,15 +145,11 @@ class Jaxeract:
     def jacobian_vector_product(
         self,
         array_args: tuple[ArrayLike, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jvp endpoint with the given arguments."""
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        has_tangent = params.has_tangent
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
         # array_args[n_primals:] contains ALL tangents (zeroed for has_tangent=False).
         # Filter to only the has_tangent=True ones before calling combine_args, which
@@ -168,13 +163,13 @@ class Jaxeract:
         full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
         tangent_inputs = unflatten_args(
             full_tangents,
-            static_args,
-            input_pytreedef,
-            is_static_mask,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
             remove_static_args=True,
         )
 
@@ -184,7 +179,9 @@ class Jaxeract:
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            jax.tree.unflatten(
+                params.output_pytreedef, range(len(params.output_avals))
+            ),
             schema_paths=self.differentiable_output_paths,
         )
 
@@ -198,7 +195,7 @@ class Jaxeract:
         )
 
         out = []
-        for path, aval in zip(output_flat, output_avals, strict=False):
+        for path, aval in zip(output_flat, params.output_avals, strict=False):
             if path in out_data:
                 out.append(out_data[path])
             else:
@@ -209,47 +206,41 @@ class Jaxeract:
     def jacobian(
         self,
         array_args: tuple[ArrayLike, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
-        jac_input_paths: tuple[str, ...] | None = None,
-        jac_output_paths: tuple[str, ...] | None = None,
-        jac_mode: Literal["fwd", "bwd"] = "bwd",
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jacobian endpoint with the given arguments.
 
         Returns one ndarray per (requested_output, requested_input) pair, in
         row-major order. Each array has shape ``out_shape + in_shape`` and
-        dtype determined by ``jac_mode`` (``"bwd"`` matches ``jax.jacrev``
+        dtype determined by ``params.jac_mode`` (``"bwd"`` matches ``jax.jacrev``
         and uses input dtype; ``"fwd"`` matches ``jax.jacfwd`` and uses
         output dtype). Mirrors lineax's mode names.
         """
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if jac_input_paths is None:
+        if params.jac_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(jac_input_paths)
+            jac_inputs = list(params.jac_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            jax.tree.unflatten(
+                params.output_pytreedef, range(len(params.output_avals))
+            ),
             schema_paths=self.differentiable_output_paths,
         )
-        if jac_output_paths is None:
+        if params.jac_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(jac_output_paths)
+            jac_outputs = list(params.jac_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,
@@ -260,33 +251,33 @@ class Jaxeract:
         ip_to_dtype = {p: v.dtype for p, v in flat_inputs.items() if v is not None}
         op_to_dtype = {
             p: aval.dtype
-            for (p, v), aval in zip(output_flat.items(), output_avals, strict=True)
+            for (p, v), aval in zip(
+                output_flat.items(), params.output_avals, strict=True
+            )
             if v is not None
         }
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
-                target = ip_to_dtype[ip] if jac_mode == "bwd" else op_to_dtype[op]
+                target = (
+                    ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
+                )
                 out.append(np.asarray(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
         self,
         array_args: tuple[ArrayLike, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's vjp endpoint with the given arguments."""
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        has_tangent = params.has_tangent
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
         cotangents = array_args[n_primals:]
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
@@ -294,13 +285,13 @@ class Jaxeract:
         )
 
         vjp_inputs = [
-            p for p, m in zip(flat_inputs, is_static_mask, strict=True) if not m
+            p for p, m in zip(flat_inputs, params.is_static_mask, strict=True) if not m
         ]
 
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
-        cotangent_pytree = jax.tree.unflatten(output_pytreedef, cotangents)
+        cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
         flat_cotangents = _pytree_to_tesseract_flat(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
         )
@@ -327,7 +318,7 @@ class Jaxeract:
                 tan_idx += 1
             elif (
                 tan_idx < len(has_tangent)
-                and not is_static_mask[all_idx]
+                and not params.is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):
                 # Non-differentiable but non-static input: return a NaN
@@ -344,7 +335,7 @@ class Jaxeract:
                 tan_idx += 1
 
             # Increment array_idx only for non-static inputs (which appear in array_args)
-            if not is_static_mask[all_idx]:
+            if not params.is_static_mask[all_idx]:
                 array_idx += 1
 
         return tuple(out)
