@@ -3,22 +3,21 @@
 
 import operator
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any
 
 import jax
 import jax.core as jc
 import jax.numpy as jnp
 import jax.tree
 import numpy as np
-from jax import ShapeDtypeStruct, dtypes, extend
+from jax import dtypes, extend
 from jax.core import ShapedArray
 from jax.interpreters import ad, batching, mlir
-from jax.tree_util import PyTreeDef
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
-from tesseract_jax.config import config
+from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
@@ -60,48 +59,37 @@ def _instantiate_zeros(tangents: Sequence[Any]) -> tuple[ArrayLike, ...]:
 @tesseract_dispatch_p.def_abstract_eval
 def tesseract_dispatch_abstract_eval(
     *array_args: ArrayLike | ShapedArray,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: Literal["fwd", "bwd"] = "bwd",
+    params: DispatchParams,
 ) -> tuple:
     """Define how to dispatch evals and pipe arguments."""
-    if eval_func not in (
+    if params.eval_func not in (
         "apply",
         "jacobian_vector_product",
         "vector_jacobian_product",
         "jacobian",
     ):
-        raise NotImplementedError(eval_func)
+        raise NotImplementedError(params.eval_func)
 
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    n_primals = params.n_primals
 
-    if eval_func == "vector_jacobian_product":
+    if params.eval_func == "vector_jacobian_product":
         # We mustn't run forward evaluation of shapes, as out
         # of vjp has the same shapes as the primals; thus we can return early
         return tuple(array_args[:n_primals])
 
-    if eval_func == "jacobian":
+    if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
         # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
-            primal_avals, static_args, input_pytreedef, is_static_mask
+            primal_avals,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
         )
         flat_inputs = _pytree_to_tesseract_flat(
-            primal_inputs, schema_paths=client.differentiable_input_paths
+            primal_inputs, schema_paths=params.client.differentiable_input_paths
         )
         path_to_shape = {
             p: (tuple(v.shape), v.dtype)
@@ -109,22 +97,28 @@ def tesseract_dispatch_abstract_eval(
             if v is not None
         }
         output_flat = _pytree_to_tesseract_flat(
-            dummy_output_tree(output_pytreedef, len(output_avals), static_output_mask),
-            schema_paths=client.differentiable_output_paths,
+            dummy_output_tree(
+                params.output_pytreedef,
+                len(params.output_avals),
+                params.static_output_mask,
+            ),
+            schema_paths=params.client.differentiable_output_paths,
         )
         out_path_to_aval = {
             path: aval
-            for (path, v), aval in zip(output_flat.items(), output_avals, strict=True)
+            for (path, v), aval in zip(
+                output_flat.items(), params.output_avals, strict=True
+            )
             if v is not None
         }
         jac_inputs = (
-            list(jac_input_paths)
-            if jac_input_paths is not None
+            list(params.jac_input_paths)
+            if params.jac_input_paths is not None
             else list(path_to_shape.keys())
         )
         jac_outputs = (
-            list(jac_output_paths)
-            if jac_output_paths is not None
+            list(params.jac_output_paths)
+            if params.jac_output_paths is not None
             else list(out_path_to_aval.keys())
         )
         # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
@@ -134,35 +128,23 @@ def tesseract_dispatch_abstract_eval(
             out_aval = out_path_to_aval[op_path]
             for ip in jac_inputs:
                 in_shape, in_dtype = path_to_shape[ip]
-                dtype = in_dtype if jac_mode == "bwd" else out_aval.dtype
+                dtype = in_dtype if params.jac_mode == "bwd" else out_aval.dtype
                 avals_out.append(
                     jax.core.ShapedArray(tuple(out_aval.shape) + in_shape, dtype)
                 )
         return tuple(avals_out)
 
     # Those have the same shape as the outputs
-    assert eval_func in ("apply", "jacobian_vector_product")
-    return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in output_avals)
+    assert params.eval_func in ("apply", "jacobian_vector_product")
+    return tuple(
+        jax.core.ShapedArray(aval.shape, aval.dtype) for aval in params.output_avals
+    )
 
 
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike | ad.Zero, ...],
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: Literal["fwd", "bwd"] = "bwd",
+    params: DispatchParams,
 ) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
     """Defines how to dispatch jvp operation.
 
@@ -170,8 +152,14 @@ def tesseract_dispatch_jvp_rule(
     reverse-mode autodiff.
 
     """
-    if eval_func not in ("apply", "jacobian_vector_product", "vector_jacobian_product"):
-        raise RuntimeError(f"Cannot take higher-order derivatives of {eval_func!r}")
+    if params.eval_func not in (
+        "apply",
+        "jacobian_vector_product",
+        "vector_jacobian_product",
+    ):
+        raise RuntimeError(
+            f"Cannot take higher-order derivatives of {params.eval_func!r}"
+        )
 
     #  https://github.com/jax-ml/jax/issues/16303#issuecomment-1585295819
     #  mattjj: taking a narrow pigeon-holed view, anywhere you see a symbolic
@@ -179,9 +167,10 @@ def tesseract_dispatch_jvp_rule(
     #          (not in ad.py's backward_pass), you probably want to instantiate
     #          it so that it's no longer symbolic
 
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    n_primals = params.n_primals
+    has_tangent = params.has_tangent
 
-    if eval_func == "apply":
+    if params.eval_func == "apply":
         # Compute which primals have non-zero tangents
         has_tangent = tuple(not isinstance(t, jax._src.ad_util.Zero) for t in tan_args)
 
@@ -191,13 +180,13 @@ def tesseract_dispatch_jvp_rule(
         )
         _tangent_inputs = unflatten_args(
             _tangents_for_check,
-            static_args,
-            input_pytreedef,
-            is_static_mask,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
             remove_static_args=True,
         )
         _flat_tangents = _pytree_to_tesseract_flat(
-            _tangent_inputs, schema_paths=client.differentiable_input_paths
+            _tangent_inputs, schema_paths=params.client.differentiable_input_paths
         )
         for path, val in _flat_tangents.items():
             if val is None:
@@ -236,7 +225,7 @@ def tesseract_dispatch_jvp_rule(
     # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the
     # unwanted ones by the zeros instantiated above.
     deriv_has_tangent = has_tangent
-    if eval_func == "jacobian_vector_product":
+    if params.eval_func == "jacobian_vector_product":
         deriv_has_tangent = tuple(
             not isinstance(t, jax._src.ad_util.Zero) for t in tan_args[n_primals:]
         )
@@ -245,38 +234,27 @@ def tesseract_dispatch_jvp_rule(
     jvp = tesseract_dispatch_p.bind(
         *in_args[:n_primals],
         *tan_args_,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        static_output_mask=static_output_mask,
-        static_output_values=static_output_values,
-        is_static_mask=is_static_mask,
-        has_tangent=deriv_has_tangent,
-        client=client,
-        eval_func=(
-            "vector_jacobian_product"
-            if eval_func == "vector_jacobian_product"
-            else "jacobian_vector_product"
+        params=params.replace(
+            has_tangent=deriv_has_tangent,
+            eval_func=(
+                "vector_jacobian_product"
+                if params.eval_func == "vector_jacobian_product"
+                else "jacobian_vector_product"
+            ),
+            jac_input_paths=None,
+            jac_output_paths=None,
+            jac_mode="bwd",
         ),
-        vmap_method=vmap_method,
-        materialize_jacobian=materialize_jacobian,
     )
 
     res = tesseract_dispatch_p.bind(
         *in_args,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        static_output_mask=static_output_mask,
-        static_output_values=static_output_values,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
-        materialize_jacobian=materialize_jacobian,
+        params=params.replace(
+            has_tangent=has_tangent,
+            jac_input_paths=None,
+            jac_output_paths=None,
+            jac_mode="bwd",
+        ),
     )
 
     return tuple(res), tuple(jvp)
@@ -288,23 +266,12 @@ ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
 def tesseract_dispatch_transpose_rule(
     cotangent: Sequence[ArrayLike | ad.Zero],
     *args: ArrayLike | ad.UndefinedPrimal,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
+    params: DispatchParams,
 ) -> tuple[ArrayLike | None, ...]:
     """Defines how to dispatch vjp operation."""
-    assert eval_func in ("jacobian_vector_product",)
+    assert params.eval_func in ("jacobian_vector_product",)
 
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    n_primals = params.n_primals
     primal_args = args[:n_primals]
 
     # Primal slots must hold concrete residuals. An UndefinedPrimal here means the
@@ -329,10 +296,12 @@ def tesseract_dispatch_transpose_rule(
     # Any other cotangent means the user accidentally included a non-diff output
     # in the gradient computation, likely due to a missing Differentiable[] annotation.
     dummy_output = dummy_output_tree(
-        output_pytreedef, len(output_avals), static_output_mask
+        params.output_pytreedef,
+        len(params.output_avals),
+        params.static_output_mask,
     )
     flat_output_info = _pytree_to_tesseract_flat(
-        dummy_output, schema_paths=client.differentiable_output_paths
+        dummy_output, schema_paths=params.client.differentiable_output_paths
     )
     for cotan, (path, is_diff) in zip(cotangent, flat_output_info.items(), strict=True):
         if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
@@ -346,16 +315,16 @@ def tesseract_dispatch_transpose_rule(
 
     # Raise if a gradient is requested for a non-differentiable input.
     _primal_inputs = unflatten_args(
-        primal_args, static_args, input_pytreedef, is_static_mask
+        primal_args, params.static_args, params.input_pytreedef, params.is_static_mask
     )
     _flat_inputs = _pytree_to_tesseract_flat(
-        _primal_inputs, schema_paths=client.differentiable_input_paths
+        _primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
     _non_static_paths = [
-        p for p, m in zip(_flat_inputs, is_static_mask, strict=True) if not m
+        p for p, m in zip(_flat_inputs, params.is_static_mask, strict=True) if not m
     ]
     _vjp_inputs_with_tangent = [
-        p for p, h in zip(_non_static_paths, has_tangent, strict=True) if h
+        p for p, h in zip(_non_static_paths, params.has_tangent, strict=True) if h
     ]
     for path in _vjp_inputs_with_tangent:
         if _flat_inputs[path] is None:
@@ -373,18 +342,7 @@ def tesseract_dispatch_transpose_rule(
     vjp = tesseract_dispatch_p.bind(
         *primal_args,
         *cotan_args_,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        static_output_mask=static_output_mask,
-        static_output_values=static_output_values,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func="vector_jacobian_product",
-        vmap_method=vmap_method,
-        materialize_jacobian=materialize_jacobian,
+        params=params.replace(eval_func="vector_jacobian_product"),
     )
 
     return tuple([None] * len(primal_args) + list(vjp))
@@ -404,57 +362,17 @@ def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
 
 def tesseract_dispatch(
     *array_args: ArrayLike | ShapedArray | Any,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef | None,
-    output_avals: tuple[ShapeDtypeStruct, ...] | None,
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: Literal["fwd", "bwd"] = "bwd",
+    params: DispatchParams,
 ) -> Any:
     """Defines how to dispatch lowering the computation.
 
     The dispatch that is not lowered is only called in cases where abstract eval is not needed.
     """
-    _raise_if_unimplemented(eval_func, client)
-
-    # Every endpoint needs to know which output leaves are static: apply has to
-    # drop them from its response, and the differentiable endpoints have to skip
-    # them when they line schema paths up against ``output_avals``.
-    extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
-    if eval_func == "apply" and config.check_static_outputs:
-        # Only apply sees a response that carries static leaves at all, so it is
-        # the only endpoint that can check them against the traced values. The
-        # unpacking is skipped along with the check itself.
-        extra_kwargs["static_output_values"] = tuple(
-            _unpack_hashable(v) for v in static_output_values
-        )
-    if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
-        extra_kwargs["jac_mode"] = jac_mode
+    _raise_if_unimplemented(params.eval_func, params.client)
 
     def _dispatch(*args: ArrayLike) -> Any:
-        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
-        out = getattr(client, eval_func)(
-            args,
-            static_args_,
-            input_pytreedef,
-            output_pytreedef,
-            output_avals,
-            is_static_mask,
-            has_tangent,
-            **extra_kwargs,
-        )
-        if not isinstance(out, tuple) and output_avals is not None:
+        out = getattr(params.client, params.eval_func)(args, params)
+        if not isinstance(out, tuple) and params.output_avals is not None:
             out = (out,)
         return out
 
@@ -468,53 +386,13 @@ tesseract_dispatch_p.def_impl(tesseract_dispatch)
 def tesseract_dispatch_lowering(
     ctx: Any,
     *array_args: ArrayLike | ShapedArray | Any,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: Literal["fwd", "bwd"] = "bwd",
+    params: DispatchParams,
 ) -> Any:
     """Defines how to dispatch lowering the computation."""
-    _raise_if_unimplemented(eval_func, client)
-
-    # Every endpoint needs to know which output leaves are static: apply has to
-    # drop them from its response, and the differentiable endpoints have to skip
-    # them when they line schema paths up against ``output_avals``.
-    extra_kwargs: dict[str, Any] = {"static_output_mask": static_output_mask}
-    if eval_func == "apply" and config.check_static_outputs:
-        # Only apply sees a response that carries static leaves at all, so it is
-        # the only endpoint that can check them against the traced values. The
-        # unpacking is skipped along with the check itself.
-        extra_kwargs["static_output_values"] = tuple(
-            _unpack_hashable(v) for v in static_output_values
-        )
-    if eval_func == "jacobian":
-        extra_kwargs["jac_input_paths"] = jac_input_paths
-        extra_kwargs["jac_output_paths"] = jac_output_paths
-        extra_kwargs["jac_mode"] = jac_mode
+    _raise_if_unimplemented(params.eval_func, params.client)
 
     def _dispatch(*args: ArrayLike) -> Any:
-        static_args_ = tuple(_unpack_hashable(arg) for arg in static_args)
-        out = getattr(client, eval_func)(
-            args,
-            static_args_,
-            input_pytreedef,
-            output_pytreedef,
-            output_avals,
-            is_static_mask,
-            has_tangent,
-            **extra_kwargs,
-        )
+        out = getattr(params.client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
             out = (out,)
         return out
@@ -549,40 +427,26 @@ def tesseract_dispatch_batching(
     array_args: ArrayLike | ShapedArray | Any,
     axes: Sequence[Any],
     *,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
-    materialize_jacobian: bool | None = None,
-    jac_input_paths: tuple[str, ...] | None = None,
-    jac_output_paths: tuple[str, ...] | None = None,
-    jac_mode: Literal["fwd", "bwd"] = "bwd",
+    params: DispatchParams,
 ) -> Any:
     """Defines how to dispatch batch operations such as vmap (which is used by jax.jacobian)."""
-    _raise_if_unimplemented(eval_func, client)
+    _raise_if_unimplemented(params.eval_func, params.client)
 
     # An unmapped axis is denoted by ``None``. (Older JAX versions exposed this
     # as the ``batching.not_mapped`` sentinel, which has since been removed; it
     # was always equal to ``None``.)
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    n_primals = params.n_primals
 
     # When jacfwd/jacrev vmap a JVP/VJP with primals unbatched and (co)tangents
     # batched, materialize the entire Jacobian and apply to batch with matmul.
     # Gated by ``materialize_jacobian`` (None = auto, True = force, False = skip).
-    if eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
+    if params.eval_func in ("jacobian_vector_product", "vector_jacobian_product"):
         primal_axes = axes[:n_primals]
         tangent_axes = axes[n_primals:]
         primals_unbatched = all(ax is None for ax in primal_axes)
         tangents_batched = any(ax is not None for ax in tangent_axes)
-        endpoint_available = "jacobian" in client.available_methods
-        if materialize_jacobian is True and not endpoint_available:
+        endpoint_available = "jacobian" in params.client.available_methods
+        if params.materialize_jacobian is True and not endpoint_available:
             raise RuntimeError(
                 "materialize_jacobian=True but the Tesseract does not expose a "
                 "'jacobian' endpoint."
@@ -590,25 +454,11 @@ def tesseract_dispatch_batching(
         use_shortcut = (
             primals_unbatched
             and tangents_batched
-            and materialize_jacobian is not False
-            and (materialize_jacobian is True or endpoint_available)
+            and params.materialize_jacobian is not False
+            and (params.materialize_jacobian is True or endpoint_available)
         )
         if use_shortcut:
-            return _batched_via_jacobian(
-                array_args,
-                axes,
-                static_args=static_args,
-                input_pytreedef=input_pytreedef,
-                output_pytreedef=output_pytreedef,
-                output_avals=output_avals,
-                static_output_mask=static_output_mask,
-                static_output_values=static_output_values,
-                is_static_mask=is_static_mask,
-                has_tangent=has_tangent,
-                client=client,
-                eval_func=eval_func,
-                vmap_method=vmap_method,
-            )
+            return _batched_via_jacobian(array_args, axes, params=params)
 
     new_args = [
         arg if ax is None else jnp.moveaxis(arg, ax, 0)
@@ -616,33 +466,19 @@ def tesseract_dispatch_batching(
     ]
     is_batched_mask = [ax is not None for ax in axes]
 
-    if eval_func == "jacobian":
+    if params.eval_func == "jacobian":
         # The vectorized strategies hand batched primals to the endpoint, which
         # then answers with a (batch, *out, batch, *in) block rather than
         # (batch, *out, *in). Only sequential wraps a jacobian call correctly,
         # and the mismatch is silent rather than an error, so pin it here.
-        vmap_method = "sequential"
+        params = params.replace(vmap_method="sequential")
 
-    batch_fn = VMAP_METHOD_DISPATCH[vmap_method]
+    batch_fn = VMAP_METHOD_DISPATCH[params.vmap_method]
     return batch_fn(
         new_args,
         is_batched_mask,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        static_output_mask=static_output_mask,
-        static_output_values=static_output_values,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func=eval_func,
-        vmap_method=vmap_method,
+        params=params,
         tesseract_dispatch_p=tesseract_dispatch_p,
-        materialize_jacobian=materialize_jacobian,
-        jac_input_paths=jac_input_paths,
-        jac_output_paths=jac_output_paths,
-        jac_mode=jac_mode,
     )
 
 
@@ -650,17 +486,7 @@ def _batched_via_jacobian(
     array_args: Sequence[Any],
     axes: Sequence[Any],
     *,
-    static_args: tuple[_Hashable, ...],
-    input_pytreedef: PyTreeDef,
-    output_pytreedef: PyTreeDef,
-    output_avals: tuple[ShapeDtypeStruct, ...],
-    static_output_mask: tuple[bool, ...],
-    static_output_values: tuple[_Hashable, ...],
-    is_static_mask: tuple[bool, ...],
-    has_tangent: tuple[bool, ...],
-    client: Jaxeract,
-    eval_func: str,
-    vmap_method: VmapMethod = None,
+    params: DispatchParams,
 ) -> tuple[tuple, tuple]:
     """Batched JVP / VJP via one ``jacobian`` endpoint call + ``tensordot``.
 
@@ -668,7 +494,7 @@ def _batched_via_jacobian(
     (caller checks). Returns ``(out_vals, out_axes)`` per JAX batching rule
     convention; output batch axis is always 0.
     """
-    n_primals = len(is_static_mask) - sum(is_static_mask)
+    n_primals = params.n_primals
     primals = tuple(array_args[:n_primals])  # unbatched
     raw_tans = array_args[n_primals:]
     tan_axes = axes[n_primals:]
@@ -690,14 +516,18 @@ def _batched_via_jacobian(
     tans = jax.tree.map(_to_batched, raw_tans, tan_axes)
 
     primal_inputs = unflatten_args(
-        primals, static_args, input_pytreedef, is_static_mask
+        primals, params.static_args, params.input_pytreedef, params.is_static_mask
     )
     flat_inputs = _pytree_to_tesseract_flat(
-        primal_inputs, schema_paths=client.differentiable_input_paths
+        primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
     output_flat = _pytree_to_tesseract_flat(
-        dummy_output_tree(output_pytreedef, len(output_avals), static_output_mask),
-        schema_paths=client.differentiable_output_paths,
+        dummy_output_tree(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.static_output_mask,
+        ),
+        schema_paths=params.client.differentiable_output_paths,
     )
 
     # Map each (schema-diff) ∧ (has_tangent) input path to its position in
@@ -706,10 +536,12 @@ def _batched_via_jacobian(
     # JAX-zero tangents (JVP) and non-requested gradients (VJP).
     diff_input_path_to_pos: dict[str, int] = {}
     non_static_idx = 0
-    for (p, v), is_static in zip(flat_inputs.items(), is_static_mask, strict=True):
+    for (p, v), is_static in zip(
+        flat_inputs.items(), params.is_static_mask, strict=True
+    ):
         if is_static:
             continue
-        if v is not None and has_tangent[non_static_idx]:
+        if v is not None and params.has_tangent[non_static_idx]:
             diff_input_path_to_pos[p] = non_static_idx
         non_static_idx += 1
 
@@ -722,20 +554,12 @@ def _batched_via_jacobian(
 
     jac_arrays = tesseract_dispatch_p.bind(
         *primals,
-        static_args=static_args,
-        input_pytreedef=input_pytreedef,
-        output_pytreedef=output_pytreedef,
-        output_avals=output_avals,
-        static_output_mask=static_output_mask,
-        static_output_values=static_output_values,
-        is_static_mask=is_static_mask,
-        has_tangent=has_tangent,
-        client=client,
-        eval_func="jacobian",
-        vmap_method=vmap_method,
-        jac_input_paths=tuple(diff_input_path_to_pos),
-        jac_output_paths=tuple(diff_output_path_to_pos),
-        jac_mode="fwd" if eval_func == "jacobian_vector_product" else "bwd",
+        params=params.replace(
+            eval_func="jacobian",
+            jac_input_paths=tuple(diff_input_path_to_pos),
+            jac_output_paths=tuple(diff_output_path_to_pos),
+            jac_mode="fwd" if params.eval_func == "jacobian_vector_product" else "bwd",
+        ),
     )
     n_in = len(diff_input_path_to_pos)
     n_out = len(diff_output_path_to_pos)
@@ -782,11 +606,11 @@ def _batched_via_jacobian(
     # level: those are flat lists of leaves, so each rest-arg's subtree at
     # that position is passed whole.
 
-    if eval_func == "jacobian_vector_product":
+    if params.eval_func == "jacobian_vector_product":
         # Filter tangents to matrix-column order, then for each diff row sum
         # the per-column matvec contributions.
         filtered_tans = [tans[pos] for pos in diff_input_path_to_pos.values()]
-        diff_avals = [output_avals[i] for i in diff_output_path_to_pos.values()]
+        diff_avals = [params.output_avals[i] for i in diff_output_path_to_pos.values()]
         diff_outs = jax.tree.map(
             lambda slot, jac_row: _tree_sum(
                 jax.tree.map(_matmul, jac_row, filtered_tans), slot
@@ -796,7 +620,7 @@ def _batched_via_jacobian(
         )
         outs = _pad_nans(
             diff_outs,
-            output_avals,
+            params.output_avals,
             [v is not None for _p, v in output_flat.items()],
         )
         return outs, (0,) * len(outs)
@@ -1162,18 +986,20 @@ def apply_tesseract(
         # Apply the primitive
         out = tesseract_dispatch_p.bind(
             *array_args,
-            static_args=static_args,
-            input_pytreedef=input_pytreedef,
-            output_pytreedef=output_pytreedef,
-            output_avals=flat_avals,
-            static_output_mask=static_output_mask,
-            static_output_values=static_output_values,
-            is_static_mask=is_static_mask,
-            has_tangent=has_tangent,
-            client=client,
-            eval_func="apply",
-            vmap_method=vmap_method,
-            materialize_jacobian=materialize_jacobian,
+            params=DispatchParams(
+                static_args=static_args,
+                input_pytreedef=input_pytreedef,
+                output_pytreedef=output_pytreedef,
+                output_avals=flat_avals,
+                static_output_mask=static_output_mask,
+                static_output_values=static_output_values,
+                is_static_mask=is_static_mask,
+                has_tangent=has_tangent,
+                client=client,
+                eval_func="apply",
+                vmap_method=vmap_method,
+                materialize_jacobian=materialize_jacobian,
+            ),
         )
 
         # Put the static leaves back where the schema had them.
@@ -1193,18 +1019,20 @@ def apply_tesseract(
         # and the primitive will return an unflattened output
         out = tesseract_dispatch_p.bind(
             *array_args,
-            static_args=static_args,
-            input_pytreedef=input_pytreedef,
-            output_pytreedef=None,
-            output_avals=None,
-            static_output_mask=(),
-            static_output_values=(),
-            is_static_mask=is_static_mask,
-            has_tangent=has_tangent,
-            client=client,
-            eval_func="apply",
-            vmap_method=vmap_method,
-            materialize_jacobian=materialize_jacobian,
+            params=DispatchParams(
+                static_args=static_args,
+                input_pytreedef=input_pytreedef,
+                output_pytreedef=None,
+                output_avals=None,
+                static_output_mask=(),
+                static_output_values=(),
+                is_static_mask=is_static_mask,
+                has_tangent=has_tangent,
+                client=client,
+                eval_func="apply",
+                vmap_method=vmap_method,
+                materialize_jacobian=materialize_jacobian,
+            ),
         )
 
         # Unflatten the output
