@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import functools
-from typing import Any, Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import jax.tree
 import numpy as np
