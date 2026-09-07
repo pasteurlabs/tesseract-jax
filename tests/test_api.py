@@ -5,6 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import tesseract_core
+from packaging.version import Version
 
 from tesseract_jax import apply_tesseract
 
@@ -778,12 +780,9 @@ def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
     assert template == templates[0]
 
 
-try:  # tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707
-    from tesseract_core.runtime.tree_transforms import split_path  # noqa: F401
-
-    _CORE_ACCEPTS_WIDE_KEYS = True
-except ImportError:  # pragma: no cover
-    _CORE_ACCEPTS_WIDE_KEYS = False
+# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
+# which landed after 1.12.0. Drop this guard once the minimum version is past it.
+_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
 
 
 @pytest.mark.parametrize(
@@ -794,7 +793,10 @@ except ImportError:  # pragma: no cover
             "layer.0.weight",
             marks=pytest.mark.skipif(
                 not _CORE_ACCEPTS_WIDE_KEYS,
-                reason="runtime rejects the key until tesseract-core#707 is released",
+                reason=(
+                    f"tesseract-core {tesseract_core.__version__} rejects the key "
+                    "(needs > 1.12.0)"
+                ),
             ),
         ),
     ],
