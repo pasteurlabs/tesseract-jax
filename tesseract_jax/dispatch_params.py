@@ -3,12 +3,9 @@
 
 """The parameter bundle threaded through the ``tesseract_dispatch`` primitive.
 
-Every rule of the primitive (abstract eval, jvp, transpose, batching, lowering,
-impl) and every batching strategy needs the same set of descriptors: how the
-flat operands map back to the input pytree, what the outputs look like, which
-endpoint to call, and how to handle vmap. Passing them as a dozen individual
-keyword arguments made the signatures unwieldy, so they live together in a
-single frozen dataclass that travels as one primitive bind parameter.
+Every rule of the primitive and every batching strategy needs the same 
+set of descriptors. Passing them as a single frozen dataclass is neater than
+a dozen individual keyword arguments on every rule signatures.
 
 The dataclass is frozen and every field is hashable, which is what lets JAX
 compare two binds for equality and lets XLA common up identical Tesseract
