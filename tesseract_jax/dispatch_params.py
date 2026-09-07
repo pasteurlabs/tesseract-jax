@@ -3,7 +3,7 @@
 
 """The parameter bundle threaded through the ``tesseract_dispatch`` primitive.
 
-Every rule of the primitive and every batching strategy needs the same 
+Every rule of the primitive and every batching strategy needs the same
 set of descriptors. Passing them as a single frozen dataclass is neater than
 a dozen individual keyword arguments on every rule signatures.
 
