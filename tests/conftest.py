@@ -276,6 +276,11 @@ def pytree_tess() -> Tesseract:
 
 
 @pytest.fixture
+def dict_key_tess() -> Tesseract:
+    return _load_tesseract("dict_key_tesseract")
+
+
+@pytest.fixture
 def univariate_tess() -> Tesseract:
     return _load_tesseract("univariate_tesseract")
 
