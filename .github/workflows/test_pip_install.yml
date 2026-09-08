@@ -5,16 +5,24 @@ on:
   # break a wheel build or install *without* the test suite (run_tests.yml)
   # already catching it. A pure-Python source change under tesseract_jax/ that
   # broke packaging would also break the tests, so those are deliberately not
-  # listed; what remains is the native shim source (a C++ compile error is
-  # invisible to CPU pytest), the build hook (the test suite never runs it),
-  # the packaging metadata, and this pipeline itself (incl. the reusable build
-  # workflow it calls). These jobs are not required status checks, so skipping
-  # them on unrelated PRs is safe.
+  # listed. What remains is what the tests are blind to:
+  #   * the native shim source (a C++ compile error is invisible to CPU pytest),
+  #   * the build hook (the test suite never runs it),
+  #   * the packaging metadata,
+  #   * requirements.txt -- consumed *directly* by the source-install leg below
+  #     (`pip install -r requirements.txt`); the test suite installs from
+  #     production.uv.lock instead, so a bad requirements.txt is caught nowhere
+  #     else,
+  #   * and this pipeline itself (incl. the reusable build workflow it calls).
+  # The lockfile is intentionally absent: no job here reads it, so it cannot
+  # change this pipeline's outcome. These jobs are not required status checks,
+  # so skipping them on unrelated PRs is safe.
   pull_request:
     paths:
       - "tesseract_jax/_cuda_shim.cc"
       - "hatch_build.py"
       - "pyproject.toml"
+      - "requirements.txt"
       - ".github/workflows/test_pip_install.yml"
       - ".github/workflows/build_wheels.yml"
 
