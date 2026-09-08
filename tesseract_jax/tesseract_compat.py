@@ -22,6 +22,69 @@ if TYPE_CHECKING:
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
 
 
+# Every dtype a Tesseract schema can carry; see the `dtype` enum in the
+# generated OpenAPI schema (tesseract_core.runtime.schema_types).
+_SCHEMA_DTYPES = (
+    "bool",
+    "complex64",
+    "complex128",
+    "float16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+)
+
+
+def _compute_discarded_fill(dtype: np.dtype) -> np.ndarray:
+    """The value a discarded derivative slot is filled with, for one dtype.
+
+    Whatever ``0/0`` yields there: NaN in every component for the inexact
+    dtypes (so a complex slot is poisoned in its imaginary part too), and zero
+    for those with no invalid value to spell.
+    """
+    zero = np.zeros((), dtype)
+    with np.errstate(invalid="ignore"):
+        fill = zero / zero if np.issubdtype(dtype, np.inexact) else zero
+    # 0-d array, not the scalar that `/` returns, and read-only because it is
+    # shared between calls.
+    fill = np.asarray(fill, dtype=dtype)
+    fill.flags.writeable = False
+    return fill
+
+
+# Materialised at import: the dtype domain is closed, so the table is complete
+# and inspectable. Derived from the rule above so the two cannot drift.
+_DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
+    np.dtype(name): _compute_discarded_fill(np.dtype(name)) for name in _SCHEMA_DTYPES
+}
+
+
+def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
+    """A discarded slot in a derivative call's output tuple."""
+    dtype = np.dtype(dtype)
+    try:
+        fill = _DISCARDED_FILL[dtype]
+    except KeyError:
+        # Not reachable through a Tesseract schema today. Raise deliberately
+        # rather than let the bare KeyError out: this runs inside a host
+        # callback, so whatever escapes reaches the user wrapped in an opaque
+        # "INTERNAL: CpuCallback error calling callback".
+        raise NotImplementedError(
+            f"No discarded-slot fill defined for dtype {dtype}. Expected one "
+            f"of: {', '.join(sorted(map(str, _DISCARDED_FILL)))}. This dtype "
+            f"should not be reachable through a Tesseract schema, so please "
+            f"report it."
+        ) from None
+    return np.full(shape, fill, dtype=dtype)
+
+
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
@@ -173,7 +236,7 @@ class Jaxeract:
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(np.full(aval.shape, np.nan, dtype=aval.dtype))
+                out.append(_discarded_slot(aval.shape, aval.dtype))
 
         return tuple(out)
 
@@ -301,10 +364,9 @@ class Jaxeract:
                 # JAX's transpose machinery doesn't consume it for any
                 # user-requested derivative.
                 out.append(
-                    np.full(
+                    _discarded_slot(
                         array_args[array_idx].shape,
-                        np.nan,
-                        dtype=array_args[array_idx].dtype,
+                        array_args[array_idx].dtype,
                     )
                 )
                 tan_idx += 1

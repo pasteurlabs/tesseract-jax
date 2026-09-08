@@ -39,7 +39,9 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    array_args: tuple[ArrayLike | ShapedArray, ...],
+    # ``None`` marks an argument with no tangent: the JVP rule passes such a
+    # sentinel per non-differentiated input when checking the input schema.
+    array_args: tuple[ArrayLike | ShapedArray | None, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
     is_static_mask: tuple[bool, ...],
