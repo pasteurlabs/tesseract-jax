@@ -1,7 +1,6 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import functools
 from typing import TYPE_CHECKING
 
 import jax.tree
@@ -23,15 +22,32 @@ if TYPE_CHECKING:
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
 
 
-@functools.cache
-def _discarded_fill(dtype: np.dtype) -> np.ndarray:
-    """The value a discarded derivative slot is filled with, per dtype.
+# Every dtype a Tesseract schema can carry; see the `dtype` enum in the
+# generated OpenAPI schema (tesseract_core.runtime.schema_types).
+_SCHEMA_DTYPES = (
+    "bool",
+    "complex64",
+    "complex128",
+    "float16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+)
+
+
+def _compute_discarded_fill(dtype: np.dtype) -> np.ndarray:
+    """The value a discarded derivative slot is filled with, for one dtype.
 
     Whatever ``0/0`` yields there: NaN in every component for the inexact
     dtypes (so a complex slot is poisoned in its imaginary part too), and zero
-    for those with no invalid value to spell. Cached because it depends only on
-    the dtype, and casting NaN per call is both slower and -- for the integer
-    dtypes, where it is an invalid cast -- a ``RuntimeWarning``.
+    for those with no invalid value to spell.
     """
     zero = np.zeros((), dtype)
     with np.errstate(invalid="ignore"):
@@ -43,9 +59,27 @@ def _discarded_fill(dtype: np.dtype) -> np.ndarray:
     return fill
 
 
+# Materialised once, rather than cached per call: the domain is closed, so the
+# table can be complete and inspectable. Derived from the rule above so the two
+# cannot drift.
+_DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
+    np.dtype(name): _compute_discarded_fill(np.dtype(name)) for name in _SCHEMA_DTYPES
+}
+
+
 def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
     """A discarded slot in a derivative call's output tuple."""
-    return np.full(shape, _discarded_fill(np.dtype(dtype)), dtype=dtype)
+    dtype = np.dtype(dtype)
+    fill = _DISCARDED_FILL.get(dtype)
+    if fill is None:
+        # A dtype outside the schema set should not reach here, but computing
+        # it beats a KeyError raised inside a host callback, which XLA reports
+        # only as "INTERNAL: CpuCallback error calling callback". Note this
+        # yields zero, not NaN, for an inexact dtype numpy does not recognise
+        # as one (ml_dtypes.bfloat16 among them) -- valid for every dtype,
+        # just weaker poison than the table gives.
+        fill = _compute_discarded_fill(dtype)
+    return np.full(shape, fill, dtype=dtype)
 
 
 class Jaxeract:
