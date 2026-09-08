@@ -53,7 +53,8 @@ jobs:
         run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=$(uvx hatch version)" >> "$GITHUB_ENV"
 
       - name: Build native wheel
-        uses: pypa/cibuildwheel@v3
+        # cibuildwheel publishes no floating major tag; pin a full version.
+        uses: pypa/cibuildwheel@v4.2.1
         env:
           # abi3: build once on 3.12; the wheel is tagged cp312-abi3 by the hook.
           CIBW_BUILD: "cp312-*"
