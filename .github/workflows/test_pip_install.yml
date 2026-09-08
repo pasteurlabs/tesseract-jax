@@ -5,10 +5,13 @@ on:
   pull_request:
 
 jobs:
+  # Install from source (compiles the shim locally where supported, or degrades
+  # to the host-callback transport). Validates the end-user `pip install .` path.
   test-pip-install:
-    name: "Test pip install"
+    name: "Test pip install (from source)"
     runs-on: "${{ matrix.os }}"
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-latest
@@ -29,3 +32,61 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install --no-deps .
+
+  # Build the release artifacts once (reusable workflow).
+  build:
+    name: "Build distribution"
+    uses: ./.github/workflows/build_wheels.yml
+
+  # Install from the pre-built wheels and confirm the package imports. This
+  # exercises the *published* artifacts: on Linux/CPython pip picks the native
+  # manylinux abi3 wheel; where none matches it falls back to py3-none-any.
+  test-wheel-install:
+    name: "Test pip install (from built wheel)"
+    needs: build
+    runs-on: "${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        python-version:
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download built distributions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ needs.build.outputs.artifact-pattern }}
+          merge-multiple: true
+          path: dist
+
+      - name: Install from the built wheel
+        run: |
+          python -m pip install --upgrade pip
+          # Resolve deps from PyPI, but the tesseract-jax wheel itself must come
+          # from dist/ -- pip selects the most specific compatible tag there
+          # (native abi3 wheel on Linux/CPython 3.12+, else py3-none-any).
+          python -m pip install --find-links dist tesseract-jax
+
+      - name: Report which wheel was installed
+        run: |
+          python -c "import tesseract_jax, tesseract_jax.gpu_ffi as g; \
+            print('tesseract_jax', tesseract_jax.__file__); \
+            print('native shim available:', g.is_available())"
+
+      - name: Verify the abi3 native wheel is used on Linux/CPython
+        if: runner.os == 'Linux'
+        run: |
+          # On Linux the native manylinux abi3 wheel must win over the fallback,
+          # so the shim must load. A silent fall-through to py3-none-any here
+          # would mean the native wheel's tag or the abi3 build is wrong.
+          python -c "import tesseract_jax.gpu_ffi as g; assert g.is_available(), \
+            'expected the native abi3 wheel on Linux, but the shim is unavailable'"

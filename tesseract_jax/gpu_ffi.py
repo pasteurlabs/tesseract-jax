@@ -141,7 +141,7 @@ def _native_dispatch(
     ``__cuda_array_interface__`` whose bytes the handler copies into the XLA
     output buffers.
 
-    The native shim marshals each entry across the pybind11 boundary, where
+    The native shim marshals each entry across the nanobind boundary, where
     ``shape`` arrives as a Python ``list`` rather than a ``tuple``; the sequence
     annotations describe that faithfully (and are normalized to tuples below).
     """

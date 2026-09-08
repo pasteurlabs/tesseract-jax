@@ -16,8 +16,12 @@
 //   accesses CUDA from Python (ctypes.CDLL).
 // * The handler is a plain C-ABI function pointer wrapped in a PyCapsule; XLA
 //   calls it directly on its executor thread, with no Python on the stack. To
-//   reach Python we acquire the GIL (pybind11 gil_scoped_acquire) and call a
+//   reach Python we acquire the GIL (nanobind gil_scoped_acquire) and call a
 //   registered callable.
+// * The Python bindings use nanobind, built against the CPython stable ABI
+//   (Py_LIMITED_API): the module's entire Python surface is three entry points
+//   marshalling ints/strings/lists/tuples/objects, well inside the Limited API,
+//   so one abi3 wheel per platform serves every supported CPython version.
 // * The registered Python callback returns the result arrays (as objects
 //   exposing __cuda_array_interface__) and the shim copies them device->device
 //   into XLA's output buffers.
@@ -32,12 +36,13 @@
 #include <string>
 #include <vector>
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include "xla/ffi/api/ffi.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 namespace ffi = xla::ffi;
 
 // ---------------------------------------------------------------------------
@@ -203,15 +208,15 @@ ffi::Error assert_device_ptr(const void* ptr, const std::string& what) {
 // held in the Python module. We call a single registered dispatch callable with
 // (token, input_views) and receive back a list of result arrays.
 
-py::object& dispatch_callable() {
+nb::object& dispatch_callable() {
   // Heap-allocated and intentionally never freed. A function-local
-  // ``static py::object`` would run ~object() during C++ static destruction at
+  // ``static nb::object`` would run ~object() during C++ static destruction at
   // process exit -- which happens *after* the Python interpreter is finalized --
   // so the Py_DECREF it performs dereferences a dead interpreter and segfaults
   // (observed as an exit-139 teardown crash in gdb: ~object() from this module).
   // Leaking the reference is the standard fix: the process is exiting, so the
   // holdout costs nothing and no destructor touches Python after finalization.
-  static py::object* cb = new py::object();  // set via set_dispatch_callback
+  static nb::object* cb = new nb::object();  // set via set_dispatch_callback
   return *cb;
 }
 
@@ -311,40 +316,40 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
   }
 
   // Call into Python under the GIL.
-  std::vector<py::object> results_keepalive;
+  std::vector<nb::object> results_keepalive;
   std::vector<BufferDesc> result_descs;
   // The keepalive vector holds Python objects, so it must be emptied while the
-  // GIL is held -- otherwise the py::object destructors call dec_ref() with no
+  // GIL is held -- otherwise the nb::object destructors call dec_ref() with no
   // GIL and abort the process. This guard clears it under the GIL on *every*
   // exit path (including early error returns), so a residency-check failure
   // surfaces as a clean ffi::Error instead of a crash.
   struct KeepaliveGuard {
-    std::vector<py::object>& v;
+    std::vector<nb::object>& v;
     ~KeepaliveGuard() {
       if (v.empty()) return;
-      py::gil_scoped_acquire gil;
+      nb::gil_scoped_acquire gil;
       v.clear();
     }
   } keepalive_guard{results_keepalive};
   {
-    py::gil_scoped_acquire gil;
-    py::object& cb = dispatch_callable();
+    nb::gil_scoped_acquire gil;
+    nb::object& cb = dispatch_callable();
     if (cb.is_none()) {
       return ffi::Error::Internal(
           "tesseract_jax: no dispatch callback registered");
     }
 
     // Build the list of input views: (ptr, typestr, shape) tuples.
-    py::list py_inputs;
+    nb::list py_inputs;
     for (const auto& d : in_descs) {
       py_inputs.append(
-          py::make_tuple(d.ptr, py::str(d.typestr), py::cast(d.shape)));
+          nb::make_tuple(d.ptr, nb::str(d.typestr.c_str()), nb::cast(d.shape)));
     }
 
-    py::object out;
+    nb::object out;
     try {
       out = cb(token, py_inputs);
-    } catch (py::error_already_set& e) {
+    } catch (nb::python_error& e) {
       return ffi::Error::Internal(std::string("dispatch callback raised: ") +
                                   e.what());
     }
@@ -365,14 +370,14 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     }
 
     // Expect a list of objects exposing __cuda_array_interface__.
-    py::sequence seq = py::reinterpret_borrow<py::sequence>(out);
-    if (py::len(seq) != out_descs.size()) {
+    nb::sequence seq = nb::borrow<nb::sequence>(out);
+    if (nb::len(seq) != out_descs.size()) {
       return ffi::Error::Internal(
           "dispatch callback returned wrong number of results");
     }
     const bool check_ptrs = debug_check_device_ptrs();
     for (size_t i = 0; i < out_descs.size(); ++i) {
-      py::object item = seq[i];
+      nb::object item = seq[i];
       results_keepalive.push_back(item);  // keep alive through the copy
       BufferDesc rd;
       // A ``None`` result marks a placeholder slot: a discarded gradient/tangent
@@ -385,9 +390,9 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
         result_descs.push_back(rd);
         continue;
       }
-      py::object cai = item.attr("__cuda_array_interface__");
-      py::tuple data = cai["data"].cast<py::tuple>();
-      rd.ptr = data[0].cast<uintptr_t>();
+      nb::object cai = item.attr("__cuda_array_interface__");
+      nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
+      rd.ptr = nb::cast<uintptr_t>(data[0]);
       rd.nbytes = out_descs[i].nbytes;  // trust XLA's expected size
       result_descs.push_back(rd);
       // Debug: the dispatch's returned buffers must be device-resident.
@@ -463,16 +468,16 @@ XLA_FFI_Handler* MakeDispatchHandler() {
 // Python module
 // ---------------------------------------------------------------------------
 
-PYBIND11_MODULE(_cuda_shim, m) {
+NB_MODULE(_cuda_shim, m) {
   m.doc() = "Native FFI shim for GPU-direct Tesseract dispatch";
 
-  m.def("set_dispatch_callback", [](py::object cb) {
+  m.def("set_dispatch_callback", [](nb::object cb) {
     dispatch_callable() = std::move(cb);
   });
 
   // Expose the handler as a PyCapsule for jax.ffi.register_ffi_target.
   m.def("handler_capsule", []() {
-    return py::capsule(reinterpret_cast<void*>(MakeDispatchHandler()),
+    return nb::capsule(reinterpret_cast<void*>(MakeDispatchHandler()),
                        "xla._CUSTOM_CALL_TARGET");
   });
 }
