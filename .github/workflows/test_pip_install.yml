@@ -71,16 +71,48 @@ jobs:
       - name: Install from the built wheel
         run: |
           python -m pip install --upgrade pip
-          # Resolve deps from PyPI, but the tesseract-jax wheel itself must come
-          # from dist/ -- pip selects the most specific compatible tag there
-          # (native abi3 wheel on Linux/CPython 3.12+, else py3-none-any).
-          python -m pip install --find-links dist tesseract-jax
+          # Install the tesseract-jax wheel by path so pip uses the freshly built
+          # artifact, not the released version from PyPI (a dev/local build sorts
+          # BELOW any PyPI release, so a plain `pip install tesseract-jax` would
+          # pull the old release even with --find-links). Point pip at dist/ so it
+          # picks the tag-appropriate wheel (native abi3 on Linux/CPython, else the
+          # py3-none-any fallback); deps still resolve from PyPI.
+          wheel=$(python - <<'PY'
+          import sys
+          from pathlib import Path
+          # Use pip's vendored packaging so this needs no extra install on a
+          # clean setup-python runner (top-level `packaging` may be absent).
+          from pip._vendor.packaging.tags import sys_tags
+          supported = {(t.interpreter, t.abi, t.platform) for t in sys_tags()}
+          wheels = sorted(Path("dist").glob("tesseract_jax-*.whl"))
+          def compatible(name: str) -> bool:
+              # tag triple is the last 3 '-'-separated fields of the wheel name
+              interp, abi, plat = name[:-4].split("-")[-3:]
+              return any(
+                  (i, a, p) in supported
+                  for i in interp.split(".")
+                  for a in abi.split(".")
+                  for p in plat.split(".")
+              )
+          matches = [w for w in wheels if compatible(w.name)]
+          if not matches:
+              sys.exit(f"no compatible wheel in dist/ among {[w.name for w in wheels]}")
+          # Prefer the most specific (non-purelib) wheel when several match.
+          matches.sort(key=lambda w: w.name.endswith("-py3-none-any.whl"))
+          print(matches[0])
+          PY
+          )
+          echo "Installing built wheel: $wheel"
+          python -m pip install --find-links dist "$wheel"
 
       - name: Report which wheel was installed
         run: |
-          python -c "import tesseract_jax, tesseract_jax.gpu_ffi as g; \
-            print('tesseract_jax', tesseract_jax.__file__); \
-            print('native shim available:', g.is_available())"
+          python <<'PY'
+          import tesseract_jax
+          import tesseract_jax.gpu_ffi as g
+          print("tesseract_jax", tesseract_jax.__file__)
+          print("native shim available:", g.is_available())
+          PY
 
       - name: Verify the abi3 native wheel is used on Linux/CPython
         if: runner.os == 'Linux'
@@ -88,5 +120,9 @@ jobs:
           # On Linux the native manylinux abi3 wheel must win over the fallback,
           # so the shim must load. A silent fall-through to py3-none-any here
           # would mean the native wheel's tag or the abi3 build is wrong.
-          python -c "import tesseract_jax.gpu_ffi as g; assert g.is_available(), \
-            'expected the native abi3 wheel on Linux, but the shim is unavailable'"
+          python <<'PY'
+          import tesseract_jax.gpu_ffi as g
+          assert g.is_available(), (
+              "expected the native abi3 wheel on Linux, but the shim is unavailable"
+          )
+          PY
