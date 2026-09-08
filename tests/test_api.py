@@ -5,6 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import tesseract_core
+from packaging.version import Version
 
 from tesseract_jax import apply_tesseract
 
@@ -751,3 +753,58 @@ def test_pytree_tesseract_jvp_preserves_list_order(
 
     _, expected = jax.jvp(f_raw, (d1,), (tangent,))
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    "explicit,templates,expected",
+    [
+        (["params", "plain"], ["params.{}"], "params.{plain}"),
+        (["params", "a/b"], ["params.{}"], "params.{a/b}"),
+        (["params", "layer.0.weight"], ["params.{}"], "params.{layer.0.weight}"),
+        # Re-merging a path this function produced must not brace it twice,
+        # which batching relies on.
+        ("params.{layer.0.weight}", ["params.{}"], "params.{layer.0.weight}"),
+    ],
+)
+def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
+    """A dict key may contain dots, and the key is where the path ends.
+
+    Joining the segments first and splitting again cannot tell
+    {"a": {"b.c": v}} from {"a": {"b": {"c": v}}}, so a dotted key used to
+    miss its template and be reported as a non-differentiable input.
+    """
+    from tesseract_jax.tree_util import _merge_path
+
+    path, template = _merge_path(explicit, templates)
+    assert path == expected
+    assert template == templates[0]
+
+
+# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
+# which landed after 1.12.0. Drop this guard once the minimum version is past it.
+_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "plain",
+        pytest.param(
+            "layer.0.weight",
+            marks=pytest.mark.skipif(
+                not _CORE_ACCEPTS_WIDE_KEYS,
+                reason=(
+                    f"tesseract-core {tesseract_core.__version__} rejects the key "
+                    "(needs > 1.12.0)"
+                ),
+            ),
+        ),
+    ],
+)
+def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
+    """End to end: a state-dict key carries dots and still gets its gradient."""
+    inputs = {"params": {key: jnp.ones(3, dtype=jnp.float32)}}
+    grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
+        inputs
+    )
+    np.testing.assert_allclose(np.asarray(grads["params"][key]), np.full(3, 2.0))
