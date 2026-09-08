@@ -3,9 +3,10 @@
 
 """A gather Tesseract with integer array IO.
 
-Exercises both discarded-slot paths with a non-inexact dtype: ``indices`` is a
-non-differentiable integer *input* (hit by the vjp endpoint) and ``count`` is a
-non-differentiable integer *output* (hit by the jvp endpoint).
+Exercises both discarded-slot paths: ``indices`` is a non-differentiable
+integer *input* (hit by the vjp endpoint), and ``count`` / ``magnitude`` /
+``phase`` are non-differentiable *outputs* (hit by the jvp endpoint) covering
+the integer, floating and complex dtype classes respectively.
 """
 
 from typing import Any
@@ -19,6 +20,10 @@ from tesseract_core.runtime import (
     Int32,
     ShapeDType,
 )
+
+# Complex64 lives in schema_types but is not re-exported from
+# tesseract_core.runtime, unlike Float32/Int32.
+from tesseract_core.runtime.schema_types import Complex64
 
 
 class InputSchema(BaseModel):
@@ -37,6 +42,12 @@ class OutputSchema(BaseModel):
     count: Array[(None,), Int32] = Field(
         description="Times each index was gathered (non-differentiable, integer)."
     )
+    magnitude: Array[(None,), Float32] = Field(
+        description="abs(gathered) (non-differentiable, inexact)."
+    )
+    phase: Array[(None,), Complex64] = Field(
+        description="gathered as a complex phase (non-differentiable, complex)."
+    )
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
@@ -46,6 +57,8 @@ def apply(inputs: InputSchema) -> OutputSchema:
         count=np.bincount(inputs.indices, minlength=inputs.indices.shape[0])[
             : inputs.indices.shape[0]
         ].astype(np.int32),
+        magnitude=np.abs(inputs.weights[inputs.indices]).astype(np.float32),
+        phase=np.exp(1j * inputs.weights[inputs.indices]).astype(np.complex64),
     )
 
 
@@ -55,6 +68,8 @@ def abstract_eval(abstract_inputs):
     return {
         "gathered": ShapeDType(shape=shape, dtype="float32"),
         "count": ShapeDType(shape=shape, dtype="int32"),
+        "magnitude": ShapeDType(shape=shape, dtype="float32"),
+        "phase": ShapeDType(shape=shape, dtype="complex64"),
     }
 
 

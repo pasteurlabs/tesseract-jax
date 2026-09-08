@@ -791,3 +791,37 @@ def test_integer_array_io_is_warning_free(gather_tess):
     np.testing.assert_allclose(primals["gathered"], [1.0, 3.0, 3.0], rtol=1e-6)
     np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
     assert tangents["count"].dtype == jnp.int32
+
+
+def test_discarded_tangents_follow_zero_over_zero(gather_tess):
+    """A non-differentiable output's tangent is a discarded slot the caller can read.
+
+    ``jax.jvp`` hands these back directly, so their values are observable and
+    must follow the rule in ``_discarded_fill``: whatever ``0/0`` yields for the
+    dtype. In particular a complex slot is poisoned in *both* components -- with
+    a plain ``np.full(shape, np.nan, dtype=...)`` the imaginary part would be a
+    plausible-looking 0.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def apply_fn(weights):
+        return apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+
+    _, tangents = jax.jvp(apply_fn, (weights,), (np.ones_like(weights),))
+
+    # the differentiable output is unaffected
+    np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
+
+    # inexact dtypes get NaN in every component
+    assert np.isnan(np.asarray(tangents["magnitude"])).all()
+    phase = np.asarray(tangents["phase"])
+    assert phase.dtype == np.complex64
+    assert np.isnan(phase.real).all()
+    assert np.isnan(phase.imag).all(), "complex slots must be poisoned in imag too"
+
+    # dtypes with no NaN to spell get zero
+    assert np.asarray(tangents["count"]).dtype == np.int32
+    np.testing.assert_array_equal(tangents["count"], np.zeros(3, dtype="int32"))
