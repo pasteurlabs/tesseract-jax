@@ -793,7 +793,8 @@ def test_integer_array_io_is_warning_free(gather_tess):
     assert tangents["count"].dtype == jnp.int32
 
 
-def test_discarded_tangents_follow_zero_over_zero(gather_tess):
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_discarded_tangents_follow_zero_over_zero(gather_tess, use_jit):
     """A non-differentiable output's tangent is a discarded slot the caller can read.
 
     ``jax.jvp`` hands these back directly, so their values are observable and
@@ -810,7 +811,13 @@ def test_discarded_tangents_follow_zero_over_zero(gather_tess):
             gather_tess, inputs=dict(weights=weights, indices=indices)
         )
 
-    _, tangents = jax.jvp(apply_fn, (weights,), (np.ones_like(weights),))
+    def jvp_fn(w, dw):
+        return jax.jvp(apply_fn, (w,), (dw,))
+
+    if use_jit:
+        jvp_fn = jax.jit(jvp_fn)
+
+    _, tangents = jvp_fn(weights, np.ones_like(weights))
 
     # the differentiable output is unaffected
     np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
