@@ -58,6 +58,11 @@ jobs:
         env:
           # abi3: build once on 3.12; the wheel is tagged cp312-abi3 by the hook.
           CIBW_BUILD: "cp312-*"
+          # Skip musllinux: the shim's build-time dep jaxlib ships only manylinux
+          # wheels (no musllinux), so jaxlib cannot be installed in a musllinux
+          # build container. cibuildwheel v4 builds musllinux by default, so it
+          # must be excluded explicitly or that leg fails to resolve jaxlib.
+          CIBW_SKIP: "*-musllinux*"
           CIBW_ARCHS_LINUX: "x86_64"
           # A modern glibc floor (2.28); jaxlib's manylinux2014 wheels still
           # install here (older-or-equal glibc tag installs on a newer base).
