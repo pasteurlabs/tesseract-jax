@@ -1,19 +1,20 @@
 name: Test installation via pip
 
 on:
-  # Only run when something that can change what is built or installed
-  # changes -- the package source (incl. the shim .cc), the build hook, the
-  # packaging/dependency metadata, the source-install requirements, or this
-  # pipeline itself (incl. the reusable build workflow it calls). Docs,
-  # examples, tests, and other workflows cannot affect a wheel build or a pip
-  # install, so they do not trigger this heavy matrix. These jobs are not
-  # required status checks, so skipping them on unrelated PRs is safe.
+  # Only run when something packaging-specific changes -- an input that can
+  # break a wheel build or install *without* the test suite (run_tests.yml)
+  # already catching it. A pure-Python source change under tesseract_jax/ that
+  # broke packaging would also break the tests, so those are deliberately not
+  # listed; what remains is the native shim source (a C++ compile error is
+  # invisible to CPU pytest), the build hook (the test suite never runs it),
+  # the packaging metadata, and this pipeline itself (incl. the reusable build
+  # workflow it calls). These jobs are not required status checks, so skipping
+  # them on unrelated PRs is safe.
   pull_request:
     paths:
-      - "tesseract_jax/**"
+      - "tesseract_jax/_cuda_shim.cc"
       - "hatch_build.py"
       - "pyproject.toml"
-      - "requirements.txt"
       - ".github/workflows/test_pip_install.yml"
       - ".github/workflows/build_wheels.yml"
 
