@@ -59,9 +59,8 @@ def _compute_discarded_fill(dtype: np.dtype) -> np.ndarray:
     return fill
 
 
-# Materialised once, rather than cached per call: the domain is closed, so the
-# table can be complete and inspectable. Derived from the rule above so the two
-# cannot drift.
+# Materialised at import: the dtype domain is closed, so the table is complete
+# and inspectable. Derived from the rule above so the two cannot drift.
 _DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
     np.dtype(name): _compute_discarded_fill(np.dtype(name)) for name in _SCHEMA_DTYPES
 }

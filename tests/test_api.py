@@ -755,14 +755,14 @@ def test_pytree_tesseract_jvp_preserves_list_order(
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
 
 
-def test_integer_slots_do_not_warn(gather_tess):
-    """Integer discarded slots must not emit an invalid-cast warning.
+def test_gather_tesseract_integer_io(gather_tess):
+    """Differentiate a Tesseract whose schema carries integer arrays.
 
-    Filling a discarded slot with NaN cast to an integer dtype warns, and the
-    project's ``filterwarnings = ["error"]`` turns that into an opaque
-    ``CpuCallback`` failure from inside the host callback. Both slot kinds are
-    covered here: a non-differentiable integer input (vjp) and a
-    non-differentiable integer output (jvp). See issue #258.
+    ``indices`` is a non-differentiable integer input, so the vjp fills a
+    discarded slot for it; ``count`` is a non-differentiable integer output, so
+    the jvp fills one too. Filling either must stay warning-free, since
+    ``filterwarnings = ["error"]`` turns a warning raised inside the host
+    callback into an opaque ``CpuCallback`` failure. See issue #258.
     """
     weights = np.array([1.0, 2.0, 3.0], dtype="float32")
     indices = np.array([0, 2, 2], dtype="int32")
@@ -773,17 +773,15 @@ def test_integer_slots_do_not_warn(gather_tess):
         )
         return jnp.sum(out["gathered"])
 
-    # `indices` only reaches the vjp slot when it is *traced*, since
-    # is_static_mask keys off tracer-ness -- hence jit rather than eager grad.
+    # `indices` reaches the vjp slot only while traced, since is_static_mask
+    # keys off tracer-ness -- hence jit rather than eager grad.
     grad = jax.jit(jax.grad(loss, argnums=0))(weights, indices)
     np.testing.assert_allclose(grad, [1.0, 0.0, 2.0], rtol=1e-6)
 
-    # JAX supplies its own float0 cotangent for an integer input, whatever the
-    # discarded slot held.
+    # JAX supplies float0 as the cotangent of an integer input.
     _, vjp_fn = jax.vjp(loss, weights, indices)
     assert vjp_fn(jnp.float32(1.0))[1].dtype == jax.dtypes.float0
 
-    # The non-differentiable integer output `count` exercises the jvp slot.
     def apply_fn(weights):
         return apply_tesseract(
             gather_tess, inputs=dict(weights=weights, indices=indices)
@@ -792,18 +790,17 @@ def test_integer_slots_do_not_warn(gather_tess):
     primals, tangents = jax.jvp(apply_fn, (weights,), (np.ones_like(weights),))
     np.testing.assert_allclose(primals["gathered"], [1.0, 3.0, 3.0], rtol=1e-6)
     np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
-    assert tangents["count"].dtype == jnp.int32
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_discarded_tangent_fill_value(gather_tess, use_jit):
-    """A non-differentiable output's tangent is a discarded slot the caller can read.
+    """A non-differentiable output's tangent is a slot the caller can read.
 
-    ``jax.jvp`` hands these back directly, so their values are observable and
-    must follow the rule in ``_discarded_fill``: whatever ``0/0`` yields for the
-    dtype. In particular a complex slot is poisoned in *both* components -- with
-    a plain ``np.full(shape, np.nan, dtype=...)`` the imaginary part would be a
-    plausible-looking 0.
+    ``jax.jvp`` returns it directly, so its dtype and value are observable and
+    follow the rule in ``_compute_discarded_fill``: whatever ``0/0`` yields for
+    the dtype, which is NaN in every component for the inexact dtypes and zero
+    for those with no NaN to spell. ``gather_tess`` carries one such output per
+    dtype class.
     """
     weights = np.array([1.0, 2.0, 3.0], dtype="float32")
     indices = np.array([0, 2, 2], dtype="int32")
@@ -821,19 +818,21 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
 
     _, tangents = jvp_fn(weights, np.ones_like(weights))
 
-    # the differentiable output is unaffected
+    # the differentiable output keeps its real tangent
     np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
 
-    # inexact dtypes get NaN in every component
-    assert np.isnan(np.asarray(tangents["magnitude"])).all()
+    magnitude = np.asarray(tangents["magnitude"])
+    assert magnitude.dtype == np.float32
+    assert np.isnan(magnitude).all()
+
     phase = np.asarray(tangents["phase"])
     assert phase.dtype == np.complex64
     assert np.isnan(phase.real).all()
-    assert np.isnan(phase.imag).all(), "complex slots must be poisoned in imag too"
+    assert np.isnan(phase.imag).all(), "complex slots are poisoned in imag too"
 
-    # dtypes with no NaN to spell get zero
-    assert np.asarray(tangents["count"]).dtype == np.int32
-    np.testing.assert_array_equal(tangents["count"], np.zeros(3, dtype="int32"))
+    count = np.asarray(tangents["count"])
+    assert count.dtype == np.int32
+    np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
 
 
 @pytest.mark.parametrize(
