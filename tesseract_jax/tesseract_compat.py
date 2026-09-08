@@ -70,15 +70,19 @@ _DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
 def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
     """A discarded slot in a derivative call's output tuple."""
     dtype = np.dtype(dtype)
-    fill = _DISCARDED_FILL.get(dtype)
-    if fill is None:
-        # A dtype outside the schema set should not reach here, but computing
-        # it beats a KeyError raised inside a host callback, which XLA reports
-        # only as "INTERNAL: CpuCallback error calling callback". Note this
-        # yields zero, not NaN, for an inexact dtype numpy does not recognise
-        # as one (ml_dtypes.bfloat16 among them) -- valid for every dtype,
-        # just weaker poison than the table gives.
-        fill = _compute_discarded_fill(dtype)
+    try:
+        fill = _DISCARDED_FILL[dtype]
+    except KeyError:
+        # Not reachable through a Tesseract schema today. Raise deliberately
+        # rather than let the bare KeyError out: this runs inside a host
+        # callback, so whatever escapes reaches the user wrapped in an opaque
+        # "INTERNAL: CpuCallback error calling callback".
+        raise NotImplementedError(
+            f"No discarded-slot fill defined for dtype {dtype}. Expected one "
+            f"of: {', '.join(sorted(map(str, _DISCARDED_FILL)))}. This dtype "
+            f"should not be reachable through a Tesseract schema, so please "
+            f"report it."
+        ) from None
     return np.full(shape, fill, dtype=dtype)
 
 

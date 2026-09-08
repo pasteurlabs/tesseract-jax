@@ -755,7 +755,7 @@ def test_pytree_tesseract_jvp_preserves_list_order(
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
 
 
-def test_integer_array_io_is_warning_free(gather_tess):
+def test_integer_slots_do_not_warn(gather_tess):
     """Integer discarded slots must not emit an invalid-cast warning.
 
     Filling a discarded slot with NaN cast to an integer dtype warns, and the
@@ -796,7 +796,7 @@ def test_integer_array_io_is_warning_free(gather_tess):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_discarded_tangents_follow_zero_over_zero(gather_tess, use_jit):
+def test_discarded_tangent_fill_value(gather_tess, use_jit):
     """A non-differentiable output's tangent is a discarded slot the caller can read.
 
     ``jax.jvp`` hands these back directly, so their values are observable and
@@ -902,6 +902,7 @@ def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     from tesseract_jax.tesseract_compat import _DISCARDED_FILL
 
     def _dtype_enums(node):
+        """Walk an OpenAPI schema and yield every value of every dtype enum."""
         if isinstance(node, dict):
             if isinstance(node.get("enum"), list) and node.get("title") == "Dtype":
                 yield from node["enum"]
