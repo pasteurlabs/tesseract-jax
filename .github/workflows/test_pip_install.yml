@@ -1,8 +1,21 @@
 name: Test installation via pip
 
 on:
-  # run on PRs for validation
+  # Only run when something that can change what is built or installed
+  # changes -- the package source (incl. the shim .cc), the build hook, the
+  # packaging/dependency metadata, the source-install requirements, or this
+  # pipeline itself (incl. the reusable build workflow it calls). Docs,
+  # examples, tests, and other workflows cannot affect a wheel build or a pip
+  # install, so they do not trigger this heavy matrix. These jobs are not
+  # required status checks, so skipping them on unrelated PRs is safe.
   pull_request:
+    paths:
+      - "tesseract_jax/**"
+      - "hatch_build.py"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/test_pip_install.yml"
+      - ".github/workflows/build_wheels.yml"
 
 jobs:
   # Install from source (compiles the shim locally where supported, or degrades
