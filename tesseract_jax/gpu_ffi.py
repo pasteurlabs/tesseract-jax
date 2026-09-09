@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
+from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import numpy as np
+from packaging.version import Version
 
 FFI_TARGET_NAME = "tesseract_jax_dispatch"
 
@@ -95,10 +97,6 @@ def _cudart_candidates() -> list[str]:
     tesseract-core predates the discovery helper
     (``< _CUDART_LOADER_MIN_CORE``); see the retirement note there.
     """
-    from importlib.metadata import version as _pkg_version
-
-    from packaging.version import Version
-
     if Version(_pkg_version("tesseract-core")) >= Version(_CUDART_LOADER_MIN_CORE):
         from tesseract_core.runtime.cuda.loader import iter_cudart_candidates
 

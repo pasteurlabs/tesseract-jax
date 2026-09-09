@@ -98,3 +98,64 @@ def test_cudart_candidates_non_empty() -> None:
     shim's hard-error condition.
     """
     assert gpu_ffi._cudart_candidates()
+
+
+def test_cudart_candidates_uses_core_discovery_above_floor(monkeypatch):
+    """At/above the version floor, delegate to tesseract-core's shared discovery.
+
+    The shim must resolve the same libcudart the codec does; above the floor
+    that means calling ``iter_cudart_candidates`` rather than the bare-soname
+    fallback.
+    """
+    monkeypatch.setattr(
+        gpu_ffi, "_pkg_version", lambda _name: gpu_ffi._CUDART_LOADER_MIN_CORE
+    )
+    sentinel = ["/wheel/libcudart.so.13", "libcudart.so"]
+
+    from tesseract_core.runtime.cuda import loader
+
+    monkeypatch.setattr(loader, "iter_cudart_candidates", lambda: iter(sentinel))
+
+    assert gpu_ffi._cudart_candidates() == sentinel
+
+
+def test_cudart_candidates_falls_back_below_floor(monkeypatch):
+    """Below the version floor, use the bare-soname fallback.
+
+    Older tesseract-core lacks ``iter_cudart_candidates``; the helper must not
+    import it and must return the static fallback instead.
+    """
+    monkeypatch.setattr(gpu_ffi, "_pkg_version", lambda _name: "1.12.0")
+
+    assert gpu_ffi._cudart_candidates() == list(gpu_ffi._CUDART_SONAME_FALLBACK)
+
+
+class _StubClient:
+    """Minimal stand-in for a Jaxeract: the GPU lowering only reads _cuda_ipc."""
+
+    _cuda_ipc = True
+
+
+def test_gpu_lowering_raises_when_cuda_ipc_but_shim_unavailable(monkeypatch):
+    """cuda_ipc=True with an unavailable shim is a hard error, not a fallback.
+
+    An explicit cuda_ipc opt-in must not silently degrade to the slow host path;
+    the lowering raises before touching ctx/array_args.
+    """
+    from types import SimpleNamespace
+
+    import typeguard
+
+    from tesseract_jax import primitive
+
+    monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
+    # The guard only reads params.client._cuda_ipc before raising, so a stub
+    # suffices; suppress typeguard's runtime check of the DispatchParams
+    # annotation (armed for the whole package via --typeguard-packages).
+    params = SimpleNamespace(client=_StubClient())
+
+    with (
+        typeguard.suppress_type_checks(),
+        pytest.raises(RuntimeError, match="cuda_ipc=True was requested"),
+    ):
+        primitive.tesseract_dispatch_gpu_lowering(object(), params=params)

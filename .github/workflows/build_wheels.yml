@@ -85,12 +85,19 @@ jobs:
           # must be excluded explicitly or that leg fails to resolve jaxlib.
           CIBW_SKIP: "*-musllinux*"
           CIBW_ARCHS_LINUX: ${{ matrix.arch }}
-          # Match jaxlib's glibc floor (manylinux2014 == glibc 2.17): a stricter
-          # floor would leave users who can run jax[cuda] on the pure fallback.
-          # These images ship a C++17-capable toolchain, which is all the shim
-          # needs. Applies to both x86_64 and aarch64.
-          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux2014"
-          CIBW_MANYLINUX_AARCH64_IMAGE: "manylinux2014"
+          # glibc 2.28 floor. jaxlib itself still ships manylinux2014 (glibc
+          # 2.17), but its transitive deps (numpy, scipy) have dropped 2014
+          # wheels -- on a 2014 image pip falls back to their sdists, which need
+          # a newer toolchain than 2014 ships and fail the build. The shim is
+          # compiled in an isolated env that installs jaxlib for its XLA FFI
+          # headers, so that env must resolve those deps as wheels; 2_28 is the
+          # lowest floor where numpy/scipy/ml_dtypes all still do. Those deps are
+          # build-only (not shipped in our wheel), but the wheel is tagged
+          # manylinux_2_28, so it needs glibc >= 2.28 at install time (RHEL/Alma
+          # 8+, Ubuntu 18.10+, Debian 10+). These images ship a C++17-capable
+          # toolchain, all the shim needs. Applies to both x86_64 and aarch64.
+          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+          CIBW_MANYLINUX_AARCH64_IMAGE: "manylinux_2_28"
           # Make a shim build failure fatal, and hand the host-derived version to
           # the git-less container so hatch-vcs does not fall back.
           CIBW_ENVIRONMENT: >-
