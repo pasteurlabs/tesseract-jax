@@ -3148,6 +3148,7 @@ name = "tesseract-jax"
 source = { editable = "." }
 dependencies = [
     { name = "jax" },
+    { name = "packaging" },
     { name = "tesseract-core" },
 ]
 
@@ -3189,6 +3190,7 @@ requires-dist = [
     { name = "jax", specifier = ">=0.7.0" },
     { name = "myst-nb", marker = "extra == 'dev'" },
     { name = "myst-nb", marker = "extra == 'docs'" },
+    { name = "packaging" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "pytest-benchmark", marker = "extra == 'dev'" },

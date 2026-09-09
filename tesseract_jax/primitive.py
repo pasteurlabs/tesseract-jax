@@ -442,17 +442,30 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering if the caller did not opt into
-    ``cuda_ipc`` (``client._cuda_ipc``) or the native shim is unavailable (e.g.
-    a CPU-only install), so correctness never depends on the GPU path -- GPU
-    arrays are copied to host and back exactly as on CPU.
+    Falls back to the host-callback lowering when the caller did not opt into
+    ``cuda_ipc`` (``client._cuda_ipc``), so a non-cuda_ipc call behaves exactly
+    as on CPU. When the caller *did* opt in but the native shim is unavailable
+    (e.g. a CPU-only install where it wasn't compiled) this raises rather than
+    silently falling back: ``cuda_ipc=True`` is an explicit request for the
+    GPU-direct path, so honouring it as a slow host round-trip with no signal
+    would hide the very thing the caller asked for.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
 
-    if not client._cuda_ipc or not gpu_ffi.is_available():
+    if not client._cuda_ipc:
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
+
+    if not gpu_ffi.is_available():
+        raise RuntimeError(
+            "cuda_ipc=True was requested but the native GPU FFI shim is "
+            "unavailable (not compiled or failed to import), so GPU-direct "
+            "dispatch cannot run. Reinstall tesseract-jax with the shim built "
+            "(a source install compiles it via the hatch build hook; set "
+            "TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure fatal), or "
+            "drop cuda_ipc=True to use the host-callback transport."
+        )
 
     _raise_if_unimplemented(params.eval_func, client)
 

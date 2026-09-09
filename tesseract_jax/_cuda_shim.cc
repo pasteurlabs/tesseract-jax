@@ -94,14 +94,34 @@ struct CudaRuntime {
   cudaError_t (*GetLastError)() = nullptr;
 };
 
+// libcudart names/paths to dlopen, most-preferred first. Set from Python (see
+// set_cudart_candidates) before the first dispatch, so the shim resolves the
+// *same* runtime tesseract-core's cuda_ipc codec does (wheel dirs first). The
+// list is the single source of truth for discovery: there is deliberately no
+// hardcoded soname fallback here, because the C++ handler is only ever reached
+// through gpu_ffi.ensure_registered(), which primes this list on the same line
+// it registers the FFI target. A guessed fallback would risk loading a
+// *different* libcudart than the codec -- the exact mismatch this indirection
+// exists to prevent -- so an unprimed list is a hard error instead.
+std::vector<std::string>& cudart_candidates() {
+  // Leaked on purpose (see dispatch_callable): a function-local static would run
+  // its destructor during C++ static teardown, after the interpreter is gone.
+  static auto* names = new std::vector<std::string>();
+  return *names;
+}
+
 CudaRuntime& cuda_rt() {
   static CudaRuntime rt;
   static std::once_flag once;
   std::call_once(once, [] {
-    const char* names[] = {"libcudart.so",    "libcudart.so.13",
-                           "libcudart.so.12", "libcudart.so.11"};
-    for (const char* n : names) {
-      rt.handle = dlopen(n, RTLD_NOW | RTLD_GLOBAL);
+    const auto& primed = cudart_candidates();
+    if (primed.empty()) {
+      throw std::runtime_error(
+          "tesseract_jax: libcudart candidates not set; the FFI shim must be "
+          "primed via gpu_ffi.ensure_registered() before dispatch");
+    }
+    for (const std::string& n : primed) {
+      rt.handle = dlopen(n.c_str(), RTLD_NOW | RTLD_GLOBAL);
       if (rt.handle) break;
     }
     if (!rt.handle) {
@@ -473,6 +493,14 @@ NB_MODULE(_cuda_shim, m) {
 
   m.def("set_dispatch_callback", [](nb::object cb) {
     dispatch_callable() = std::move(cb);
+  });
+
+  // Prime the libcudart search list (see cudart_candidates). Must be called
+  // before the first dispatch: cuda_rt() reads it once, under std::call_once, on
+  // the first dlopen and ignores later changes. gpu_ffi.ensure_registered()
+  // calls this ahead of registering the FFI target.
+  m.def("set_cudart_candidates", [](std::vector<std::string> names) {
+    cudart_candidates() = std::move(names);
   });
 
   // Expose the handler as a PyCapsule for jax.ffi.register_ffi_target.

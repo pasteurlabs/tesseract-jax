@@ -37,6 +37,28 @@ import numpy as np
 
 FFI_TARGET_NAME = "tesseract_jax_dispatch"
 
+# The shared libcudart discovery surface
+# (``tesseract_core.runtime.cuda.loader.iter_cudart_candidates``) landed after
+# tesseract-core 1.12.0. Until the lock is bumped to a release that ships it,
+# fall back to a bare-soname list here.
+#
+# RETIRE THIS FALLBACK when the tesseract-core floor in ``pyproject.toml`` is
+# ``>= _CUDART_LOADER_MIN_CORE``: at that point ``iter_cudart_candidates`` is
+# guaranteed present, so the version gate and ``_CUDART_SONAME_FALLBACK`` below
+# can be deleted and ``_cudart_candidates`` reduced to a direct import + call.
+# The same floor gates the CI ``LD_LIBRARY_PATH`` workaround in run_tests.yml.
+_CUDART_LOADER_MIN_CORE = "1.13.0"  # projected first release after 1.12.0
+
+# Bare-soname fallback, newest-major-first. Only used against a tesseract-core
+# older than ``_CUDART_LOADER_MIN_CORE``; the loader helper's list is richer
+# (wheel dirs first, matching how JAX/CuPy resolve libcudart).
+_CUDART_SONAME_FALLBACK = (
+    "libcudart.so",
+    "libcudart.so.13",
+    "libcudart.so.12",
+    "libcudart.so.11",
+)
+
 _registered = False
 _register_lock = threading.Lock()
 
@@ -63,6 +85,28 @@ def _native():
     return _cuda_shim
 
 
+def _cudart_candidates() -> list[str]:
+    """Libcudart names/paths for the shim to dlopen, most-preferred first.
+
+    Delegates to tesseract-core's shared discovery so the shim resolves the
+    *same* libcudart the cuda_ipc codec does (wheel dirs first, matching JAX and
+    CuPy) -- which matters because the shim hands device memory to those
+    frameworks. Falls back to a bare-soname list when the installed
+    tesseract-core predates the discovery helper
+    (``< _CUDART_LOADER_MIN_CORE``); see the retirement note there.
+    """
+    from importlib.metadata import version as _pkg_version
+
+    from packaging.version import Version
+
+    if Version(_pkg_version("tesseract-core")) >= Version(_CUDART_LOADER_MIN_CORE):
+        from tesseract_core.runtime.cuda.loader import iter_cudart_candidates
+
+        return list(iter_cudart_candidates())
+
+    return list(_CUDART_SONAME_FALLBACK)
+
+
 def ensure_registered() -> str:
     """Register the FFI target and native callback with XLA (idempotent)."""
     global _registered, _callback_installed
@@ -74,6 +118,9 @@ def ensure_registered() -> str:
         native = _native()
         if not _callback_installed:
             native.set_dispatch_callback(_native_dispatch)
+            # Prime libcudart discovery before the first dispatch triggers the
+            # shim's one-shot dlopen (see set_cudart_candidates in the shim).
+            native.set_cudart_candidates(_cudart_candidates())
             _callback_installed = True
         jax.ffi.register_ffi_target(
             FFI_TARGET_NAME, native.handler_capsule(), platform="CUDA"

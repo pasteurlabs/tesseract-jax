@@ -9,6 +9,7 @@ requires-python = ">=3.12,<4"
 # TODO: add your dependencies here *and* in requirements.txt
 dependencies = [
     "jax>=0.7.0",
+    "packaging",
     "tesseract-core",
 ]
 dynamic = ["version"]
