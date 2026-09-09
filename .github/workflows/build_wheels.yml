@@ -29,11 +29,23 @@ on:
         value: "dist-*"
 
 jobs:
-  # One native wheel, built on CPython 3.12 and valid for all CPython >= 3.12
-  # thanks to the abi3 shim. cibuildwheel runs auditwheel to retag it manylinux.
+  # One native wheel per Linux architecture, built on CPython 3.12 and valid for
+  # all CPython >= 3.12 thanks to the abi3 shim. cibuildwheel runs auditwheel to
+  # retag each manylinux. x86_64 and aarch64 each build natively on their own
+  # runner (no QEMU): aarch64 is where much of the GPU-direct audience lives
+  # (GH200/GB200 are arm64, as are Graviton instances), and without a native
+  # wheel there those users silently get the pure fallback and lose the feature.
   build-native:
-    name: "manylinux abi3 wheel"
-    runs-on: ubuntu-latest
+    name: "manylinux abi3 wheel (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -49,8 +61,17 @@ jobs:
       # Derive the version on the host (git works reliably here) and pass it into
       # cibuildwheel's isolated build container, where git is brittle (ownership /
       # missing tags). Strips nothing: for a tagged release this is the clean tag.
+      # Guard against hatch-vcs's 0.0.0 fallback (e.g. tags never fetched)
+      # silently propagating a bogus version straight to PyPI.
       - name: Derive package version
-        run: echo "SETUPTOOLS_SCM_PRETEND_VERSION=$(uvx hatch version)" >> "$GITHUB_ENV"
+        run: |
+          version="$(uvx hatch version)"
+          if [ -z "$version" ] || [ "${version#0.0.0}" != "$version" ]; then
+            echo "::error::Refusing to build: derived version '$version' looks" \
+              "like the hatch-vcs 0.0.0 fallback (missing git tags?)." >&2
+            exit 1
+          fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$version" >> "$GITHUB_ENV"
 
       - name: Build native wheel
         # cibuildwheel publishes no floating major tag; pin a full version.
@@ -63,10 +84,13 @@ jobs:
           # build container. cibuildwheel v4 builds musllinux by default, so it
           # must be excluded explicitly or that leg fails to resolve jaxlib.
           CIBW_SKIP: "*-musllinux*"
-          CIBW_ARCHS_LINUX: "x86_64"
-          # A modern glibc floor (2.28); jaxlib's manylinux2014 wheels still
-          # install here (older-or-equal glibc tag installs on a newer base).
-          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+          # Match jaxlib's glibc floor (manylinux2014 == glibc 2.17): a stricter
+          # floor would leave users who can run jax[cuda] on the pure fallback.
+          # These images ship a C++17-capable toolchain, which is all the shim
+          # needs. Applies to both x86_64 and aarch64.
+          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux2014"
+          CIBW_MANYLINUX_AARCH64_IMAGE: "manylinux2014"
           # Make a shim build failure fatal, and hand the host-derived version to
           # the git-less container so hatch-vcs does not fall back.
           CIBW_ENVIRONMENT: >-
@@ -81,7 +105,7 @@ jobs:
       - name: Upload native wheel
         uses: actions/upload-artifact@v7
         with:
-          name: dist-native
+          name: dist-native-${{ matrix.arch }}
           path: dist/*.whl
           if-no-files-found: error
 
