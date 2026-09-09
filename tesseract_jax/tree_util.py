@@ -39,8 +39,9 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 def unflatten_args(
     # ``array_args`` is transport-dependent: real arrays / avals on the CPU
     # host-callback path, or bare ``__cuda_array_interface__`` device views on
-    # the GPU FFI path. ``Any`` admits both so a runtime type-check does not
-    # reject the duck-typed GPU views.
+    # the GPU FFI path. ``None`` marks an argument with no tangent -- the JVP
+    # rule passes such a sentinel per non-differentiated input. ``Any`` admits
+    # all three so a runtime type-check does not reject the duck-typed GPU views.
     array_args: tuple[Any, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,

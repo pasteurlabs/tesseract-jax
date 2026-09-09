@@ -72,15 +72,78 @@ def _placeholder(
     any user-requested derivative, so its *value* is immaterial (verified:
     substituting any value leaves every user-visible gradient unchanged).
 
-    On the cuda_ipc path we return ``None``: the native FFI handler NaN-fills
-    XLA's (already-allocated) output buffer for that slot rather than copying from
-    a fabricated source array. On the host path we return an all-NaN array
-    directly. Either way the discarded slot is NaN, so an accidental consumer
-    surfaces loudly rather than silently -- the same poison on both transports.
+    On the cuda_ipc path we return ``None``: the native FFI handler fills XLA's
+    (already-allocated) output buffer for that slot rather than copying from a
+    fabricated source array. On the host path we return an array filled with each
+    dtype's ``0/0`` value (see :func:`_discarded_slot`). Either way an accidental
+    consumer surfaces loudly rather than silently.
     """
     if on_device:
         return None
-    return np.full(shape, np.nan, dtype=dtype)
+    return _discarded_slot(shape, dtype)
+
+
+# Every dtype a Tesseract schema can carry; see the `dtype` enum in the
+# generated OpenAPI schema (tesseract_core.runtime.schema_types).
+_SCHEMA_DTYPES = (
+    "bool",
+    "complex64",
+    "complex128",
+    "float16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+)
+
+
+def _compute_discarded_fill(dtype: np.dtype) -> np.ndarray:
+    """The value a discarded derivative slot is filled with, for one dtype.
+
+    Whatever ``0/0`` yields there: NaN in every component for the inexact
+    dtypes (so a complex slot is poisoned in its imaginary part too), and zero
+    for those with no invalid value to spell.
+    """
+    zero = np.zeros((), dtype)
+    with np.errstate(invalid="ignore"):
+        fill = zero / zero if np.issubdtype(dtype, np.inexact) else zero
+    # 0-d array, not the scalar that `/` returns, and read-only because it is
+    # shared between calls.
+    fill = np.asarray(fill, dtype=dtype)
+    fill.flags.writeable = False
+    return fill
+
+
+# Materialised at import: the dtype domain is closed, so the table is complete
+# and inspectable. Derived from the rule above so the two cannot drift.
+_DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
+    np.dtype(name): _compute_discarded_fill(np.dtype(name)) for name in _SCHEMA_DTYPES
+}
+
+
+def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
+    """A discarded slot in a derivative call's output tuple."""
+    dtype = np.dtype(dtype)
+    try:
+        fill = _DISCARDED_FILL[dtype]
+    except KeyError:
+        # Not reachable through a Tesseract schema today. Raise deliberately
+        # rather than let the bare KeyError out: this runs inside a host
+        # callback, so whatever escapes reaches the user wrapped in an opaque
+        # "INTERNAL: CpuCallback error calling callback".
+        raise NotImplementedError(
+            f"No discarded-slot fill defined for dtype {dtype}. Expected one "
+            f"of: {', '.join(sorted(map(str, _DISCARDED_FILL)))}. This dtype "
+            f"should not be reachable through a Tesseract schema, so please "
+            f"report it."
+        ) from None
+    return np.full(shape, fill, dtype=dtype)
 
 
 class Jaxeract:
