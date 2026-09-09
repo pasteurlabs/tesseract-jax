@@ -15,7 +15,10 @@ guard it on the CPU test runner rather than only implicitly on GPU CI.
 
 from __future__ import annotations
 
+from importlib.metadata import version as _pkg_version
+
 import pytest
+from packaging.version import Version
 
 from tesseract_jax import gpu_ffi
 
@@ -100,6 +103,10 @@ def test_cudart_candidates_non_empty() -> None:
     assert gpu_ffi._cudart_candidates()
 
 
+@pytest.mark.skipif(
+    Version(_pkg_version("tesseract-core")) < Version(gpu_ffi._CUDART_LOADER_MIN_CORE),
+    reason="tesseract-core predates the iter_cudart_candidates loader",
+)
 def test_cudart_candidates_uses_core_discovery_above_floor(monkeypatch):
     """At/above the version floor, delegate to tesseract-core's shared discovery.
 
