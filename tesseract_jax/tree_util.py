@@ -1,13 +1,42 @@
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import jax.tree
-from jax.core import ShapedArray
+import numpy as np
 from jax.tree_util import PyTreeDef
-from jax.typing import ArrayLike
 
 T = TypeVar("T")
 type PyTree = Any
+
+
+@runtime_checkable
+class TransportArray(Protocol):
+    """Structural type for an array crossing the dispatch boundary.
+
+    The endpoint methods are transport-agnostic: the CPU host-callback lowering
+    passes real NumPy arrays, while the GPU FFI lowering passes bare
+    ``__cuda_array_interface__`` device views (see
+    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
+    ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
+    ``dtype``, so this protocol captures exactly that surface -- narrow enough
+    that the duck-typed GPU views satisfy it without importing a CUDA array
+    library. ``runtime_checkable`` so typeguard admits both transports at the FFI
+    boundary rather than rejecting the GPU views.
+
+    A discarded derivative slot can be ``None`` on the cuda_ipc path (see
+    :func:`tesseract_jax.tesseract_compat._placeholder`); annotate those sites
+    ``TransportArray | None``.
+    """
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Array shape."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Array dtype."""
+        ...
 
 
 def split_args[T](
@@ -39,9 +68,12 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    # ``None`` marks an argument with no tangent: the JVP rule passes such a
-    # sentinel per non-differentiated input when checking the input schema.
-    array_args: tuple[ArrayLike | ShapedArray | None, ...],
+    # ``array_args`` is transport-dependent: real arrays / avals on the CPU
+    # host-callback path, or bare ``__cuda_array_interface__`` device views on
+    # the GPU FFI path. ``None`` marks an argument with no tangent -- the JVP
+    # rule passes such a sentinel per non-differentiated input. ``Any`` admits
+    # all three so a runtime type-check does not reject the duck-typed GPU views.
+    array_args: tuple[Any, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
     is_static_mask: tuple[bool, ...],
