@@ -3,29 +3,25 @@
 
 import contextlib
 from collections.abc import Generator
-from typing import Any, Literal
+from typing import TYPE_CHECKING
 
 import jax.tree
 import numpy as np
-from jax import ShapeDtypeStruct
-from jax.tree_util import PyTreeDef
 from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import (
     PyTree,
+    TransportArray,
     _pytree_to_tesseract_flat,
     combine_args,
     unflatten_args,
 )
 
+if TYPE_CHECKING:
+    from tesseract_jax.dispatch_params import DispatchParams
+
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
-
-# The endpoint methods are transport-agnostic: the CPU host-callback lowering
-# passes real arrays (``ArrayLike``), while the GPU FFI lowering passes bare
-# ``__cuda_array_interface__`` device views. ``Any`` admits both so a runtime
-# type-check does not reject the duck-typed GPU views.
-TransportArray = Any
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -48,12 +44,17 @@ def _on_device(values: "list | tuple") -> bool:
 def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype`` without leaving the device.
 
+    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
+
     On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer -- it is already the
-    right dtype (the server computed it), so it is returned untouched. Wrapping
-    it in ``np.asarray`` here would force a device->host copy and then hand a
-    host pointer back across the FFI boundary. On the host path ``value`` is a
-    NumPy array and we cast as before.
+    FFI handler copies straight into XLA's output buffer, so we cannot cast it
+    here (that would force a device->host round-trip) and return it untouched.
+    This is *not* a guarantee that the device array already has ``dtype``:
+    tesseract-core is deliberately not prescriptive about a jacobian endpoint's
+    output dtype, so a Tesseract may return e.g. float64 where float32 was
+    declared. The native shim closes that gap -- it compares each returned
+    array's dtype and shape against the XLA output buffer and raises on a
+    mismatch rather than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
     if _on_device([value]):
         return value
@@ -62,7 +63,7 @@ def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
 
 def _placeholder(
     shape: tuple[int, ...], dtype: np.dtype, *, on_device: bool
-) -> TransportArray:
+) -> TransportArray | None:
     """A discarded slot in a derivative call's output tuple.
 
     Used for the gradient of a non-differentiable input and the tangent of a
@@ -71,15 +72,78 @@ def _placeholder(
     any user-requested derivative, so its *value* is immaterial (verified:
     substituting any value leaves every user-visible gradient unchanged).
 
-    On the cuda_ipc path we return ``None``: the native FFI handler NaN-fills
-    XLA's (already-allocated) output buffer for that slot rather than copying from
-    a fabricated source array. On the host path we return an all-NaN array
-    directly. Either way the discarded slot is NaN, so an accidental consumer
-    surfaces loudly rather than silently -- the same poison on both transports.
+    On the cuda_ipc path we return ``None``: the native FFI handler fills XLA's
+    (already-allocated) output buffer for that slot rather than copying from a
+    fabricated source array. On the host path we return an array filled with each
+    dtype's ``0/0`` value (see :func:`_discarded_slot`). Either way an accidental
+    consumer surfaces loudly rather than silently.
     """
     if on_device:
         return None
-    return np.full(shape, np.nan, dtype=dtype)
+    return _discarded_slot(shape, dtype)
+
+
+# Every dtype a Tesseract schema can carry; see the `dtype` enum in the
+# generated OpenAPI schema (tesseract_core.runtime.schema_types).
+_SCHEMA_DTYPES = (
+    "bool",
+    "complex64",
+    "complex128",
+    "float16",
+    "float32",
+    "float64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+)
+
+
+def _compute_discarded_fill(dtype: np.dtype) -> np.ndarray:
+    """The value a discarded derivative slot is filled with, for one dtype.
+
+    Whatever ``0/0`` yields there: NaN in every component for the inexact
+    dtypes (so a complex slot is poisoned in its imaginary part too), and zero
+    for those with no invalid value to spell.
+    """
+    zero = np.zeros((), dtype)
+    with np.errstate(invalid="ignore"):
+        fill = zero / zero if np.issubdtype(dtype, np.inexact) else zero
+    # 0-d array, not the scalar that `/` returns, and read-only because it is
+    # shared between calls.
+    fill = np.asarray(fill, dtype=dtype)
+    fill.flags.writeable = False
+    return fill
+
+
+# Materialised at import: the dtype domain is closed, so the table is complete
+# and inspectable. Derived from the rule above so the two cannot drift.
+_DISCARDED_FILL: dict[np.dtype, np.ndarray] = {
+    np.dtype(name): _compute_discarded_fill(np.dtype(name)) for name in _SCHEMA_DTYPES
+}
+
+
+def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
+    """A discarded slot in a derivative call's output tuple."""
+    dtype = np.dtype(dtype)
+    try:
+        fill = _DISCARDED_FILL[dtype]
+    except KeyError:
+        # Not reachable through a Tesseract schema today. Raise deliberately
+        # rather than let the bare KeyError out: this runs inside a host
+        # callback, so whatever escapes reaches the user wrapped in an opaque
+        # "INTERNAL: CpuCallback error calling callback".
+        raise NotImplementedError(
+            f"No discarded-slot fill defined for dtype {dtype}. Expected one "
+            f"of: {', '.join(sorted(map(str, _DISCARDED_FILL)))}. This dtype "
+            f"should not be reachable through a Tesseract schema, so please "
+            f"report it."
+        ) from None
+    return np.full(shape, fill, dtype=dtype)
 
 
 # Device transports the GPU (FFI) lowering supports end-to-end. cuda_ipc is the
@@ -265,21 +329,19 @@ class Jaxeract:
     def apply(
         self,
         array_args: tuple[TransportArray, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef | None,
-        output_avals: tuple[ShapeDtypeStruct, ...] | None,
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         inputs = unflatten_args(
-            array_args, static_args, input_pytreedef, is_static_mask
+            array_args,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
         )
 
         out_data = self.client.apply(inputs)
 
-        if output_avals is None:
+        if params.output_avals is None:
             return out_data
 
         out_data = tuple(jax.tree.flatten(out_data)[0])
@@ -288,15 +350,11 @@ class Jaxeract:
     def jacobian_vector_product(
         self,
         array_args: tuple[TransportArray, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jvp endpoint with the given arguments."""
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        has_tangent = params.has_tangent
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
         # array_args[n_primals:] contains ALL tangents (zeroed for has_tangent=False).
         # Filter to only the has_tangent=True ones before calling combine_args, which
@@ -310,13 +368,13 @@ class Jaxeract:
         full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
         tangent_inputs = unflatten_args(
             full_tangents,
-            static_args,
-            input_pytreedef,
-            is_static_mask,
+            params.static_args,
+            params.input_pytreedef,
+            params.is_static_mask,
             remove_static_args=True,
         )
 
@@ -326,7 +384,9 @@ class Jaxeract:
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            jax.tree.unflatten(
+                params.output_pytreedef, range(len(params.output_avals))
+            ),
             schema_paths=self.differentiable_output_paths,
         )
 
@@ -341,7 +401,7 @@ class Jaxeract:
 
         on_device = _on_device(array_args)
         out = []
-        for path, aval in zip(output_flat, output_avals, strict=False):
+        for path, aval in zip(output_flat, params.output_avals, strict=False):
             if path in out_data:
                 out.append(out_data[path])
             else:
@@ -352,47 +412,41 @@ class Jaxeract:
     def jacobian(
         self,
         array_args: tuple[TransportArray, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
-        jac_input_paths: tuple[str, ...] | None = None,
-        jac_output_paths: tuple[str, ...] | None = None,
-        jac_mode: Literal["fwd", "bwd"] = "bwd",
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jacobian endpoint with the given arguments.
 
         Returns one ndarray per (requested_output, requested_input) pair, in
         row-major order. Each array has shape ``out_shape + in_shape`` and
-        dtype determined by ``jac_mode`` (``"bwd"`` matches ``jax.jacrev``
+        dtype determined by ``params.jac_mode`` (``"bwd"`` matches ``jax.jacrev``
         and uses input dtype; ``"fwd"`` matches ``jax.jacfwd`` and uses
         output dtype). Mirrors lineax's mode names.
         """
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if jac_input_paths is None:
+        if params.jac_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(jac_input_paths)
+            jac_inputs = list(params.jac_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(len(output_avals))),
+            jax.tree.unflatten(
+                params.output_pytreedef, range(len(params.output_avals))
+            ),
             schema_paths=self.differentiable_output_paths,
         )
-        if jac_output_paths is None:
+        if params.jac_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(jac_output_paths)
+            jac_outputs = list(params.jac_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,
@@ -403,33 +457,33 @@ class Jaxeract:
         ip_to_dtype = {p: v.dtype for p, v in flat_inputs.items() if v is not None}
         op_to_dtype = {
             p: aval.dtype
-            for (p, v), aval in zip(output_flat.items(), output_avals, strict=True)
+            for (p, v), aval in zip(
+                output_flat.items(), params.output_avals, strict=True
+            )
             if v is not None
         }
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
-                target = ip_to_dtype[ip] if jac_mode == "bwd" else op_to_dtype[op]
+                target = (
+                    ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
+                )
                 out.append(_cast_return(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
         self,
         array_args: tuple[TransportArray, ...],
-        static_args: tuple[Any, ...],
-        input_pytreedef: PyTreeDef,
-        output_pytreedef: PyTreeDef,
-        output_avals: tuple[ShapeDtypeStruct, ...],
-        is_static_mask: tuple[bool, ...],
-        has_tangent: tuple[bool, ...],
+        params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's vjp endpoint with the given arguments."""
-        n_primals = len(is_static_mask) - sum(is_static_mask)
+        has_tangent = params.has_tangent
+        n_primals = params.n_primals
         primals = array_args[:n_primals]
         cotangents = array_args[n_primals:]
 
         primal_inputs = unflatten_args(
-            primals, static_args, input_pytreedef, is_static_mask
+            primals, params.static_args, params.input_pytreedef, params.is_static_mask
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
@@ -437,13 +491,13 @@ class Jaxeract:
         )
 
         vjp_inputs = [
-            p for p, m in zip(flat_inputs, is_static_mask, strict=True) if not m
+            p for p, m in zip(flat_inputs, params.is_static_mask, strict=True) if not m
         ]
 
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
-        cotangent_pytree = jax.tree.unflatten(output_pytreedef, cotangents)
+        cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
         flat_cotangents = _pytree_to_tesseract_flat(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
         )
@@ -470,7 +524,7 @@ class Jaxeract:
                 tan_idx += 1
             elif (
                 tan_idx < len(has_tangent)
-                and not is_static_mask[all_idx]
+                and not params.is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):
                 # Non-differentiable but non-static input: emit a placeholder of
@@ -484,7 +538,7 @@ class Jaxeract:
                 tan_idx += 1
 
             # Increment array_idx only for non-static inputs (which appear in array_args)
-            if not is_static_mask[all_idx]:
+            if not params.is_static_mask[all_idx]:
                 array_idx += 1
 
         return tuple(out)

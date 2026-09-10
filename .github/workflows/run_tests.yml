@@ -114,9 +114,12 @@ jobs:
           enable-cache: true
 
       # Build + install the package (this compiles the native FFI shim via the
-      # hatch build hook; the GPU job must NOT set TESSERACT_JAX_GPU_OPTIONAL, so
-      # a shim build failure fails the job).
+      # hatch build hook). TESSERACT_JAX_GPU_REQUIRED=1 makes a shim build
+      # failure fatal instead of degrading to a pure-Python (CPU-only) install,
+      # so the GPU job never runs against a silently-missing shim.
       - name: Install package
+        env:
+          TESSERACT_JAX_GPU_REQUIRED: "1"
         run: |
           cp production.uv.lock uv.lock
           uv sync --python 3.12 --extra dev --frozen

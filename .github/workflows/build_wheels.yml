@@ -1,0 +1,162 @@
+name: Build wheels
+
+# Reusable workflow that builds every distribution artifact for a release:
+#
+#   * a native manylinux wheel built with cibuildwheel + auditwheel. The FFI
+#     shim targets the CPython stable ABI (abi3), so a single ``cp312-abi3``
+#     wheel serves every supported CPython -- cibuildwheel only builds once.
+#   * an sdist.
+#   * a pure-Python ``py3-none-any`` fallback wheel, so users on a platform or
+#     architecture without a matching native wheel still get an installable
+#     (host-callback-only) package. PyPI hosts it alongside the native wheels;
+#     pip prefers the more specific native wheel where one matches.
+#
+# Callers download the artifacts with ``pattern: dist-*`` + ``merge-multiple:
+# true``. It is invoked by publish.yml (to publish to PyPI) and by
+# test_pip_install.yml (to install the real built wheel and check it imports).
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to build (defaults to the caller's checked-out ref)."
+        required: false
+        type: string
+        default: ""
+    outputs:
+      artifact-pattern:
+        description: "download-artifact pattern matching every produced artifact."
+        value: "dist-*"
+
+jobs:
+  # One native wheel per Linux architecture, built on CPython 3.12 and valid for
+  # all CPython >= 3.12 thanks to the abi3 shim. cibuildwheel runs auditwheel to
+  # retag each manylinux. x86_64 and aarch64 each build natively on their own
+  # runner (no QEMU): aarch64 is where much of the GPU-direct audience lives
+  # (GH200/GB200 are arm64, as are Graviton instances), and without a native
+  # wheel there those users silently get the pure fallback and lose the feature.
+  build-native:
+    name: "manylinux abi3 wheel (${{ matrix.arch }})"
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          # hatch-vcs derives the version from git tags; a shallow clone without
+          # tags would yield the fallback version.
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      # Derive the version on the host (git works reliably here) and pass it into
+      # cibuildwheel's isolated build container, where git is brittle (ownership /
+      # missing tags). Strips nothing: for a tagged release this is the clean tag.
+      # Guard against hatch-vcs's 0.0.0 fallback (e.g. tags never fetched)
+      # silently propagating a bogus version straight to PyPI.
+      - name: Derive package version
+        run: |
+          version="$(uvx hatch version)"
+          if [ -z "$version" ] || [ "${version#0.0.0}" != "$version" ]; then
+            echo "::error::Refusing to build: derived version '$version' looks" \
+              "like the hatch-vcs 0.0.0 fallback (missing git tags?)." >&2
+            exit 1
+          fi
+          echo "SETUPTOOLS_SCM_PRETEND_VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build native wheel
+        # cibuildwheel publishes no floating major tag; pin a full version.
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          # abi3: build once on 3.12; the wheel is tagged cp312-abi3 by the hook.
+          CIBW_BUILD: "cp312-*"
+          # Skip musllinux: the shim's build-time dep jaxlib ships only manylinux
+          # wheels (no musllinux), so jaxlib cannot be installed in a musllinux
+          # build container. cibuildwheel v4 builds musllinux by default, so it
+          # must be excluded explicitly or that leg fails to resolve jaxlib.
+          CIBW_SKIP: "*-musllinux*"
+          CIBW_ARCHS_LINUX: ${{ matrix.arch }}
+          # glibc 2.28 floor. jaxlib itself still ships manylinux2014 (glibc
+          # 2.17), but its transitive deps (numpy, scipy) have dropped 2014
+          # wheels -- on a 2014 image pip falls back to their sdists, which need
+          # a newer toolchain than 2014 ships and fail the build. The shim is
+          # compiled in an isolated env that installs jaxlib for its XLA FFI
+          # headers, so that env must resolve those deps as wheels; 2_28 is the
+          # lowest floor where numpy/scipy/ml_dtypes all still do. Those deps are
+          # build-only (not shipped in our wheel), but the wheel is tagged
+          # manylinux_2_28, so it needs glibc >= 2.28 at install time (RHEL/Alma
+          # 8+, Ubuntu 18.10+, Debian 10+). These images ship a C++17-capable
+          # toolchain, all the shim needs. Applies to both x86_64 and aarch64.
+          CIBW_MANYLINUX_X86_64_IMAGE: "manylinux_2_28"
+          CIBW_MANYLINUX_AARCH64_IMAGE: "manylinux_2_28"
+          # Make a shim build failure fatal, and hand the host-derived version to
+          # the git-less container so hatch-vcs does not fall back.
+          CIBW_ENVIRONMENT: >-
+            TESSERACT_JAX_GPU_REQUIRED=1
+            SETUPTOOLS_SCM_PRETEND_VERSION=${{ env.SETUPTOOLS_SCM_PRETEND_VERSION }}
+          # Prove the built wheel imports inside a clean install (catches a wheel
+          # that builds but cannot load, e.g. a missing symbol in the shim).
+          CIBW_TEST_COMMAND: 'python -c "import tesseract_jax; import tesseract_jax.gpu_ffi"'
+        with:
+          output-dir: dist
+
+      - name: Upload native wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-native-${{ matrix.arch }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  # sdist + the pure-Python fallback wheel. Built with uv; the fallback sets
+  # TESSERACT_JAX_PURE_PYTHON so the hook skips the shim and emits py3-none-any.
+  #
+  # Why a wheel and not just the sdist: installing an sdist runs the PEP 517
+  # build backend (hatch_build.py) on the user's machine, which tries to compile
+  # the shim -- needing a C++ compiler and the build-time deps. The pure wheel is
+  # already built, so `pip install` never runs a build step and never needs a
+  # toolchain. It is the guaranteed-installable artifact for any platform/arch
+  # without a matching native wheel (Windows, Linux arm64, musl, ...); those
+  # users get a working host-callback-only package.
+  build-pure:
+    name: "sdist + pure-Python wheel"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Build sdist
+        run: uv build --sdist --out-dir dist
+
+      - name: Build pure-Python fallback wheel
+        env:
+          TESSERACT_JAX_PURE_PYTHON: "1"
+        run: uv build --wheel --out-dir dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - name: Upload pure-Python wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist-pure
+          path: dist/*.whl
+          if-no-files-found: error

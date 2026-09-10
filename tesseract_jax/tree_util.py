@@ -1,11 +1,42 @@
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import jax.tree
+import numpy as np
 from jax.tree_util import PyTreeDef
 
 T = TypeVar("T")
 type PyTree = Any
+
+
+@runtime_checkable
+class TransportArray(Protocol):
+    """Structural type for an array crossing the dispatch boundary.
+
+    The endpoint methods are transport-agnostic: the CPU host-callback lowering
+    passes real NumPy arrays, while the GPU FFI lowering passes bare
+    ``__cuda_array_interface__`` device views (see
+    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
+    ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
+    ``dtype``, so this protocol captures exactly that surface -- narrow enough
+    that the duck-typed GPU views satisfy it without importing a CUDA array
+    library. ``runtime_checkable`` so typeguard admits both transports at the FFI
+    boundary rather than rejecting the GPU views.
+
+    A discarded derivative slot can be ``None`` on the cuda_ipc path (see
+    :func:`tesseract_jax.tesseract_compat._placeholder`); annotate those sites
+    ``TransportArray | None``.
+    """
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Array shape."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Array dtype."""
+        ...
 
 
 def split_args[T](
@@ -39,8 +70,9 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 def unflatten_args(
     # ``array_args`` is transport-dependent: real arrays / avals on the CPU
     # host-callback path, or bare ``__cuda_array_interface__`` device views on
-    # the GPU FFI path. ``Any`` admits both so a runtime type-check does not
-    # reject the duck-typed GPU views.
+    # the GPU FFI path. ``None`` marks an argument with no tangent -- the JVP
+    # rule passes such a sentinel per non-differentiated input. ``Any`` admits
+    # all three so a runtime type-check does not reject the duck-typed GPU views.
     array_args: tuple[Any, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
@@ -74,20 +106,53 @@ def unflatten_args(
     return result
 
 
+def _split_path(path: str) -> list[str]:
+    """Split a path on the dots that separate segments.
+
+    A dot inside ``{...}`` belongs to the key, so ``a.{b.c}`` is two segments
+    rather than three.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in path:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if char == "." and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    parts.append("".join(buf))
+    return parts
+
+
 def _merge_path(
-    explicit_path: str, array_paths: Iterable[str]
+    explicit_path: str | Sequence[str], array_paths: Iterable[str]
 ) -> tuple[str, str | None]:
     """Merges and formats explicit path with array paths containing templates.
 
     Returns a tuple of (formatted_path, matched_template) where matched_template
     is the template string that matched, or None if no template matched.
 
+    ``explicit_path`` may be given as the already-joined string or as the
+    segments it was built from. A dict key is free to contain dots, so passing
+    the segments is the only way to say where one ends; joining first and
+    splitting again cannot tell ``{"a": {"b.c": v}}`` from ``{"a": {"b": {"c": v}}}``.
+
     Examples:
         _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
         _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
         _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
+        _merge_path(['params', 'a.b'], ['params.{}']) -> ('params.{a.b}', 'params.{}')
     """
-    explicit_parts = explicit_path.split(".")
+    if isinstance(explicit_path, str):
+        explicit_parts = _split_path(explicit_path)
+    else:
+        explicit_parts = list(explicit_path)
+
     for array_path in array_paths:
         template_parts = array_path.split(".")
         if len(template_parts) != len(explicit_parts):
@@ -99,7 +164,9 @@ def _merge_path(
             if tp == ep:
                 result_parts.append(ep)
             elif tp == "{}":
-                result_parts.append(f"{{{ep}}}")
+                # Idempotent: batching re-merges paths this function produced.
+                already = ep.startswith("{") and ep.endswith("}")
+                result_parts.append(ep if already else f"{{{ep}}}")
             elif tp == "[]":
                 result_parts.append(ep)  # already "[n]"
             else:
@@ -109,7 +176,7 @@ def _merge_path(
         if matched:
             return ".".join(result_parts), array_path
 
-    return explicit_path, None
+    return ".".join(explicit_parts), None
 
 
 def _pytree_to_tesseract_flat(
@@ -136,20 +203,18 @@ def _pytree_to_tesseract_flat(
 
     flat_dict = {}
     for jax_path, val in leaves:
-        tesseract_path = ""
+        # Keep the segments rather than joining them: a dict key may itself
+        # contain a dot, and joining first loses where the key ends.
+        path_parts: list[str] = []
         for elem in jax_path:
             # for handling dicts
             if hasattr(elem, "key"):
-                tesseract_path += f".{elem.key}"
+                path_parts.append(str(elem.key))
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                tesseract_path += f".[{elem.idx}]"
-        # remove leading dot
-        tesseract_path = tesseract_path.lstrip(".")
+                path_parts.append(f"[{elem.idx}]")
 
-        tesseract_path, matched_template = _merge_path(
-            tesseract_path, schema_paths or []
-        )
+        tesseract_path, matched_template = _merge_path(path_parts, schema_paths or [])
 
         flat_dict[tesseract_path] = val if matched_template else None
 

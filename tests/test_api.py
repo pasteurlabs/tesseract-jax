@@ -5,6 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+import tesseract_core
+from packaging.version import Version
 
 from tesseract_jax import apply_tesseract
 
@@ -751,3 +753,166 @@ def test_pytree_tesseract_jvp_preserves_list_order(
 
     _, expected = jax.jvp(f_raw, (d1,), (tangent,))
     np.testing.assert_allclose(jvp(d1, tangent), expected, rtol=1e-5)
+
+
+def test_gather_tesseract_integer_io(gather_tess):
+    """Differentiate a Tesseract whose schema carries integer arrays.
+
+    ``indices`` is a non-differentiable integer input, so the vjp fills a
+    discarded slot for it; ``count`` is a non-differentiable integer output, so
+    the jvp fills one too. Filling either must stay warning-free, since
+    ``filterwarnings = ["error"]`` turns a warning raised inside the host
+    callback into an opaque ``CpuCallback`` failure. See issue #258.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def loss(weights, indices):
+        out = apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+        return jnp.sum(out["gathered"])
+
+    # `indices` reaches the vjp slot only while traced, since is_static_mask
+    # keys off tracer-ness -- hence jit rather than eager grad.
+    grad = jax.jit(jax.grad(loss, argnums=0))(weights, indices)
+    np.testing.assert_allclose(grad, [1.0, 0.0, 2.0], rtol=1e-6)
+
+    # JAX supplies float0 as the cotangent of an integer input.
+    _, vjp_fn = jax.vjp(loss, weights, indices)
+    assert vjp_fn(jnp.float32(1.0))[1].dtype == jax.dtypes.float0
+
+    def apply_fn(weights):
+        return apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+
+    primals, tangents = jax.jvp(apply_fn, (weights,), (np.ones_like(weights),))
+    np.testing.assert_allclose(primals["gathered"], [1.0, 3.0, 3.0], rtol=1e-6)
+    np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_discarded_tangent_fill_value(gather_tess, use_jit):
+    """A non-differentiable output's tangent is a slot the caller can read.
+
+    ``jax.jvp`` returns it directly, so its dtype and value are observable and
+    follow the rule in ``_compute_discarded_fill``: whatever ``0/0`` yields for
+    the dtype, which is NaN in every component for the inexact dtypes and zero
+    for those with no NaN to spell. ``gather_tess`` carries one such output per
+    dtype class.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def apply_fn(weights):
+        return apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+
+    def jvp_fn(w, dw):
+        return jax.jvp(apply_fn, (w,), (dw,))
+
+    if use_jit:
+        jvp_fn = jax.jit(jvp_fn)
+
+    _, tangents = jvp_fn(weights, np.ones_like(weights))
+
+    # the differentiable output keeps its real tangent
+    np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
+
+    magnitude = np.asarray(tangents["magnitude"])
+    assert magnitude.dtype == np.float32
+    assert np.isnan(magnitude).all()
+
+    phase = np.asarray(tangents["phase"])
+    assert phase.dtype == np.complex64
+    assert np.isnan(phase.real).all()
+    assert np.isnan(phase.imag).all(), "complex slots are poisoned in imag too"
+
+    count = np.asarray(tangents["count"])
+    assert count.dtype == np.int32
+    np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
+
+
+@pytest.mark.parametrize(
+    "explicit,templates,expected",
+    [
+        (["params", "plain"], ["params.{}"], "params.{plain}"),
+        (["params", "a/b"], ["params.{}"], "params.{a/b}"),
+        (["params", "layer.0.weight"], ["params.{}"], "params.{layer.0.weight}"),
+        # Re-merging a path this function produced must not brace it twice,
+        # which batching relies on.
+        ("params.{layer.0.weight}", ["params.{}"], "params.{layer.0.weight}"),
+    ],
+)
+def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
+    """A dict key may contain dots, and the key is where the path ends.
+
+    Joining the segments first and splitting again cannot tell
+    {"a": {"b.c": v}} from {"a": {"b": {"c": v}}}, so a dotted key used to
+    miss its template and be reported as a non-differentiable input.
+    """
+    from tesseract_jax.tree_util import _merge_path
+
+    path, template = _merge_path(explicit, templates)
+    assert path == expected
+    assert template == templates[0]
+
+
+# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
+# which landed after 1.12.0. Drop this guard once the minimum version is past it.
+_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "plain",
+        pytest.param(
+            "layer.0.weight",
+            marks=pytest.mark.skipif(
+                not _CORE_ACCEPTS_WIDE_KEYS,
+                reason=(
+                    f"tesseract-core {tesseract_core.__version__} rejects the key "
+                    "(needs > 1.12.0)"
+                ),
+            ),
+        ),
+    ],
+)
+def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
+    """End to end: a state-dict key carries dots and still gets its gradient."""
+    inputs = {"params": {key: jnp.ones(3, dtype=jnp.float32)}}
+    grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
+        inputs
+    )
+    np.testing.assert_allclose(np.asarray(grads["params"][key]), np.full(3, 2.0))
+
+
+def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
+    """The fill table must cover every dtype a Tesseract schema can declare.
+
+    Cross-checked against tesseract-core's own ``dtype`` enum rather than our
+    copy of it, so this fails if tesseract-core grows a dtype and the table is
+    not updated -- at which point the lookup would silently fall back to a
+    computed value instead of the tabulated one.
+    """
+    from tesseract_jax.tesseract_compat import _DISCARDED_FILL
+
+    def _dtype_enums(node):
+        """Walk an OpenAPI schema and yield every value of every dtype enum."""
+        if isinstance(node, dict):
+            if isinstance(node.get("enum"), list) and node.get("title") == "Dtype":
+                yield from node["enum"]
+            for value in node.values():
+                yield from _dtype_enums(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from _dtype_enums(value)
+
+    declared = {np.dtype(name) for name in _dtype_enums(vectoradd_tess.openapi_schema)}
+    assert declared, "no dtype enum found in the OpenAPI schema"
+    assert declared <= set(_DISCARDED_FILL), (
+        f"dtypes missing from _DISCARDED_FILL: {sorted(map(str, declared - set(_DISCARDED_FILL)))}"
+    )

@@ -8,51 +8,11 @@ on:
       - published
 
 jobs:
+  # Build every distribution artifact (native manylinux abi3 wheel, sdist,
+  # pure-Python fallback wheel) via the reusable workflow.
   build:
     name: "Build distribution"
-    runs-on: "${{ matrix.os }}"
-    strategy:
-      matrix:
-        # TODO: Comment in additional platforms if using C extensions / platform-specific wheels
-        os:
-          - ubuntu-latest
-          # - macos-latest
-        python-version:
-          - "3.12"
-          - "3.13"
-          - "3.14"
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # make sure tags are fetched so we can get a version
-      - name: Fetch Tags
-        run: |
-          git fetch --prune --unshallow --tags
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Restore UV environment
-        run: cp production.uv.lock uv.lock
-
-      - name: Build Package
-        run: |
-          uv build
-
-      - name: Store the distribution packages
-        uses: actions/upload-artifact@v7
-        with:
-          name: python-package-distributions
-          path: dist/
+    uses: ./.github/workflows/build_wheels.yml
 
   publish:
     name: "Publish distribution"
@@ -71,7 +31,10 @@ jobs:
       - name: Download all the dists
         uses: actions/download-artifact@v8
         with:
-          name: python-package-distributions
+          # Every build leg uploads under a distinct dist-* name (v4+ artifacts
+          # are immutable); collapse them into one dist/ directory.
+          pattern: ${{ needs.build.outputs.artifact-pattern }}
+          merge-multiple: true
           path: dist/
 
       - name: Publish distribution to PyPI

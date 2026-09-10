@@ -1,14 +1,39 @@
 name: Test installation via pip
 
 on:
-  # run on PRs for validation
+  # Only run when something packaging-specific changes -- an input that can
+  # break a wheel build or install *without* the test suite (run_tests.yml)
+  # already catching it. A pure-Python source change under tesseract_jax/ that
+  # broke packaging would also break the tests, so those are deliberately not
+  # listed. What remains is what the tests are blind to:
+  #   * the native shim source (a C++ compile error is invisible to CPU pytest),
+  #   * the build hook (the test suite never runs it),
+  #   * the packaging metadata,
+  #   * requirements.txt -- consumed *directly* by the source-install leg below
+  #     (`pip install -r requirements.txt`); the test suite installs from
+  #     production.uv.lock instead, so a bad requirements.txt is caught nowhere
+  #     else,
+  #   * and this pipeline itself (incl. the reusable build workflow it calls).
+  # The lockfile is intentionally absent: no job here reads it, so it cannot
+  # change this pipeline's outcome. These jobs are not required status checks,
+  # so skipping them on unrelated PRs is safe.
   pull_request:
+    paths:
+      - "tesseract_jax/_cuda_shim.cc"
+      - "hatch_build.py"
+      - "pyproject.toml"
+      - "requirements.txt"
+      - ".github/workflows/test_pip_install.yml"
+      - ".github/workflows/build_wheels.yml"
 
 jobs:
+  # Install from source (compiles the shim locally where supported, or degrades
+  # to the host-callback transport). Validates the end-user `pip install .` path.
   test-pip-install:
-    name: "Test pip install"
+    name: "Test pip install (from source)"
     runs-on: "${{ matrix.os }}"
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-latest
@@ -29,3 +54,97 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install --no-deps .
+
+  # Build the release artifacts once (reusable workflow).
+  build:
+    name: "Build distribution"
+    uses: ./.github/workflows/build_wheels.yml
+
+  # Install from the pre-built wheels and confirm the package imports. This
+  # exercises the *published* artifacts: on Linux/CPython pip picks the native
+  # manylinux abi3 wheel; where none matches it falls back to py3-none-any.
+  test-wheel-install:
+    name: "Test pip install (from built wheel)"
+    needs: build
+    runs-on: "${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        python-version:
+          - "3.12"
+          - "3.13"
+          - "3.14"
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Download built distributions
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ needs.build.outputs.artifact-pattern }}
+          merge-multiple: true
+          path: dist
+
+      - name: Install from the built wheel
+        run: |
+          python -m pip install --upgrade pip
+          # Install the tesseract-jax wheel by path so pip uses the freshly built
+          # artifact, not the released version from PyPI (a dev/local build sorts
+          # BELOW any PyPI release, so a plain `pip install tesseract-jax` would
+          # pull the old release even with --find-links). Point pip at dist/ so it
+          # picks the tag-appropriate wheel (native abi3 on Linux/CPython, else the
+          # py3-none-any fallback); deps still resolve from PyPI.
+          wheel=$(python - <<'PY'
+          import sys
+          from pathlib import Path
+          # Use pip's vendored packaging so this needs no extra install on a
+          # clean setup-python runner (top-level `packaging` may be absent).
+          from pip._vendor.packaging.tags import sys_tags
+          supported = {(t.interpreter, t.abi, t.platform) for t in sys_tags()}
+          wheels = sorted(Path("dist").glob("tesseract_jax-*.whl"))
+          def compatible(name: str) -> bool:
+              # tag triple is the last 3 '-'-separated fields of the wheel name
+              interp, abi, plat = name[:-4].split("-")[-3:]
+              return any(
+                  (i, a, p) in supported
+                  for i in interp.split(".")
+                  for a in abi.split(".")
+                  for p in plat.split(".")
+              )
+          matches = [w for w in wheels if compatible(w.name)]
+          if not matches:
+              sys.exit(f"no compatible wheel in dist/ among {[w.name for w in wheels]}")
+          # Prefer the most specific (non-purelib) wheel when several match.
+          matches.sort(key=lambda w: w.name.endswith("-py3-none-any.whl"))
+          print(matches[0])
+          PY
+          )
+          echo "Installing built wheel: $wheel"
+          python -m pip install --find-links dist "$wheel"
+
+      - name: Report which wheel was installed
+        run: |
+          python <<'PY'
+          import tesseract_jax
+          import tesseract_jax.gpu_ffi as g
+          print("tesseract_jax", tesseract_jax.__file__)
+          print("native shim available:", g.is_available())
+          PY
+
+      - name: Verify the abi3 native wheel is used on Linux/CPython
+        if: runner.os == 'Linux'
+        run: |
+          # On Linux the native manylinux abi3 wheel must win over the fallback,
+          # so the shim must load. A silent fall-through to py3-none-any here
+          # would mean the native wheel's tag or the abi3 build is wrong.
+          python <<'PY'
+          import tesseract_jax.gpu_ffi as g
+          assert g.is_available(), (
+              "expected the native abi3 wheel on Linux, but the shim is unavailable"
+          )
+          PY

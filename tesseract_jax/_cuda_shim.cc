@@ -16,8 +16,12 @@
 //   accesses CUDA from Python (ctypes.CDLL).
 // * The handler is a plain C-ABI function pointer wrapped in a PyCapsule; XLA
 //   calls it directly on its executor thread, with no Python on the stack. To
-//   reach Python we acquire the GIL (pybind11 gil_scoped_acquire) and call a
+//   reach Python we acquire the GIL (nanobind gil_scoped_acquire) and call a
 //   registered callable.
+// * The Python bindings use nanobind, built against the CPython stable ABI
+//   (Py_LIMITED_API): the module's entire Python surface is three entry points
+//   marshalling ints/strings/lists/tuples/objects, well inside the Limited API,
+//   so one abi3 wheel per platform serves every supported CPython version.
 // * The registered Python callback returns the result arrays (as objects
 //   exposing __cuda_array_interface__) and the shim copies them device->device
 //   into XLA's output buffers.
@@ -32,12 +36,13 @@
 #include <string>
 #include <vector>
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include "xla/ffi/api/ffi.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 namespace ffi = xla::ffi;
 
 // ---------------------------------------------------------------------------
@@ -89,14 +94,34 @@ struct CudaRuntime {
   cudaError_t (*GetLastError)() = nullptr;
 };
 
+// libcudart names/paths to dlopen, most-preferred first. Set from Python (see
+// set_cudart_candidates) before the first dispatch, so the shim resolves the
+// *same* runtime tesseract-core's cuda_ipc codec does (wheel dirs first). The
+// list is the single source of truth for discovery: there is deliberately no
+// hardcoded soname fallback here, because the C++ handler is only ever reached
+// through gpu_ffi.ensure_registered(), which primes this list on the same line
+// it registers the FFI target. A guessed fallback would risk loading a
+// *different* libcudart than the codec -- the exact mismatch this indirection
+// exists to prevent -- so an unprimed list is a hard error instead.
+std::vector<std::string>& cudart_candidates() {
+  // Leaked on purpose (see dispatch_callable): a function-local static would run
+  // its destructor during C++ static teardown, after the interpreter is gone.
+  static auto* names = new std::vector<std::string>();
+  return *names;
+}
+
 CudaRuntime& cuda_rt() {
   static CudaRuntime rt;
   static std::once_flag once;
   std::call_once(once, [] {
-    const char* names[] = {"libcudart.so",    "libcudart.so.13",
-                           "libcudart.so.12", "libcudart.so.11"};
-    for (const char* n : names) {
-      rt.handle = dlopen(n, RTLD_NOW | RTLD_GLOBAL);
+    const auto& primed = cudart_candidates();
+    if (primed.empty()) {
+      throw std::runtime_error(
+          "tesseract_jax: libcudart candidates not set; the FFI shim must be "
+          "primed via gpu_ffi.ensure_registered() before dispatch");
+    }
+    for (const std::string& n : primed) {
+      rt.handle = dlopen(n.c_str(), RTLD_NOW | RTLD_GLOBAL);
       if (rt.handle) break;
     }
     if (!rt.handle) {
@@ -203,15 +228,15 @@ ffi::Error assert_device_ptr(const void* ptr, const std::string& what) {
 // held in the Python module. We call a single registered dispatch callable with
 // (token, input_views) and receive back a list of result arrays.
 
-py::object& dispatch_callable() {
+nb::object& dispatch_callable() {
   // Heap-allocated and intentionally never freed. A function-local
-  // ``static py::object`` would run ~object() during C++ static destruction at
+  // ``static nb::object`` would run ~object() during C++ static destruction at
   // process exit -- which happens *after* the Python interpreter is finalized --
   // so the Py_DECREF it performs dereferences a dead interpreter and segfaults
   // (observed as an exit-139 teardown crash in gdb: ~object() from this module).
   // Leaking the reference is the standard fix: the process is exiting, so the
   // holdout costs nothing and no destructor touches Python after finalization.
-  static py::object* cb = new py::object();  // set via set_dispatch_callback
+  static nb::object* cb = new nb::object();  // set via set_dispatch_callback
   return *cb;
 }
 
@@ -240,18 +265,50 @@ const char* dtype_typestr(ffi::DataType dt) {
   }
 }
 
+// Mirrors `np.issubdtype(arr.dtype, np.inexact)`: the float and complex dtypes,
+// i.e. the ones with a NaN bit pattern to spell. Used to fill a discarded
+// derivative slot the same way the host path does -- NaN for inexact dtypes,
+// zero for everything else (see the placeholder fill in DispatchImpl).
+bool dtype_is_inexact(ffi::DataType dt) {
+  using DT = ffi::DataType;
+  switch (dt) {
+    case DT::F16:
+    case DT::F32:
+    case DT::F64:
+    case DT::BF16:
+    case DT::C64:
+    case DT::C128:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Render a shape as "(d0, d1, ...)" for mismatch diagnostics.
+std::string shape_str(const std::vector<int64_t>& shape) {
+  std::string s = "(";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i) s += ", ";
+    s += std::to_string(shape[i]);
+  }
+  s += ")";
+  return s;
+}
+
 // A plain description of one buffer, handed to Python.
 struct BufferDesc {
   uintptr_t ptr;
   std::string typestr;
   std::vector<int64_t> shape;
   size_t nbytes;
+  bool inexact = false;  // dtype has a NaN to spell (F16/F32/F64/BF16/C64/C128)
 };
 
 BufferDesc describe(ffi::AnyBuffer buf) {
   BufferDesc d;
   d.ptr = reinterpret_cast<uintptr_t>(buf.untyped_data());
   d.typestr = dtype_typestr(buf.element_type());
+  d.inexact = dtype_is_inexact(buf.element_type());
   auto dims = buf.dimensions();
   for (size_t i = 0; i < dims.size(); ++i) {
     d.shape.push_back(dims[i]);
@@ -311,40 +368,40 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
   }
 
   // Call into Python under the GIL.
-  std::vector<py::object> results_keepalive;
+  std::vector<nb::object> results_keepalive;
   std::vector<BufferDesc> result_descs;
   // The keepalive vector holds Python objects, so it must be emptied while the
-  // GIL is held -- otherwise the py::object destructors call dec_ref() with no
+  // GIL is held -- otherwise the nb::object destructors call dec_ref() with no
   // GIL and abort the process. This guard clears it under the GIL on *every*
   // exit path (including early error returns), so a residency-check failure
   // surfaces as a clean ffi::Error instead of a crash.
   struct KeepaliveGuard {
-    std::vector<py::object>& v;
+    std::vector<nb::object>& v;
     ~KeepaliveGuard() {
       if (v.empty()) return;
-      py::gil_scoped_acquire gil;
+      nb::gil_scoped_acquire gil;
       v.clear();
     }
   } keepalive_guard{results_keepalive};
   {
-    py::gil_scoped_acquire gil;
-    py::object& cb = dispatch_callable();
+    nb::gil_scoped_acquire gil;
+    nb::object& cb = dispatch_callable();
     if (cb.is_none()) {
       return ffi::Error::Internal(
           "tesseract_jax: no dispatch callback registered");
     }
 
     // Build the list of input views: (ptr, typestr, shape) tuples.
-    py::list py_inputs;
+    nb::list py_inputs;
     for (const auto& d : in_descs) {
       py_inputs.append(
-          py::make_tuple(d.ptr, py::str(d.typestr), py::cast(d.shape)));
+          nb::make_tuple(d.ptr, nb::str(d.typestr.c_str()), nb::cast(d.shape)));
     }
 
-    py::object out;
+    nb::object out;
     try {
       out = cb(token, py_inputs);
-    } catch (py::error_already_set& e) {
+    } catch (nb::python_error& e) {
       return ffi::Error::Internal(std::string("dispatch callback raised: ") +
                                   e.what());
     }
@@ -364,57 +421,94 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
       rt.GetLastError();
     }
 
-    // Expect a list of objects exposing __cuda_array_interface__.
-    py::sequence seq = py::reinterpret_borrow<py::sequence>(out);
-    if (py::len(seq) != out_descs.size()) {
-      return ffi::Error::Internal(
-          "dispatch callback returned wrong number of results");
-    }
-    const bool check_ptrs = debug_check_device_ptrs();
-    for (size_t i = 0; i < out_descs.size(); ++i) {
-      py::object item = seq[i];
-      results_keepalive.push_back(item);  // keep alive through the copy
-      BufferDesc rd;
-      // A ``None`` result marks a placeholder slot: a discarded gradient/tangent
-      // for a non-differentiable input or output that no consumer reads. There is
-      // no source array to copy; rd.ptr == 0 flags it for a NaN-fill (rather than
-      // a copy) of XLA's output buffer below -- no source buffer is fabricated.
-      if (item.is_none()) {
-        rd.ptr = 0;
-        rd.nbytes = 0;
-        result_descs.push_back(rd);
-        continue;
+    // Expect a list of objects exposing __cuda_array_interface__. Reading their
+    // pointer/dtype/shape drives arbitrary Python (attribute access, casts,
+    // __getitem__), any of which may raise -- and a nanobind exception must not
+    // unwind across the C-ABI FFI boundary into XLA. Convert any throw into an
+    // ffi::Error so a malformed dispatch return fails cleanly instead of
+    // crashing the process.
+    try {
+      nb::sequence seq = nb::borrow<nb::sequence>(out);
+      if (nb::len(seq) != out_descs.size()) {
+        return ffi::Error::Internal(
+            "dispatch callback returned wrong number of results");
       }
-      py::object cai = item.attr("__cuda_array_interface__");
-      py::tuple data = cai["data"].cast<py::tuple>();
-      rd.ptr = data[0].cast<uintptr_t>();
-      rd.nbytes = out_descs[i].nbytes;  // trust XLA's expected size
-      result_descs.push_back(rd);
-      // Debug: the dispatch's returned buffers must be device-resident.
-      // This is the check that matters: a host copy on a derivative return path
-      // (np.asarray/np.full materializing a host array) surfaces here as a host
-      // pointer, and we fail instead of silently copying host->"device".
-      if (check_ptrs) {
-        if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
-                                       "result " + std::to_string(i));
-            e.failure()) {
-          return e;
+      const bool check_ptrs = debug_check_device_ptrs();
+      for (size_t i = 0; i < out_descs.size(); ++i) {
+        nb::object item = seq[i];
+        results_keepalive.push_back(item);  // keep alive through the copy
+        BufferDesc rd;
+        // A ``None`` result marks a placeholder slot: a discarded
+        // gradient/tangent for a non-differentiable input or output that no
+        // consumer reads. There is no source array to copy; rd.ptr == 0 flags it
+        // for a fill (rather than a copy) of XLA's output buffer below -- no
+        // source buffer is fabricated.
+        if (item.is_none()) {
+          rd.ptr = 0;
+          rd.nbytes = 0;
+          result_descs.push_back(rd);
+          continue;
+        }
+        nb::object cai = item.attr("__cuda_array_interface__");
+        nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
+        rd.ptr = nb::cast<uintptr_t>(data[0]);
+        // XLA sized this output buffer from tesseract-jax's declared avals, but
+        // nothing forces the Tesseract to return that dtype or shape: the
+        // jacobian response schema permits any dtype, and unconstrained output
+        // shapes are only validated by the server when the schema fully pins
+        // them. Unlike the host path we cannot cast here, so compare before
+        // copying -- otherwise a same-itemsize dtype swap (int32 vs float32)
+        // would be silently reinterpreted, and a narrower source would drive an
+        // out-of-bounds device read.
+        rd.typestr = nb::cast<std::string>(cai["typestr"]);
+        rd.shape = nb::cast<std::vector<int64_t>>(cai["shape"]);
+        if (rd.typestr != out_descs[i].typestr || rd.shape != out_descs[i].shape) {
+          return ffi::Error::InvalidArgument(
+              "tesseract_jax result " + std::to_string(i) +
+              ": Tesseract returned " + rd.typestr + shape_str(rd.shape) +
+              ", expected " + out_descs[i].typestr +
+              shape_str(out_descs[i].shape));
+        }
+        rd.nbytes = out_descs[i].nbytes;  // now known to agree
+        result_descs.push_back(rd);
+        // Debug: the dispatch's returned buffers must be device-resident.
+        // This is the check that matters: a host copy on a derivative return path
+        // (np.asarray/np.full materializing a host array) surfaces here as a host
+        // pointer, and we fail instead of silently copying host->"device".
+        if (check_ptrs) {
+          if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
+                                         "result " + std::to_string(i));
+              e.failure()) {
+            return e;
+          }
         }
       }
+    } catch (nb::python_error& e) {
+      return ffi::Error::Internal(
+          std::string("tesseract_jax: decoding dispatch results failed: ") +
+          e.what());
+    } catch (const std::exception& e) {
+      return ffi::Error::Internal(
+          std::string("tesseract_jax: decoding dispatch results failed: ") +
+          e.what());
     }
   }  // release GIL before the device copies
 
   // Fill each XLA-owned output buffer. A null pointer marks a placeholder slot
   // (the dispatch returned ``None``): its value is a discarded gradient/tangent
-  // that no consumer reads, so instead of copying we fill it with the byte
-  // pattern 0xff -- which is a (quiet) NaN for every IEEE float width. This keeps
-  // the device path's poison semantics identical to the host path (np.full(nan))
-  // and leaves no output buffer undefined, all without allocating a source
-  // buffer. Every other slot is a real device result we copy device->device.
+  // that no consumer reads, so instead of copying we fill it with each dtype's
+  // 0/0 pattern, matching the host path. 0xff is a quiet NaN at every IEEE float
+  // width (and, repeated, a NaN in each half of a complex value); for the exact
+  // dtypes -- ints, unsigned, bool -- 0xff would instead be a plausible in-range
+  // value (or, for bool/PRED, the out-of-range byte 0xff), so those are
+  // zero-filled to stay consistent with the host's 0/0 result. This leaves no
+  // output buffer undefined without allocating a source buffer. Every other slot
+  // is a real device result we copy device->device.
   for (size_t i = 0; i < out_descs.size(); ++i) {
     if (result_descs[i].ptr == 0) {
+      const int pattern = out_descs[i].inexact ? 0xff : 0x00;
       if (cudaError_t e = rt.MemsetAsync(reinterpret_cast<void*>(out_descs[i].ptr),
-                                         0xff, out_descs[i].nbytes, stream);
+                                         pattern, out_descs[i].nbytes, stream);
           e != cudaSuccess) {
         return ffi::Error::Internal("cudaMemsetAsync(placeholder) failed: " +
                                     cuda_err(e));
@@ -463,16 +557,24 @@ XLA_FFI_Handler* MakeDispatchHandler() {
 // Python module
 // ---------------------------------------------------------------------------
 
-PYBIND11_MODULE(_cuda_shim, m) {
+NB_MODULE(_cuda_shim, m) {
   m.doc() = "Native FFI shim for GPU-direct Tesseract dispatch";
 
-  m.def("set_dispatch_callback", [](py::object cb) {
+  m.def("set_dispatch_callback", [](nb::object cb) {
     dispatch_callable() = std::move(cb);
+  });
+
+  // Prime the libcudart search list (see cudart_candidates). Must be called
+  // before the first dispatch: cuda_rt() reads it once, under std::call_once, on
+  // the first dlopen and ignores later changes. gpu_ffi.ensure_registered()
+  // calls this ahead of registering the FFI target.
+  m.def("set_cudart_candidates", [](std::vector<std::string> names) {
+    cudart_candidates() = std::move(names);
   });
 
   // Expose the handler as a PyCapsule for jax.ffi.register_ffi_target.
   m.def("handler_capsule", []() {
-    return py::capsule(reinterpret_cast<void*>(MakeDispatchHandler()),
+    return nb::capsule(reinterpret_cast<void*>(MakeDispatchHandler()),
                        "xla._CUSTOM_CALL_TARGET");
   });
 }
