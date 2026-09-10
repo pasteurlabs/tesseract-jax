@@ -75,3 +75,56 @@ def test_equality_and_hash_key_on_transport():
     # common them up); different transport -> must not compare equal.
     assert a == b and hash(a) == hash(b)
     assert a != host
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.headers: dict[str, str] = {}
+
+
+class _FakeHTTPClient:
+    """Stand-in for tesseract-core's HTTPClient with the attrs the CM touches."""
+
+    def __init__(self) -> None:
+        self._gpu_transport = "none"
+        self._output_format = "json+base64"
+        self._session = _FakeSession()
+
+
+def _client_with_http() -> MagicMock:
+    c = _fake_client()
+    c._client = _FakeHTTPClient()
+    return c
+
+
+def test_device_transport_encoding_drives_gpu_transport_and_accept():
+    # Regression for the tesseract-core split of CPU encoding (``_output_format``)
+    # from GPU transport (``_gpu_transport``): opting a call into cuda_ipc must
+    # set ``_gpu_transport`` and negotiate the server's GPU output transport via
+    # an Accept media-type parameter -- without disturbing ``_output_format``.
+    c = _client_with_http()
+    j = Jaxeract(c, cuda_ipc=True)
+    http = c._client
+
+    with j.device_transport_encoding():
+        assert http._gpu_transport == "cuda_ipc"
+        assert http._output_format == "json+base64"
+        assert (
+            http._session.headers["Accept"]
+            == "application/json+base64; gpu_transport=cuda_ipc"
+        )
+
+    # Fully restored on exit: the shared client must not leak the transport onto
+    # host-callback / CPU uses.
+    assert http._gpu_transport == "none"
+    assert "Accept" not in http._session.headers
+
+
+def test_device_transport_encoding_is_noop_without_transport():
+    c = _client_with_http()
+    j = Jaxeract(c)  # host round-trip
+    http = c._client
+
+    with j.device_transport_encoding():
+        assert http._gpu_transport == "none"
+        assert "Accept" not in http._session.headers

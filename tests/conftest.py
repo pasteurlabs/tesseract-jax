@@ -143,7 +143,7 @@ def _load_tesseract(folder_name: str) -> Tesseract:
 # (consumer) to be *separate* processes sharing the GPU -- a process cannot open
 # an IPC handle it exported itself. This reuses the same ``_serve_tesseract``
 # helper as every other served fixture (``tesseract-runtime serve``), just with
-# the cuda_ipc experimental flag and output format passed as extra env.
+# the cuda_ipc GPU transport and output format passed as extra env.
 
 
 def _gpu_available() -> bool:
@@ -161,8 +161,11 @@ def serve_gpu_tesseract(tmp_path_factory, *, output_format: str = "json+base64")
         name="gpu",
         extra_env={
             "TESSERACT_OUTPUT_FORMAT": output_format,
-            # cuda_ipc output is an experimental opt-in in tesseract-core.
-            "TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC": "1",
+            # GPU arrays leave the served process by reference; CPU arrays still
+            # follow ``output_format``. Separate knob since tesseract-core split
+            # the two (previously the ``json+cuda_ipc`` format + an experimental
+            # flag).
+            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
         },
     )
 

@@ -31,12 +31,12 @@ def _on_device(values: "list | tuple") -> bool:
     lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
     results) from the CPU host-callback lowering (real NumPy arrays).
 
-    The ``cuda_ipc`` import is deliberately lazy, not at module scope: eagerly
-    importing ``tesseract_core.runtime.cuda_ipc`` perturbs schema/typeguard state
+    The ``cuda.ipc`` import is deliberately lazy, not at module scope: eagerly
+    importing ``tesseract_core.runtime.cuda.ipc`` perturbs schema/typeguard state
     in the shared interpreter and breaks in-process (``LocalClient``) Tesseracts
     whose endpoints use ellipsis-shaped array schemas.
     """
-    from tesseract_core.runtime.cuda_ipc import has_cuda_array_interface
+    from tesseract_core.runtime.cuda.ipc import has_cuda_array_interface
 
     return any(has_cuda_array_interface(v) for v in values)
 
@@ -260,17 +260,26 @@ class Jaxeract:
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
         the client exports GPU array *inputs* by reference through the negotiated
-        device transport and decodes the *outputs* back to GPU arrays -- no host
-        round-trip. Two things must change and be restored:
+        device transport and the served Tesseract hands the *outputs* back the
+        same way -- no host round-trip. tesseract-core keeps these two axes
+        orthogonal: ``_output_format`` governs how CPU arrays are serialized and
+        ``_gpu_transport`` selects how GPU arrays leave the process. So two things
+        must change and be restored:
 
-        * ``_output_format`` (drives both the request encoder and response
-          decoder), and
-        * an ``Accept: application/json+<transport>`` header, since the response
-          format is otherwise the server's default and the client never sends
-          Accept on its own.
+        * ``_gpu_transport`` (drives the request encoder's per-leaf GPU export),
+          and
+        * an ``Accept: application/<output_format>; gpu_transport=<transport>``
+          header, which negotiates the server's GPU output transport per request.
+          The client never sends Accept on its own and the served Tesseract may
+          default to ``gpu_transport="none"``, so without the header the response
+          would come back host-copied.
+
+        ``_output_format`` is left untouched: it still names the CPU-array
+        encoding, and the ``Accept`` media type reuses it verbatim so the CPU
+        leaves of a mixed response are unaffected.
 
         Scoped so the shared client is not permanently mutated (which would leak
-        the on-device encoding onto host-callback / CPU uses of the same client).
+        the on-device transport onto host-callback / CPU uses of the same client).
         A no-op when this call did not opt into a device transport
         (:attr:`_device_transport`), or for non-HTTP clients (e.g. the in-process
         ``LocalClient``).
@@ -279,23 +288,25 @@ class Jaxeract:
         if (
             self._device_transport is None
             or client is None
-            or not hasattr(client, "_output_format")
+            or not hasattr(client, "_gpu_transport")
         ):
             yield
             return
-        fmt = f"json+{self._device_transport}"
-        prev_fmt = client._output_format
+        prev_transport = client._gpu_transport
+        output_format = getattr(client, "_output_format", "json+base64")
         session = getattr(client, "_session", None)
         had_accept = session is not None and "Accept" in session.headers
         prev_accept = session.headers.get("Accept") if session is not None else None
 
-        client._output_format = fmt
+        client._gpu_transport = self._device_transport
         if session is not None:
-            session.headers["Accept"] = f"application/{fmt}"
+            session.headers["Accept"] = (
+                f"application/{output_format}; gpu_transport={self._device_transport}"
+            )
         try:
             yield
         finally:
-            client._output_format = prev_fmt
+            client._gpu_transport = prev_transport
             if session is not None:
                 if had_accept:
                     session.headers["Accept"] = prev_accept
