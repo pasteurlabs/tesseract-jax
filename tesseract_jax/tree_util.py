@@ -40,7 +40,9 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    array_args: tuple[ArrayLike | ShapedArray, ...],
+    # ``None`` marks an argument with no tangent: the JVP rule passes such a
+    # sentinel per non-differentiated input when checking the input schema.
+    array_args: tuple[ArrayLike | ShapedArray | None, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
     is_static_mask: tuple[bool, ...],
@@ -73,20 +75,53 @@ def unflatten_args(
     return result
 
 
+def _split_path(path: str) -> list[str]:
+    """Split a path on the dots that separate segments.
+
+    A dot inside ``{...}`` belongs to the key, so ``a.{b.c}`` is two segments
+    rather than three.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in path:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if char == "." and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    parts.append("".join(buf))
+    return parts
+
+
 def _merge_path(
-    explicit_path: str, array_paths: Iterable[str]
+    explicit_path: str | Sequence[str], array_paths: Iterable[str]
 ) -> tuple[str, str | None]:
     """Merges and formats explicit path with array paths containing templates.
 
     Returns a tuple of (formatted_path, matched_template) where matched_template
     is the template string that matched, or None if no template matched.
 
+    ``explicit_path`` may be given as the already-joined string or as the
+    segments it was built from. A dict key is free to contain dots, so passing
+    the segments is the only way to say where one ends; joining first and
+    splitting again cannot tell ``{"a": {"b.c": v}}`` from ``{"a": {"b": {"c": v}}}``.
+
     Examples:
         _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
         _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
         _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
+        _merge_path(['params', 'a.b'], ['params.{}']) -> ('params.{a.b}', 'params.{}')
     """
-    explicit_parts = explicit_path.split(".")
+    if isinstance(explicit_path, str):
+        explicit_parts = _split_path(explicit_path)
+    else:
+        explicit_parts = list(explicit_path)
+
     for array_path in array_paths:
         template_parts = array_path.split(".")
         if len(template_parts) != len(explicit_parts):
@@ -98,7 +133,9 @@ def _merge_path(
             if tp == ep:
                 result_parts.append(ep)
             elif tp == "{}":
-                result_parts.append(f"{{{ep}}}")
+                # Idempotent: batching re-merges paths this function produced.
+                already = ep.startswith("{") and ep.endswith("}")
+                result_parts.append(ep if already else f"{{{ep}}}")
             elif tp == "[]":
                 result_parts.append(ep)  # already "[n]"
             else:
@@ -108,7 +145,7 @@ def _merge_path(
         if matched:
             return ".".join(result_parts), array_path
 
-    return explicit_path, None
+    return ".".join(explicit_parts), None
 
 
 def _pytree_to_tesseract_flat(
@@ -135,20 +172,18 @@ def _pytree_to_tesseract_flat(
 
     flat_dict = {}
     for jax_path, val in leaves:
-        tesseract_path = ""
+        # Keep the segments rather than joining them: a dict key may itself
+        # contain a dot, and joining first loses where the key ends.
+        path_parts: list[str] = []
         for elem in jax_path:
             # for handling dicts
             if hasattr(elem, "key"):
-                tesseract_path += f".{elem.key}"
+                path_parts.append(str(elem.key))
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                tesseract_path += f".[{elem.idx}]"
-        # remove leading dot
-        tesseract_path = tesseract_path.lstrip(".")
+                path_parts.append(f"[{elem.idx}]")
 
-        tesseract_path, matched_template = _merge_path(
-            tesseract_path, schema_paths or []
-        )
+        tesseract_path, matched_template = _merge_path(path_parts, schema_paths or [])
 
         flat_dict[tesseract_path] = val if matched_template else None
 

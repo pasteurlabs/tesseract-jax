@@ -1,0 +1,10 @@
+name: gather_tesseract
+version: "2025-11-05"
+description: |
+  Tesseract with an integer array input and a non-differentiable integer
+  output, used to cover the integer placeholder slots (issue #258).
+
+build_config:
+  target_platform: "native"
+  # package_data: []
+  # custom_build_steps: []

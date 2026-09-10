@@ -214,6 +214,11 @@ def pytree_tess() -> Tesseract:
 
 
 @pytest.fixture
+def dict_key_tess() -> Tesseract:
+    return _load_tesseract("dict_key_tesseract")
+
+
+@pytest.fixture
 def univariate_tess() -> Tesseract:
     return _load_tesseract("univariate_tesseract")
 
@@ -237,6 +242,11 @@ def static_input_tess() -> Tesseract:
 @pytest.fixture
 def mixed_dtype_tess() -> Tesseract:
     return _load_tesseract("mixed_dtype_tesseract")
+
+
+@pytest.fixture
+def gather_tess() -> Tesseract:
+    return _load_tesseract("gather_tesseract")
 
 
 @pytest.fixture
