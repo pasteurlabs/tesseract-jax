@@ -3,11 +3,12 @@
 
 """Tests for an OutputSchema that mixes arrays with a str and a bool.
 
-A JAX primitive can only return arrays, so non-array leaves are taken from
-`abstract_eval`, carried as static primitive parameters, and put back into the
-output pytree after the bind. These tests check that the arrays are untouched:
-the static leaves must not shift, drop or reorder anything the gradient path
-depends on.
+Eagerly, `apply` runs directly and its output is returned as-is. Under a JAX
+transformation the primitive can only return arrays, so non-array leaves are
+taken from `abstract_eval`, carried as static primitive parameters, and put back
+into the output pytree after the bind. These tests check that the arrays are
+untouched either way: the static leaves must not shift, drop or reorder anything
+the gradient path depends on.
 
 Before this was supported, all of these raised
 `TypeError: string indices must be integers`.
@@ -25,6 +26,24 @@ from tesseract_jax.primitive import CHECK_STATIC_OUTPUTS_ENV_VAR
 from tesseract_jax.tree_util import _leaves_differ
 
 X = jnp.arange(3, dtype="float64")
+
+
+def _apply_under_jit(tess, x, **kwargs):
+    """Run `apply_tesseract` under `jit` and return the backend and y.
+
+    The static-output check only runs under a JAX transformation, so the drift
+    tests exercise it through `jit` rather than an eager call.
+    """
+    seen = {}
+
+    @jax.jit
+    def f(x):
+        out = apply_tesseract(tess, dict(x=x), **kwargs)
+        seen["backend"] = out["backend"]
+        return out["y"]
+
+    y = f(x)
+    return seen["backend"], y
 
 
 def test_static_leaves_come_back_beside_the_arrays(nonarray_output_tess):
@@ -101,49 +120,47 @@ def test_vmap_is_unaffected_by_a_static_leaf(nonarray_output_tess):
     np.testing.assert_allclose(jax.vmap(f)(xs), 2.0 * xs)
 
 
-def test_no_warning_when_apply_agrees_with_abstract_eval(drifting_static_tess):
+def test_eager_forwards_the_apply_value_verbatim(drifting_static_tess):
+    """Without a transformation, `apply` runs directly and its value is returned.
+
+    `abstract_eval` reports `"reference"`, but a negative input makes `apply`
+    return `"fallback"`, and that is what an eager call gets back. There is
+    nothing to reconcile, so no warning fires.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+
+    assert out["backend"] == "fallback"
+    np.testing.assert_allclose(out["y"], -2.0 * X)
+
+
+def test_no_warning_under_jit_when_apply_agrees_with_abstract_eval(
+    drifting_static_tess,
+):
     """The check must stay quiet when the two endpoints agree."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        out = apply_tesseract(drifting_static_tess, dict(x=X))
+        backend, _ = _apply_under_jit(drifting_static_tess, X)
 
-    assert out["backend"] == "reference"
+    assert backend == "reference"
 
 
 def test_a_static_leaf_that_apply_disagrees_with_is_warned_about(drifting_static_tess):
-    """A drifting static leaf from `apply` is warned about, not dropped silently.
+    """Under a transformation, a drifting static leaf is warned about, not dropped.
 
     The warning names the leaf, the value `apply` returned, and the value the
     caller is holding.
     """
     with pytest.warns(UserWarning, match="backend") as record:
-        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+        backend, y = _apply_under_jit(drifting_static_tess, -X)
 
-    assert out["backend"] == "reference"
+    # The caller holds abstract_eval's value, not apply's.
+    assert backend == "reference"
+    np.testing.assert_allclose(y, -2.0 * X)
     message = str(record[0].message)
     assert "'fallback'" in message
     assert "'reference'" in message
-
-
-def test_the_warning_survives_jit(drifting_static_tess):
-    """The check fires under jit too.
-
-    It runs inside the callback that `apply` is dispatched from, not at trace
-    time, so jit does not suppress it.
-    """
-    seen = {}
-
-    @jax.jit
-    def f(x):
-        out = apply_tesseract(drifting_static_tess, dict(x=x))
-        seen["backend"] = out["backend"]
-        return out["y"]
-
-    with pytest.warns(UserWarning, match="backend"):
-        y = f(-X)
-
-    np.testing.assert_allclose(y, -2.0 * X)
-    assert seen["backend"] == "reference"
 
 
 def test_the_drift_warning_does_not_disturb_the_gradient(drifting_static_tess):
@@ -165,12 +182,12 @@ def test_the_check_can_be_turned_off_per_call(drifting_static_tess):
     """
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        out = apply_tesseract(
-            drifting_static_tess, dict(x=-X), check_static_outputs=False
+        backend, y = _apply_under_jit(
+            drifting_static_tess, -X, check_static_outputs=False
         )
 
-    assert out["backend"] == "reference"
-    np.testing.assert_allclose(out["y"], -2.0 * X)
+    assert backend == "reference"
+    np.testing.assert_allclose(y, -2.0 * X)
 
 
 def test_turning_the_check_off_leaves_the_gradient_alone(drifting_static_tess):
@@ -193,10 +210,10 @@ def test_turning_the_check_off_for_one_call_leaves_the_next_one_alone(
     """The kwarg applies to one call only, not to later ones."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        apply_tesseract(drifting_static_tess, dict(x=-X), check_static_outputs=False)
+        _apply_under_jit(drifting_static_tess, -X, check_static_outputs=False)
 
     with pytest.warns(UserWarning, match="backend"):
-        apply_tesseract(drifting_static_tess, dict(x=-X))
+        _apply_under_jit(drifting_static_tess, -X)
 
 
 @pytest.mark.parametrize("value", ["0", "false", "no", "OFF", " 0 "])
@@ -205,9 +222,9 @@ def test_the_env_var_turns_the_check_off(drifting_static_tess, monkeypatch, valu
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+        backend, _ = _apply_under_jit(drifting_static_tess, -X)
 
-    assert out["backend"] == "reference"
+    assert backend == "reference"
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
@@ -215,21 +232,21 @@ def test_the_env_var_can_also_be_true(drifting_static_tess, monkeypatch, value):
     monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, value)
 
     with pytest.warns(UserWarning, match="backend"):
-        apply_tesseract(drifting_static_tess, dict(x=-X))
+        _apply_under_jit(drifting_static_tess, -X)
 
 
 def test_the_kwarg_beats_the_env_var(drifting_static_tess, monkeypatch):
     monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, "0")
 
     with pytest.warns(UserWarning, match="backend"):
-        apply_tesseract(drifting_static_tess, dict(x=-X), check_static_outputs=True)
+        _apply_under_jit(drifting_static_tess, -X, check_static_outputs=True)
 
 
 def test_a_non_boolean_env_var_is_an_error(drifting_static_tess, monkeypatch):
     monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, "maybe")
 
     with pytest.raises(ValueError, match=CHECK_STATIC_OUTPUTS_ENV_VAR):
-        apply_tesseract(drifting_static_tess, dict(x=X))
+        _apply_under_jit(drifting_static_tess, X)
 
 
 def test_leaves_that_do_not_compare_to_a_bool_fall_back_to_identity():

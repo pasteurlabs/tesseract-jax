@@ -90,7 +90,7 @@ jax.grad(vector_sum)(x, y) # 🎉
 > [!TIP]
 > When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
 
-- **Non-array outputs come from `abstract_eval`**: an `OutputSchema` field that is not an array, such as a `str` or a `bool`, never enters the traced computation, so its value is the one `abstract_eval` reported and whatever `apply` returns for it is ignored. `apply_tesseract` warns when the two differ; pass `check_static_outputs=False` or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip the comparison. A field whose value depends on the input values belongs in the schema as an array.
+- **Non-array outputs come from `abstract_eval` under `jit`**: an `OutputSchema` field that is not an array, such as a `str` or a `bool`, cannot enter a traced computation, so under a JAX transformation its value is the one `abstract_eval` reported and whatever `apply` returns for it is ignored. `apply_tesseract` warns when the two differ; pass `check_static_outputs=False` or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip the comparison. Without a transformation, `apply` runs directly and its outputs are returned as-is. A field whose value depends on the input values belongs in the schema as an array.
 
 ## License
 

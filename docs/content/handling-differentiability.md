@@ -157,11 +157,11 @@ def f(x):
     return out["y"] * scale
 ```
 
-A JAX primitive can only return arrays, so a non-array field never enters the
-computation. `apply_tesseract` takes its value from `abstract_eval` and puts it back
-into the output pytree afterwards, both under `jit` and in eager mode. Whatever
-`apply` returns for that field is therefore ignored. When the two disagree,
-`apply_tesseract` warns:
+Under a JAX transformation such as `jit`, `grad` or `vmap`, a JAX primitive can
+only return arrays, so a non-array field never enters the computation.
+`apply_tesseract` takes its value from `abstract_eval` and puts it back into the
+output pytree afterwards. Whatever `apply` returns for that field is therefore
+ignored, and `apply_tesseract` warns when the two disagree:
 
 ```
 UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
@@ -171,15 +171,16 @@ apply, but abstract_eval reported 'reference'. ...
 A field whose value depends on the input values belongs in the schema as an array
 instead.
 
-Under `jit`, a static output cannot be returned from the jitted function itself,
-since JAX has no type for a `str` result. Consume it inside the trace as above and
-return the arrays.
+Without a transformation, `apply` runs directly and its outputs are returned as-is,
+so there is nothing to reconcile and no warning. Under `jit`, a static output cannot
+be returned from the jitted function itself, since JAX has no type for a `str`
+result. Consume it inside the trace as above and return the arrays.
 
 ### Turning the check off
 
-Pass `check_static_outputs=False` to skip the comparison for one call, or set
-`TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it for the whole program. The keyword
-argument wins when both are set:
+The comparison only runs under a transformation. Pass `check_static_outputs=False`
+to skip it for one call, or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it for
+the whole program. The keyword argument wins when both are set:
 
 ```python
 out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)

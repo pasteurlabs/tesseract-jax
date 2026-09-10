@@ -17,6 +17,14 @@ from jax.interpreters import ad, batching, mlir
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
+try:
+    # True only outside any JAX trace. Unlike checking the inputs for tracers,
+    # this stays False inside a jit trace over concrete values closed over by
+    # the traced function, where the primitive is still lowered.
+    from jax._src.core import trace_state_clean as _trace_state_clean
+except ImportError:  # pragma: no cover - fallback if the private helper moves
+    _trace_state_clean = None
+
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
@@ -922,7 +930,9 @@ def apply_tesseract(
             methods) ``False`` may be more efficient.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
-            that differ. ``None`` (default) reads
+            that differ. Only applies under a JAX transformation such as ``jit``,
+            ``grad`` or ``vmap``; without one ``apply`` runs directly and its
+            outputs are returned as-is. ``None`` (default) reads
             ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``, which is on unless set to a
             false value. Pass ``False`` to skip the comparison for one call.
             Skipping it also skips building the keypaths the warning needs; the
@@ -969,9 +979,6 @@ def apply_tesseract(
             "to the Tesseract object."
         )
 
-    if check_static_outputs is None:
-        check_static_outputs = _env_flag(CHECK_STATIC_OUTPUTS_ENV_VAR, True)
-
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
@@ -980,85 +987,24 @@ def apply_tesseract(
     static_args = tuple(_make_hashable(arg) for arg in static_args)
     has_tangent = (True,) * len(array_args)
 
-    if "abstract_eval" in tesseract_client.available_endpoints:
-        # Get abstract values for outputs, so we can unflatten them later
-        output_pytreedef, avals = None, None
-        avals = client.abstract_eval(inputs)
-
-        is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
-        avals_with_path, output_pytreedef = jax.tree_util.tree_flatten_with_path(
-            avals, is_leaf=is_aval
-        )
-        # An OutputSchema may carry non-array fields alongside its arrays, such
-        # as a backend name or a convergence flag. A JAX primitive can only
-        # return arrays, so those leaves never enter the bind. They are read from
-        # abstract_eval, held aside as static primitive parameters, and put back
-        # into the output pytree once the bind has returned.
-        static_output_mask = tuple(not is_aval(aval) for _, aval in avals_with_path)
-        static_output_values = tuple(
-            _make_hashable(aval)
-            for (_, aval), static in zip(
-                avals_with_path, static_output_mask, strict=True
-            )
-            if static
-        )
-
-        for _path, aval in avals_with_path:
-            if is_aval(aval):
-                _check_dtype(aval["dtype"])
-
-        flat_avals = tuple(
-            jax.ShapeDtypeStruct(shape=tuple(aval["shape"]), dtype=aval["dtype"])
-            for (_, aval), static in zip(
-                avals_with_path, static_output_mask, strict=True
-            )
-            if not static
-        )
-
-        # Apply the primitive
-        out = tesseract_dispatch_p.bind(
-            *array_args,
-            params=DispatchParams(
-                static_args=static_args,
-                input_pytreedef=input_pytreedef,
-                output_pytreedef=output_pytreedef,
-                output_avals=flat_avals,
-                static_output_mask=static_output_mask,
-                static_output_values=static_output_values,
-                check_static_outputs=check_static_outputs,
-                is_static_mask=is_static_mask,
-                has_tangent=has_tangent,
-                client=client,
-                eval_func="apply",
-                vmap_method=vmap_method,
-                materialize_jacobian=materialize_jacobian,
-            ),
-        )
-
-        # Put the static leaves back where the schema had them.
-        if any(static_output_mask):
-            out = combine_args(
-                tuple(out),
-                tuple(_unpack_hashable(v) for v in static_output_values),
-                static_output_mask,
-            )
-
-        # Unflatten the output
-        return jax.tree.unflatten(output_pytreedef, out)
-
+    # Outside any trace, apply runs directly and its output is returned as-is.
+    # Under a transformation the primitive is lowered and returns arrays alone,
+    # so abstract_eval determines how to unflatten the result (a transformation
+    # without abstract_eval was already rejected above). If the trace-state
+    # helper is unavailable, fall back to the presence of tracer inputs, which
+    # misses only concrete values closed over inside a trace.
+    if _trace_state_clean is not None:
+        is_eager = _trace_state_clean()
     else:
-        # If there is no abstract_eval endpoint, we cannot determine the output structure
-        # In this case we send None for output_pytreedef and output_avals
-        # and the primitive will return an unflattened output
-        out = tesseract_dispatch_p.bind(
+        is_eager = not has_func_transformation
+    if is_eager:
+        return tesseract_dispatch_p.bind(
             *array_args,
             params=DispatchParams(
                 static_args=static_args,
                 input_pytreedef=input_pytreedef,
                 output_pytreedef=None,
                 output_avals=None,
-                static_output_mask=(),
-                static_output_values=(),
                 is_static_mask=is_static_mask,
                 has_tangent=has_tangent,
                 client=client,
@@ -1068,5 +1014,65 @@ def apply_tesseract(
             ),
         )
 
-        # Unflatten the output
-        return out
+    # A JAX transformation is in play. Its abstract_eval output structure tells
+    # us how to unflatten the arrays the primitive returns.
+    avals = client.abstract_eval(inputs)
+
+    if check_static_outputs is None:
+        check_static_outputs = _env_flag(CHECK_STATIC_OUTPUTS_ENV_VAR, True)
+
+    is_aval = lambda x: isinstance(x, dict) and "dtype" in x and "shape" in x
+    avals_with_path, output_pytreedef = jax.tree_util.tree_flatten_with_path(
+        avals, is_leaf=is_aval
+    )
+    # An OutputSchema may carry non-array fields alongside its arrays, such as a
+    # backend name or a convergence flag. A JAX primitive can only return arrays,
+    # so those leaves never enter the bind. They are read from abstract_eval,
+    # held aside as static primitive parameters, and put back into the output
+    # pytree once the bind has returned.
+    static_output_mask = tuple(not is_aval(aval) for _, aval in avals_with_path)
+    static_output_values = tuple(
+        _make_hashable(aval)
+        for (_, aval), static in zip(avals_with_path, static_output_mask, strict=True)
+        if static
+    )
+
+    for _path, aval in avals_with_path:
+        if is_aval(aval):
+            _check_dtype(aval["dtype"])
+
+    flat_avals = tuple(
+        jax.ShapeDtypeStruct(shape=tuple(aval["shape"]), dtype=aval["dtype"])
+        for (_, aval), static in zip(avals_with_path, static_output_mask, strict=True)
+        if not static
+    )
+
+    # Apply the primitive
+    out = tesseract_dispatch_p.bind(
+        *array_args,
+        params=DispatchParams(
+            static_args=static_args,
+            input_pytreedef=input_pytreedef,
+            output_pytreedef=output_pytreedef,
+            output_avals=flat_avals,
+            static_output_mask=static_output_mask,
+            static_output_values=static_output_values,
+            check_static_outputs=check_static_outputs,
+            is_static_mask=is_static_mask,
+            has_tangent=has_tangent,
+            client=client,
+            eval_func="apply",
+            vmap_method=vmap_method,
+            materialize_jacobian=materialize_jacobian,
+        ),
+    )
+
+    # Put the static leaves back where the schema had them.
+    if any(static_output_mask):
+        out = combine_args(
+            tuple(out),
+            tuple(_unpack_hashable(v) for v in static_output_values),
+            static_output_mask,
+        )
+
+    return jax.tree.unflatten(output_pytreedef, out)
