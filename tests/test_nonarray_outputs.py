@@ -26,7 +26,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tesseract_jax import apply_tesseract, config
+from tesseract_jax import apply_tesseract
+from tesseract_jax.primitive import CHECK_STATIC_OUTPUTS_ENV_VAR
+from tesseract_jax.tree_util import _leaves_differ
 
 X = jnp.arange(3, dtype="float64")
 
@@ -165,16 +167,18 @@ def test_the_drift_warning_does_not_disturb_the_gradient(drifting_static_tess):
     np.testing.assert_allclose(grad, -8.0 * X, rtol=1e-6)
 
 
-def test_the_check_can_be_turned_off(drifting_static_tess):
+def test_the_check_can_be_turned_off_per_call(drifting_static_tess):
     """Comparing every static leaf on every call is not free.
 
     A caller who knows their Tesseract does not drift can pay nothing for the
     check. With it off the response is flattened without keypaths, which is the
     part that costs, and the value the caller gets is unchanged.
     """
-    with config.set(check_static_outputs=False), warnings.catch_warnings():
+    with warnings.catch_warnings():
         warnings.simplefilter("error")
-        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+        out = apply_tesseract(
+            drifting_static_tess, dict(x=-X), check_static_outputs=False
+        )
 
     assert out["backend"] == "reference"
     np.testing.assert_allclose(out["y"], -2.0 * X)
@@ -182,24 +186,70 @@ def test_the_check_can_be_turned_off(drifting_static_tess):
 
 def test_turning_the_check_off_leaves_the_gradient_alone(drifting_static_tess):
     def loss(x):
-        return jnp.sum(apply_tesseract(drifting_static_tess, dict(x=x))["y"] ** 2)
+        return jnp.sum(
+            apply_tesseract(
+                drifting_static_tess, dict(x=x), check_static_outputs=False
+            )["y"]
+            ** 2
+        )
 
-    with config.set(check_static_outputs=False):
-        grad = jax.grad(loss)(-X)
+    grad = jax.grad(loss)(-X)
 
     np.testing.assert_allclose(grad, -8.0 * X, rtol=1e-6)
 
 
-def test_the_setting_comes_back_after_the_block(drifting_static_tess):
-    assert config.check_static_outputs
-    with config.set(check_static_outputs=False):
-        assert not config.check_static_outputs
-    assert config.check_static_outputs
+def test_turning_the_check_off_for_one_call_leaves_the_next_one_alone(
+    drifting_static_tess,
+):
+    """The kwarg is per call, which is the whole reason it is a kwarg."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        apply_tesseract(drifting_static_tess, dict(x=-X), check_static_outputs=False)
 
     with pytest.warns(UserWarning, match="backend"):
         apply_tesseract(drifting_static_tess, dict(x=-X))
 
 
-def test_an_unknown_setting_is_an_error():
-    with pytest.raises(AttributeError, match="check_static_outputs"):
-        config.update("no_such_setting", False)
+@pytest.mark.parametrize("value", ["0", "false", "no", "OFF", " 0 "])
+def test_the_env_var_turns_the_check_off(drifting_static_tess, monkeypatch, value):
+    monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, value)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+
+    assert out["backend"] == "reference"
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_the_env_var_can_also_be_true(drifting_static_tess, monkeypatch, value):
+    monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, value)
+
+    with pytest.warns(UserWarning, match="backend"):
+        apply_tesseract(drifting_static_tess, dict(x=-X))
+
+
+def test_the_kwarg_beats_the_env_var(drifting_static_tess, monkeypatch):
+    monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, "0")
+
+    with pytest.warns(UserWarning, match="backend"):
+        apply_tesseract(drifting_static_tess, dict(x=-X), check_static_outputs=True)
+
+
+def test_a_non_boolean_env_var_is_an_error(drifting_static_tess, monkeypatch):
+    monkeypatch.setenv(CHECK_STATIC_OUTPUTS_ENV_VAR, "maybe")
+
+    with pytest.raises(ValueError, match=CHECK_STATIC_OUTPUTS_ENV_VAR):
+        apply_tesseract(drifting_static_tess, dict(x=X))
+
+
+def test_leaves_that_do_not_compare_to_a_bool_fall_back_to_identity():
+    """`!=` on two arrays is an array, and `bool()` refuses that.
+
+    A served Tesseract cannot produce this, since JSON has no such type, but
+    `Tesseract.from_tesseract_api` hands back whatever the Python function built.
+    """
+    a = np.zeros(3)
+
+    assert not _leaves_differ(a, a)
+    assert _leaves_differ(a, np.zeros(3))

@@ -134,10 +134,11 @@ ValueError: unexpected tree structure of argument to vjp function:
   got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
 ```
 
+
 ## Non-array outputs
 
-An `OutputSchema` may carry fields that are not arrays at all — a backend name, a
-convergence flag, a content hash:
+An `OutputSchema` may carry fields that are not arrays at all, such as a backend
+name or a convergence flag:
 
 ```python
 class OutputSchema(BaseModel):
@@ -146,8 +147,8 @@ class OutputSchema(BaseModel):
     converged: bool = True
 ```
 
-`apply_tesseract` returns these alongside the arrays, and inside a `jit` trace they
-are ordinary Python objects, so you can branch on them:
+`apply_tesseract` returns those fields next to the arrays. They are plain Python
+objects rather than tracers, so a `jit`-ed function can branch on them:
 
 ```python
 @jax.jit
@@ -157,45 +158,37 @@ def f(x):
     return out["y"] * scale
 ```
 
-Two consequences are worth knowing about.
+Two things follow from that.
 
-**Their value comes from `abstract_eval`, not from `apply`.** A JAX primitive can only
-return arrays, so a non-array field never enters the traced computation. It is read
-from `abstract_eval` at trace time and put back into the output pytree afterwards. If
-`apply` later returns a different value for one, that value cannot be used, and
-`apply_tesseract` warns rather than discarding it silently:
+**The value comes from `abstract_eval`.** A JAX primitive can only
+return arrays, so a non-array field never enters the traced computation.
+`apply_tesseract` reads it from `abstract_eval` and puts it back into the output
+pytree afterwards. This holds outside `jit` as well, since `abstract_eval` is called
+either way. If `apply` later reports a different value, that value cannot be used, so
+`apply_tesseract` warns about the mismatch:
 
 ```
 UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
 apply, but abstract_eval reported 'reference'. ...
 ```
 
-A field whose value genuinely depends on the input _values_ therefore belongs in the
-schema as an array, not as a `str` or a `bool`.
+A field whose value depends on the input _values_ therefore belongs in the schema as
+an array.
 
-The comparison runs on every `apply` call, so it can be turned off when a Tesseract
-is known not to drift. Set the environment variable before importing, or the setting
-afterwards:
+**A `jit`-ed function cannot return one.** There is no JAX type for a `str` output, so
+consume the field inside the trace as above and return the arrays.
+
+### Turning the check off
+
+The comparison runs on every `apply` call. Pass `check_static_outputs=False` to skip
+it for one Tesseract:
 
 ```python
-import tesseract_jax
-
-tesseract_jax.config.check_static_outputs = False        # for the rest of the process
-
-with tesseract_jax.config.set(check_static_outputs=False):   # or for a block
-    out = apply_tesseract(tess, {"x": x})
+out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
 ```
 
-`TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` does the same at import time. With the check
-off, the response is flattened without keypaths, which is the part that costs. The
-value the caller receives is the same either way.
+Set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it everywhere. The keyword
+argument wins over the environment variable when both are given.
 
-**A jitted function cannot return one.** This is JAX's own rule about what a traced
-function may return — there is no JAX type for a `str` output:
-
-```
-TypeError: function f traced for jit returned a value of type <class 'str'>
-at output component ['backend'], which is not a valid JAX type
-```
-
-Consume the field inside the trace, as above, and return the arrays.
+With the check off, the response is flattened without keypaths, which is the part
+that costs. The values the caller receives are the same either way.

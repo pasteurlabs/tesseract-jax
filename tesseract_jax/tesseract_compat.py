@@ -8,7 +8,6 @@ import numpy as np
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
-from tesseract_jax.config import config
 from tesseract_jax.tree_util import (
     PyTree,
     _pytree_to_tesseract_flat,
@@ -106,12 +105,6 @@ class Jaxeract:
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
         static_output_mask = params.static_output_mask
-        # Static output values are stored wrapped so the params bundle stays
-        # hashable for XLA CSE; unwrap them before comparing against the response.
-        static_output_values = tuple(
-            v.wrapped if hasattr(v, "wrapped") else v
-            for v in params.static_output_values
-        )
         inputs = unflatten_args(
             array_args,
             params.static_args,
@@ -127,7 +120,7 @@ class Jaxeract:
         # Keypaths cost more to build than plain leaves and are only needed to
         # name a field in the drift warning, so they are gathered only when that
         # warning can actually fire.
-        checking = config.check_static_outputs and any(static_output_mask)
+        checking = params.check_static_outputs and any(static_output_mask)
         if checking:
             leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
             out_data = tuple(leaf for _, leaf in leaves_with_path)
@@ -144,11 +137,18 @@ class Jaxeract:
                 _, static_paths = split_args(
                     tuple(path for path, _ in leaves_with_path), static_output_mask
                 )
+                # Static output values are stored wrapped so the params bundle
+                # stays hashable for XLA CSE; unwrap them only when they are
+                # about to be compared.
+                expected_statics = tuple(
+                    v.wrapped if hasattr(v, "wrapped") else v
+                    for v in params.static_output_values
+                )
                 # apply runs after the trace, so a static leaf it returns is
                 # already too late to be used. Say so rather than dropping it in
                 # silence.
                 warn_on_static_output_drift(
-                    static_paths, returned_statics, static_output_values
+                    static_paths, returned_statics, expected_statics
                 )
         return out_data
 

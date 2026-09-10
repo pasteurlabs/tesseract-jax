@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import operator
+import os
 from collections.abc import Sequence
 from typing import Any
 
@@ -29,6 +30,31 @@ from tesseract_jax.tree_util import (
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
+
+CHECK_STATIC_OUTPUTS_ENV_VAR = "TESSERACT_JAX_CHECK_STATIC_OUTPUTS"
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Read a boolean environment variable, or fall back to ``default``.
+
+    Read per call rather than once at import, so a program can flip the variable
+    at runtime and so tests can set it without reimporting the package.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    raise ValueError(
+        f"{name} is set to {raw!r}, which is not a boolean. "
+        f"Use one of 1/0, true/false, yes/no, on/off."
+    )
 
 
 class _Hashable:
@@ -785,6 +811,7 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -893,6 +920,14 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
+        check_static_outputs: Whether to compare the non-array outputs ``apply``
+            returns against the ones ``abstract_eval`` reported, and warn on any
+            that differ. ``None`` (default) reads ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``,
+            which is itself on unless set to a false value, so pass ``False`` here
+            to skip the comparison for one Tesseract without turning it off for
+            the whole program. Skipping it also skips the keypaths the warning
+            needs, which is the part that costs. Either way the caller gets the
+            same values back.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -935,6 +970,9 @@ def apply_tesseract(
             "to the Tesseract object."
         )
 
+    if check_static_outputs is None:
+        check_static_outputs = _env_flag(CHECK_STATIC_OUTPUTS_ENV_VAR, True)
+
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
@@ -957,11 +995,6 @@ def apply_tesseract(
         # only return arrays, so those leaves never enter the bind. They are
         # read from abstract_eval, held aside as static primitive parameters,
         # and put back into the output pytree once the bind has returned.
-        #
-        # One consequence is worth stating plainly: a static output leaf is the
-        # value abstract_eval reported, not the value apply returned. Under jit
-        # no other value exists, and a leaf whose value depends on the input
-        # values is an array, not a static.
         static_output_mask = tuple(not is_aval(aval) for _, aval in avals_with_path)
         static_output_values = tuple(
             _make_hashable(aval)
@@ -993,6 +1026,7 @@ def apply_tesseract(
                 output_avals=flat_avals,
                 static_output_mask=static_output_mask,
                 static_output_values=static_output_values,
+                check_static_outputs=check_static_outputs,
                 is_static_mask=is_static_mask,
                 has_tangent=has_tangent,
                 client=client,

@@ -43,6 +43,9 @@ class DispatchParams:
         static_output_values: The traced value of each static output leaf, wrapped
             so it hashes. ``apply`` compares these against what the endpoint
             returns; the other rules leave it empty.
+        check_static_outputs: Whether ``apply`` makes that comparison at all. Set
+            per call by ``apply_tesseract``, defaulting to the value of
+            ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``.
         client: The Tesseract wrapper the call dispatches to.
         eval_func: Which endpoint to invoke (``apply``, ``jacobian_vector_product``,
             ``vector_jacobian_product`` or ``jacobian``).
@@ -63,6 +66,7 @@ class DispatchParams:
     eval_func: str
     static_output_mask: tuple[bool, ...] = ()
     static_output_values: tuple[Any, ...] = ()
+    check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None
     materialize_jacobian: bool | None = None
     jac_input_paths: tuple[str, ...] | None = None

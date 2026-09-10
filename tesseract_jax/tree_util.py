@@ -158,9 +158,15 @@ def _pytree_to_tesseract_flat(
 def _leaves_differ(returned: Any, expected: Any) -> bool:
     """Whether two static leaves disagree.
 
-    Static leaves are decoded response data, so ``!=`` settles it. The guard is
-    for a leaf whose comparison does not answer with a bool -- an array-valued
-    one, say -- where identity is the only question left that still has an answer.
+    Static leaves are decoded response data, so ``!=`` settles it for anything a
+    served Tesseract can send: JSON has no type whose ``!=`` returns a non-bool.
+
+    The fallback is for ``Tesseract.from_tesseract_api``, which hands back the
+    objects the Python function built rather than a JSON round trip. An
+    ``abstract_eval`` that reports a numpy array for a field is the case to
+    picture: the field is not an aval, so it counts as static, and ``a != b``
+    on two arrays is an array, which ``bool()`` refuses for anything but one
+    element. Identity is then the only question left with an answer.
     """
     try:
         return bool(returned != expected)
