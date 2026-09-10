@@ -158,15 +158,12 @@ def _pytree_to_tesseract_flat(
 def _leaves_differ(returned: Any, expected: Any) -> bool:
     """Whether two static leaves disagree.
 
-    Static leaves are decoded response data, so ``!=`` settles it for anything a
-    served Tesseract can send: JSON has no type whose ``!=`` returns a non-bool.
-
-    The fallback is for ``Tesseract.from_tesseract_api``, which hands back the
-    objects the Python function built rather than a JSON round trip. An
-    ``abstract_eval`` that reports a numpy array for a field is the case to
-    picture: the field is not an aval, so it counts as static, and ``a != b``
-    on two arrays is an array, which ``bool()`` refuses for anything but one
-    element. Identity is then the only question left with an answer.
+    For a served Tesseract, static leaves are JSON-decoded response data, so
+    ``!=`` always returns a bool and settles it. ``Tesseract.from_tesseract_api``
+    can return other types, since it hands back the objects the Python function
+    built directly. If ``abstract_eval`` reports a numpy array for a field, that
+    field counts as static, and ``a != b`` on two arrays is itself an array that
+    ``bool()`` rejects. The identity fallback covers that case.
     """
     try:
         return bool(returned != expected)
@@ -181,10 +178,10 @@ def warn_on_static_output_drift(
 ) -> None:
     """Warn about static output leaves whose runtime value is not the traced one.
 
-    ``apply`` runs after the trace, so a static leaf it returns arrives too late to
-    be used: ``apply_tesseract`` hands back the value ``abstract_eval`` reported.
-    A Tesseract that returns a different one from ``apply`` is therefore doing
-    something the caller cannot observe, and silence would hide that.
+    ``apply_tesseract`` returns the value ``abstract_eval`` reported for a static
+    leaf, so a different value from ``apply`` is never used. Warn rather than drop
+    it silently, since the caller would otherwise read a value the Tesseract did
+    not return from ``apply``.
     """
     for path, returned, expected in zip(
         paths, returned_values, expected_values, strict=True
@@ -207,12 +204,11 @@ def dummy_output_tree(
     n_avals: int,
     static_output_mask: Sequence[bool] = (),
 ) -> Any:
-    """The output pytree carrying its own aval index at every array leaf.
+    """The output pytree with each array leaf holding its own aval index.
 
-    Static leaves get ``None``, which is an empty pytree node, so they vanish
-    from anything that flattens this tree. That is what keeps the differentiable
-    paths honest: ``_pytree_to_tesseract_flat`` never sees a static output, so
-    every path-to-position map built from this tree still lines up with
+    Static leaves get ``None``, an empty pytree node, so they drop out when the
+    tree is flattened. ``_pytree_to_tesseract_flat`` therefore never sees a static
+    output, and the path-to-position maps built from this tree line up with
     ``output_avals``, which holds arrays only.
     """
     if not any(static_output_mask):

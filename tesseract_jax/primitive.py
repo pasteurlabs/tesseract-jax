@@ -40,8 +40,8 @@ _FALSY = frozenset({"0", "false", "no", "off"})
 def _env_flag(name: str, default: bool) -> bool:
     """Read a boolean environment variable, or fall back to ``default``.
 
-    Read per call rather than once at import, so a program can flip the variable
-    at runtime and so tests can set it without reimporting the package.
+    Read per call rather than once at import, so a program can change the
+    variable at runtime.
     """
     raw = os.environ.get(name)
     if raw is None:
@@ -922,12 +922,11 @@ def apply_tesseract(
             methods) ``False`` may be more efficient.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
-            that differ. ``None`` (default) reads ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``,
-            which is itself on unless set to a false value, so pass ``False`` here
-            to skip the comparison for one Tesseract without turning it off for
-            the whole program. Skipping it also skips the keypaths the warning
-            needs, which is the part that costs. Either way the caller gets the
-            same values back.
+            that differ. ``None`` (default) reads
+            ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``, which is on unless set to a
+            false value. Pass ``False`` to skip the comparison for one call.
+            Skipping it also skips building the keypaths the warning needs; the
+            caller gets the same values either way.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -990,11 +989,11 @@ def apply_tesseract(
         avals_with_path, output_pytreedef = jax.tree_util.tree_flatten_with_path(
             avals, is_leaf=is_aval
         )
-        # An OutputSchema may carry non-array fields alongside its arrays: a
-        # backend name, a convergence flag, a content hash. A JAX primitive can
-        # only return arrays, so those leaves never enter the bind. They are
-        # read from abstract_eval, held aside as static primitive parameters,
-        # and put back into the output pytree once the bind has returned.
+        # An OutputSchema may carry non-array fields alongside its arrays, such
+        # as a backend name or a convergence flag. A JAX primitive can only
+        # return arrays, so those leaves never enter the bind. They are read from
+        # abstract_eval, held aside as static primitive parameters, and put back
+        # into the output pytree once the bind has returned.
         static_output_mask = tuple(not is_aval(aval) for _, aval in avals_with_path)
         static_output_values = tuple(
             _make_hashable(aval)

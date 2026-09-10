@@ -1,13 +1,11 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A Tesseract whose static output leaf changes value between the two endpoints.
+"""A Tesseract whose static output leaf differs between the two endpoints.
 
-``abstract_eval`` always reports ``backend="reference"``. ``apply`` reports
-``"fallback"`` when the input is negative, which is the honest shape of the
-problem: a solver that only knows which backend it took once it has looked at
-the numbers. Static leaves are read at trace time, so that answer arrives too
-late to be used and ``apply_tesseract`` warns instead of silently discarding it.
+``abstract_eval`` always reports ``backend="reference"``, while ``apply`` reports
+``"fallback"`` for a negative input. Static leaves are read at trace time, so
+``apply``'s value is never used and ``apply_tesseract`` warns about the mismatch.
 """
 
 from typing import Any

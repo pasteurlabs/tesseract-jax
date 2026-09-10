@@ -41,11 +41,10 @@ class DispatchParams:
             non-array (static) value that never enters the bind. Empty when the
             Tesseract has no ``abstract_eval`` endpoint.
         static_output_values: The traced value of each static output leaf, wrapped
-            so it hashes. ``apply`` compares these against what the endpoint
-            returns; the other rules leave it empty.
-        check_static_outputs: Whether ``apply`` makes that comparison at all. Set
-            per call by ``apply_tesseract``, defaulting to the value of
-            ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``.
+            to stay hashable. ``apply`` compares these against what the endpoint
+            returns; the other endpoints leave it empty.
+        check_static_outputs: Whether ``apply`` makes that comparison. Set per call
+            by ``apply_tesseract``, defaulting to ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``.
         client: The Tesseract wrapper the call dispatches to.
         eval_func: Which endpoint to invoke (``apply``, ``jacobian_vector_product``,
             ``vector_jacobian_product`` or ``jacobian``).

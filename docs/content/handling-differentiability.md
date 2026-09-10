@@ -134,7 +134,6 @@ ValueError: unexpected tree structure of argument to vjp function:
   got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
 ```
 
-
 ## Non-array outputs
 
 An `OutputSchema` may carry fields that are not arrays at all, such as a backend
@@ -148,47 +147,43 @@ class OutputSchema(BaseModel):
 ```
 
 `apply_tesseract` returns those fields next to the arrays. They are plain Python
-objects rather than tracers, so a `jit`-ed function can branch on them:
+objects rather than tracers, so a `jit`-ed function can branch on them at trace time:
 
 ```python
 @jax.jit
 def f(x):
     out = apply_tesseract(tess, {"x": x})
-    scale = 1.0 if out["converged"] else 0.0   # a trace-time branch
+    scale = 1.0 if out["converged"] else 0.0
     return out["y"] * scale
 ```
 
-Two things follow from that.
-
-**The value comes from `abstract_eval`.** A JAX primitive can only
-return arrays, so a non-array field never enters the traced computation.
-`apply_tesseract` reads it from `abstract_eval` and puts it back into the output
-pytree afterwards. This holds outside `jit` as well, since `abstract_eval` is called
-either way. If `apply` later reports a different value, that value cannot be used, so
-`apply_tesseract` warns about the mismatch:
+A JAX primitive can only return arrays, so a non-array field never enters the
+computation. `apply_tesseract` takes its value from `abstract_eval` and puts it back
+into the output pytree afterwards, both under `jit` and in eager mode. Whatever
+`apply` returns for that field is therefore ignored. When the two disagree,
+`apply_tesseract` warns:
 
 ```
 UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
 apply, but abstract_eval reported 'reference'. ...
 ```
 
-A field whose value depends on the input _values_ therefore belongs in the schema as
-an array.
+A field whose value depends on the input values belongs in the schema as an array
+instead.
 
-**A `jit`-ed function cannot return one.** There is no JAX type for a `str` output, so
-consume the field inside the trace as above and return the arrays.
+Under `jit`, a static output cannot be returned from the jitted function itself,
+since JAX has no type for a `str` result. Consume it inside the trace as above and
+return the arrays.
 
 ### Turning the check off
 
-The comparison runs on every `apply` call. Pass `check_static_outputs=False` to skip
-it for one Tesseract:
+Pass `check_static_outputs=False` to skip the comparison for one call, or set
+`TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it for the whole program. The keyword
+argument wins when both are set:
 
 ```python
 out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
 ```
 
-Set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it everywhere. The keyword
-argument wins over the environment variable when both are given.
-
-With the check off, the response is flattened without keypaths, which is the part
-that costs. The values the caller receives are the same either way.
+Skipping the check avoids building the keypaths the warning needs. The values the
+caller receives are the same either way.

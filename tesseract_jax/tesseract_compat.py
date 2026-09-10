@@ -117,9 +117,8 @@ class Jaxeract:
         if params.output_avals is None:
             return out_data
 
-        # Keypaths cost more to build than plain leaves and are only needed to
-        # name a field in the drift warning, so they are gathered only when that
-        # warning can actually fire.
+        # Keypaths are only needed to name a field in the drift warning, so build
+        # them only when that warning can fire.
         checking = params.check_static_outputs and any(static_output_mask)
         if checking:
             leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
@@ -128,25 +127,20 @@ class Jaxeract:
             out_data = tuple(jax.tree.leaves(out_data))
 
         if any(static_output_mask):
-            # A JAX primitive can only return arrays, so the response's static
-            # leaves are dropped here and put back by apply_tesseract once the
-            # bind has returned. The value used is the one abstract_eval gave,
-            # because that is the only one that exists under jit.
+            # A JAX primitive can only return arrays, so drop the response's
+            # static leaves here; apply_tesseract puts back the values
+            # abstract_eval reported once the bind has returned.
             out_data, returned_statics = split_args(out_data, static_output_mask)
             if checking:
                 _, static_paths = split_args(
                     tuple(path for path, _ in leaves_with_path), static_output_mask
                 )
-                # Static output values are stored wrapped so the params bundle
-                # stays hashable for XLA CSE; unwrap them only when they are
-                # about to be compared.
+                # static_output_values are wrapped so the params bundle stays
+                # hashable for XLA CSE; unwrap before comparing.
                 expected_statics = tuple(
                     v.wrapped if hasattr(v, "wrapped") else v
                     for v in params.static_output_values
                 )
-                # apply runs after the trace, so a static leaf it returns is
-                # already too late to be used. Say so rather than dropping it in
-                # silence.
                 warn_on_static_output_drift(
                     static_paths, returned_statics, expected_statics
                 )
@@ -305,10 +299,9 @@ class Jaxeract:
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
-        # A static output leaf carries no cotangent, so its slot is filled with
-        # None. None is an empty pytree node, so it drops back out when the tree
-        # is flattened into schema paths, which is exactly where a static output
-        # should not appear.
+        # A static output leaf carries no cotangent, so fill its slot with None.
+        # None is an empty pytree node and drops back out when the tree is
+        # flattened into schema paths, keeping static outputs out of them.
         if any(params.static_output_mask):
             cotangents = combine_args(
                 tuple(cotangents),
