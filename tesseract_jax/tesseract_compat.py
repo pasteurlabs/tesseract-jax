@@ -31,12 +31,12 @@ def _on_device(values: "list | tuple") -> bool:
     lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
     results) from the CPU host-callback lowering (real NumPy arrays).
 
-    The ``cuda_ipc`` import is deliberately lazy, not at module scope: eagerly
-    importing ``tesseract_core.runtime.cuda_ipc`` perturbs schema/typeguard state
+    The ``cuda.ipc`` import is deliberately lazy, not at module scope: eagerly
+    importing ``tesseract_core.runtime.cuda.ipc`` perturbs schema/typeguard state
     in the shared interpreter and breaks in-process (``LocalClient``) Tesseracts
     whose endpoints use ellipsis-shaped array schemas.
     """
-    from tesseract_core.runtime.cuda_ipc import has_cuda_array_interface
+    from tesseract_core.runtime.cuda.ipc import has_cuda_array_interface
 
     return any(has_cuda_array_interface(v) for v in values)
 
@@ -146,18 +146,60 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
     return np.full(shape, fill, dtype=dtype)
 
 
+# Device transports the GPU (FFI) lowering supports end-to-end. cuda_ipc is the
+# only one wired through the native shim today; add names here as the FFI path
+# learns to drive them.
+_SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
+
+
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
-    def __init__(self, tesseract_client: Tesseract, *, cuda_ipc: bool = False) -> None:
+    def __init__(
+        self,
+        tesseract_client: Tesseract,
+        *,
+        cuda_ipc: bool = False,
+        device_transport: str | None = None,
+    ) -> None:
         """Initialize the Tesseract client.
 
-        ``cuda_ipc`` opts this call into exchanging GPU arrays with a served
-        Tesseract via CUDA IPC handles instead of a host round-trip; it gates
-        both the GPU FFI lowering and the :meth:`cuda_ipc` context below.
+        ``device_transport`` names the on-device transport used to exchange GPU
+        arrays with a served Tesseract instead of a host round-trip (e.g.
+        ``"cuda_ipc"``). It selects one of the runtime's registered device
+        transports (see :mod:`tesseract_core.runtime.device_transport`) and gates
+        both the GPU FFI lowering and the :meth:`device_transport_encoding`
+        context below. ``cuda_ipc=True`` is the back-compatible spelling of
+        ``device_transport="cuda_ipc"``.
         """
+        if cuda_ipc and device_transport not in (None, "cuda_ipc"):
+            raise ValueError(
+                "Pass either cuda_ipc=True or device_transport=..., not both "
+                f"conflicting values (got cuda_ipc=True, "
+                f"device_transport={device_transport!r})."
+            )
+        if cuda_ipc and device_transport is None:
+            device_transport = "cuda_ipc"
+
+        # Only transports the GPU (FFI) lowering actually implements end-to-end
+        # are accepted. The lowering is currently cuda_ipc-specific, so an
+        # unsupported name would otherwise route silently into that path and send
+        # an ``Accept: application/json+<name>`` the server has no backend for.
+        # Extend this set as further transports are wired through the FFI path.
+        if (
+            device_transport is not None
+            and device_transport not in _SUPPORTED_TRANSPORTS
+        ):
+            raise ValueError(
+                f"Unsupported device_transport {device_transport!r}; "
+                f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
+            )
+
         self.client = tesseract_client
-        self._cuda_ipc = cuda_ipc
+        # The transport name (None = host round-trip). ``_cuda_ipc`` is kept as a
+        # bool alias so existing call sites and equality/hash keep working.
+        self._device_transport = device_transport
+        self._cuda_ipc = device_transport is not None
 
         self.tesseract_input_args = tuple(
             arg
@@ -203,57 +245,76 @@ class Jaxeract:
         """
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        return self.client == other.client and self._cuda_ipc == other._cuda_ipc
+        return (
+            self.client == other.client
+            and self._device_transport == other._device_transport
+        )
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client, self._cuda_ipc))
+        return hash((Jaxeract, self.client, self._device_transport))
 
     @contextlib.contextmanager
-    def cuda_ipc(self) -> Generator[None]:
-        """Temporarily make the underlying HTTP client use ``cuda_ipc`` encoding.
+    def device_transport_encoding(self) -> Generator[None]:
+        """Temporarily make the HTTP client use this call's device transport.
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
-        the client exports GPU array *inputs* via CUDA IPC handles and decodes
-        ``cuda_ipc`` *outputs* back to GPU arrays -- no host round-trip. Two
-        things must change and be restored:
+        the client exports GPU array *inputs* by reference through the negotiated
+        device transport and the served Tesseract hands the *outputs* back the
+        same way -- no host round-trip. tesseract-core keeps these two axes
+        orthogonal: ``_output_format`` governs how CPU arrays are serialized and
+        ``_gpu_transport`` selects how GPU arrays leave the process. So two things
+        must change and be restored:
 
-        * ``_output_format`` (drives both the request encoder and response
-          decoder), and
-        * an ``Accept: application/json+cuda_ipc`` header, since the response
-          format is otherwise the server's default and the client never sends
-          Accept on its own.
+        * ``_gpu_transport`` (drives the request encoder's per-leaf GPU export),
+          and
+        * an ``Accept: application/<output_format>; gpu_transport=<transport>``
+          header, which negotiates the server's GPU output transport per request.
+          The client never sends Accept on its own and the served Tesseract may
+          default to ``gpu_transport="none"``, so without the header the response
+          would come back host-copied.
+
+        ``_output_format`` is left untouched: it still names the CPU-array
+        encoding, and the ``Accept`` media type reuses it verbatim so the CPU
+        leaves of a mixed response are unaffected.
 
         Scoped so the shared client is not permanently mutated (which would leak
-        cuda_ipc behavior onto host-callback / CPU uses of the same client). A
-        no-op when this call did not opt into ``cuda_ipc`` (:attr:`_cuda_ipc`),
-        or for non-HTTP clients (e.g. the in-process ``LocalClient``).
+        the on-device transport onto host-callback / CPU uses of the same client).
+        A no-op when this call did not opt into a device transport
+        (:attr:`_device_transport`), or for non-HTTP clients (e.g. the in-process
+        ``LocalClient``).
         """
         client = getattr(self.client, "_client", None)
         if (
-            not self._cuda_ipc
+            self._device_transport is None
             or client is None
-            or not hasattr(client, "_output_format")
+            or not hasattr(client, "_gpu_transport")
         ):
             yield
             return
-        prev_fmt = client._output_format
+        prev_transport = client._gpu_transport
+        output_format = getattr(client, "_output_format", "json+base64")
         session = getattr(client, "_session", None)
         had_accept = session is not None and "Accept" in session.headers
         prev_accept = session.headers.get("Accept") if session is not None else None
 
-        client._output_format = "json+cuda_ipc"
+        client._gpu_transport = self._device_transport
         if session is not None:
-            session.headers["Accept"] = "application/json+cuda_ipc"
+            session.headers["Accept"] = (
+                f"application/{output_format}; gpu_transport={self._device_transport}"
+            )
         try:
             yield
         finally:
-            client._output_format = prev_fmt
+            client._gpu_transport = prev_transport
             if session is not None:
                 if had_accept:
                     session.headers["Accept"] = prev_accept
                 else:
                     session.headers.pop("Accept", None)
+
+    # Back-compat alias: the GPU lowering historically calls ``client.cuda_ipc()``.
+    cuda_ipc = device_transport_encoding
 
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,
