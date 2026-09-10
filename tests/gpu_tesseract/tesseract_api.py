@@ -20,6 +20,7 @@ GPU-direct (cuda_ipc) return path for a materialized Jacobian.
 
 from typing import Any
 
+import cupy
 import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
@@ -43,16 +44,12 @@ class OutputSchema(BaseModel):
 
 
 def _to_cupy(x):
-    import cupy
-
     # x may arrive as a numpy array (base64 inputs) or a cupy array (cuda_ipc
     # inputs). asarray keeps cupy on-device and moves numpy onto the device.
     return cupy.asarray(x)
 
 
 def _compute_c(inputs):
-    import cupy
-
     a = _to_cupy(inputs.a)
     b = _to_cupy(inputs.b)
     scale = float(inputs.scale)
@@ -82,8 +79,6 @@ def jacobian_vector_product(
     jvp_outputs: set[str],
     tangent_vector: dict[str, Any],
 ):
-    import cupy
-
     scale = float(inputs.scale)
     mask = (
         _to_cupy(inputs.mask)
@@ -104,8 +99,6 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
-    import cupy
-
     scale = float(inputs.scale)
     mask = (
         _to_cupy(inputs.mask)
@@ -126,8 +119,6 @@ def jacobian(
     jac_inputs: set[str],
     jac_outputs: set[str],
 ):
-    import cupy
-
     a = _to_cupy(inputs.a)
     n = a.shape[0]
     scale = float(inputs.scale)

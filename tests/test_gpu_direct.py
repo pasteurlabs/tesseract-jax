@@ -288,6 +288,54 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
     assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
 
 
+def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
+    """A returned array whose shape disagrees with XLA's output buffer must raise.
+
+    XLA sizes each output buffer from tesseract-jax's declared avals, but the
+    Tesseract is not forced to return that shape (an unconstrained output schema
+    is only shape-validated server-side when it fully pins the shape). The native
+    handler compares each result's ``__cuda_array_interface__`` shape/dtype
+    against the expected buffer and raises rather than copying mismatched bytes
+    (which would over- or under-read device memory). We inject a truncated result
+    to drive that path; the process must survive the clean error.
+    """
+    from tesseract_jax import gpu_ffi
+
+    gpu_ffi.ensure_registered()
+    real_dispatch = gpu_ffi._native_dispatch
+    native = gpu_ffi._native()
+
+    def _wrong_shape_dispatch(token, inputs):
+        out = real_dispatch(token, inputs)
+        # Re-expose the first result's device buffer with a shape one element
+        # short of what XLA allocated: same dtype, wrong (smaller) shape.
+        cai = dict(out[0].__cuda_array_interface__)
+        n = cai["shape"][0]
+        cai["shape"] = (n - 1,)
+
+        class _WrongShape:
+            __cuda_array_interface__ = cai
+
+        return [_WrongShape(), *out[1:]]
+
+    native.set_dispatch_callback(_wrong_shape_dispatch)
+    try:
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        f = jax.jit(
+            lambda a, b: apply_tesseract(
+                served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+            )["c"]
+        )
+        with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
+            f(a, b).block_until_ready()
+    finally:
+        native.set_dispatch_callback(real_dispatch)
+
+    # The interpreter survived the failure: a fresh trivial computation still runs.
+    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+
+
 @pytest.mark.parametrize("n", [100_000, 10_000_000])
 def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
     """Timing guard for the GPU-direct ``apply`` path.

@@ -265,18 +265,50 @@ const char* dtype_typestr(ffi::DataType dt) {
   }
 }
 
+// Mirrors `np.issubdtype(arr.dtype, np.inexact)`: the float and complex dtypes,
+// i.e. the ones with a NaN bit pattern to spell. Used to fill a discarded
+// derivative slot the same way the host path does -- NaN for inexact dtypes,
+// zero for everything else (see the placeholder fill in DispatchImpl).
+bool dtype_is_inexact(ffi::DataType dt) {
+  using DT = ffi::DataType;
+  switch (dt) {
+    case DT::F16:
+    case DT::F32:
+    case DT::F64:
+    case DT::BF16:
+    case DT::C64:
+    case DT::C128:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Render a shape as "(d0, d1, ...)" for mismatch diagnostics.
+std::string shape_str(const std::vector<int64_t>& shape) {
+  std::string s = "(";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i) s += ", ";
+    s += std::to_string(shape[i]);
+  }
+  s += ")";
+  return s;
+}
+
 // A plain description of one buffer, handed to Python.
 struct BufferDesc {
   uintptr_t ptr;
   std::string typestr;
   std::vector<int64_t> shape;
   size_t nbytes;
+  bool inexact = false;  // dtype has a NaN to spell (F16/F32/F64/BF16/C64/C128)
 };
 
 BufferDesc describe(ffi::AnyBuffer buf) {
   BufferDesc d;
   d.ptr = reinterpret_cast<uintptr_t>(buf.untyped_data());
   d.typestr = dtype_typestr(buf.element_type());
+  d.inexact = dtype_is_inexact(buf.element_type());
   auto dims = buf.dimensions();
   for (size_t i = 0; i < dims.size(); ++i) {
     d.shape.push_back(dims[i]);
@@ -389,57 +421,94 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
       rt.GetLastError();
     }
 
-    // Expect a list of objects exposing __cuda_array_interface__.
-    nb::sequence seq = nb::borrow<nb::sequence>(out);
-    if (nb::len(seq) != out_descs.size()) {
-      return ffi::Error::Internal(
-          "dispatch callback returned wrong number of results");
-    }
-    const bool check_ptrs = debug_check_device_ptrs();
-    for (size_t i = 0; i < out_descs.size(); ++i) {
-      nb::object item = seq[i];
-      results_keepalive.push_back(item);  // keep alive through the copy
-      BufferDesc rd;
-      // A ``None`` result marks a placeholder slot: a discarded gradient/tangent
-      // for a non-differentiable input or output that no consumer reads. There is
-      // no source array to copy; rd.ptr == 0 flags it for a NaN-fill (rather than
-      // a copy) of XLA's output buffer below -- no source buffer is fabricated.
-      if (item.is_none()) {
-        rd.ptr = 0;
-        rd.nbytes = 0;
-        result_descs.push_back(rd);
-        continue;
+    // Expect a list of objects exposing __cuda_array_interface__. Reading their
+    // pointer/dtype/shape drives arbitrary Python (attribute access, casts,
+    // __getitem__), any of which may raise -- and a nanobind exception must not
+    // unwind across the C-ABI FFI boundary into XLA. Convert any throw into an
+    // ffi::Error so a malformed dispatch return fails cleanly instead of
+    // crashing the process.
+    try {
+      nb::sequence seq = nb::borrow<nb::sequence>(out);
+      if (nb::len(seq) != out_descs.size()) {
+        return ffi::Error::Internal(
+            "dispatch callback returned wrong number of results");
       }
-      nb::object cai = item.attr("__cuda_array_interface__");
-      nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
-      rd.ptr = nb::cast<uintptr_t>(data[0]);
-      rd.nbytes = out_descs[i].nbytes;  // trust XLA's expected size
-      result_descs.push_back(rd);
-      // Debug: the dispatch's returned buffers must be device-resident.
-      // This is the check that matters: a host copy on a derivative return path
-      // (np.asarray/np.full materializing a host array) surfaces here as a host
-      // pointer, and we fail instead of silently copying host->"device".
-      if (check_ptrs) {
-        if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
-                                       "result " + std::to_string(i));
-            e.failure()) {
-          return e;
+      const bool check_ptrs = debug_check_device_ptrs();
+      for (size_t i = 0; i < out_descs.size(); ++i) {
+        nb::object item = seq[i];
+        results_keepalive.push_back(item);  // keep alive through the copy
+        BufferDesc rd;
+        // A ``None`` result marks a placeholder slot: a discarded
+        // gradient/tangent for a non-differentiable input or output that no
+        // consumer reads. There is no source array to copy; rd.ptr == 0 flags it
+        // for a fill (rather than a copy) of XLA's output buffer below -- no
+        // source buffer is fabricated.
+        if (item.is_none()) {
+          rd.ptr = 0;
+          rd.nbytes = 0;
+          result_descs.push_back(rd);
+          continue;
+        }
+        nb::object cai = item.attr("__cuda_array_interface__");
+        nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
+        rd.ptr = nb::cast<uintptr_t>(data[0]);
+        // XLA sized this output buffer from tesseract-jax's declared avals, but
+        // nothing forces the Tesseract to return that dtype or shape: the
+        // jacobian response schema permits any dtype, and unconstrained output
+        // shapes are only validated by the server when the schema fully pins
+        // them. Unlike the host path we cannot cast here, so compare before
+        // copying -- otherwise a same-itemsize dtype swap (int32 vs float32)
+        // would be silently reinterpreted, and a narrower source would drive an
+        // out-of-bounds device read.
+        rd.typestr = nb::cast<std::string>(cai["typestr"]);
+        rd.shape = nb::cast<std::vector<int64_t>>(cai["shape"]);
+        if (rd.typestr != out_descs[i].typestr || rd.shape != out_descs[i].shape) {
+          return ffi::Error::InvalidArgument(
+              "tesseract_jax result " + std::to_string(i) +
+              ": Tesseract returned " + rd.typestr + shape_str(rd.shape) +
+              ", expected " + out_descs[i].typestr +
+              shape_str(out_descs[i].shape));
+        }
+        rd.nbytes = out_descs[i].nbytes;  // now known to agree
+        result_descs.push_back(rd);
+        // Debug: the dispatch's returned buffers must be device-resident.
+        // This is the check that matters: a host copy on a derivative return path
+        // (np.asarray/np.full materializing a host array) surfaces here as a host
+        // pointer, and we fail instead of silently copying host->"device".
+        if (check_ptrs) {
+          if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
+                                         "result " + std::to_string(i));
+              e.failure()) {
+            return e;
+          }
         }
       }
+    } catch (nb::python_error& e) {
+      return ffi::Error::Internal(
+          std::string("tesseract_jax: decoding dispatch results failed: ") +
+          e.what());
+    } catch (const std::exception& e) {
+      return ffi::Error::Internal(
+          std::string("tesseract_jax: decoding dispatch results failed: ") +
+          e.what());
     }
   }  // release GIL before the device copies
 
   // Fill each XLA-owned output buffer. A null pointer marks a placeholder slot
   // (the dispatch returned ``None``): its value is a discarded gradient/tangent
-  // that no consumer reads, so instead of copying we fill it with the byte
-  // pattern 0xff -- which is a (quiet) NaN for every IEEE float width. This keeps
-  // the device path's poison semantics identical to the host path (np.full(nan))
-  // and leaves no output buffer undefined, all without allocating a source
-  // buffer. Every other slot is a real device result we copy device->device.
+  // that no consumer reads, so instead of copying we fill it with each dtype's
+  // 0/0 pattern, matching the host path. 0xff is a quiet NaN at every IEEE float
+  // width (and, repeated, a NaN in each half of a complex value); for the exact
+  // dtypes -- ints, unsigned, bool -- 0xff would instead be a plausible in-range
+  // value (or, for bool/PRED, the out-of-range byte 0xff), so those are
+  // zero-filled to stay consistent with the host's 0/0 result. This leaves no
+  // output buffer undefined without allocating a source buffer. Every other slot
+  // is a real device result we copy device->device.
   for (size_t i = 0; i < out_descs.size(); ++i) {
     if (result_descs[i].ptr == 0) {
+      const int pattern = out_descs[i].inexact ? 0xff : 0x00;
       if (cudaError_t e = rt.MemsetAsync(reinterpret_cast<void*>(out_descs[i].ptr),
-                                         0xff, out_descs[i].nbytes, stream);
+                                         pattern, out_descs[i].nbytes, stream);
           e != cudaSuccess) {
         return ffi::Error::Internal("cudaMemsetAsync(placeholder) failed: " +
                                     cuda_err(e));

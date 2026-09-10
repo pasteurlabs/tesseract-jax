@@ -20,6 +20,7 @@ from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
+    TransportArray,
     _pytree_to_tesseract_flat,
     split_args,
     unflatten_args,
@@ -389,11 +390,11 @@ def _build_dispatch_closure(params: DispatchParams) -> Callable[..., tuple]:
     """
 
     # ``args`` is transport-dependent: the CPU host-callback lowering passes real
-    # arrays (``ArrayLike``), while the GPU FFI lowering passes bare
-    # ``__cuda_array_interface__`` device views. Annotate as ``Any`` so this
-    # shared closure accepts both without a runtime type-check rejecting the
-    # duck-typed GPU views.
-    def dispatch(*args: Any) -> tuple:
+    # NumPy arrays, while the GPU FFI lowering passes bare
+    # ``__cuda_array_interface__`` device views. ``TransportArray`` is the
+    # structural type both satisfy (shape + dtype), so the shared closure accepts
+    # either without a runtime type-check rejecting the duck-typed GPU views.
+    def dispatch(*args: TransportArray) -> tuple:
         out = getattr(params.client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
             out = (out,)
@@ -478,10 +479,12 @@ def tesseract_dispatch_gpu_lowering(
             return inner(*args)
 
     target = gpu_ffi.ensure_registered()
-    # The token must outlive lowering (the FFI call reads it at execution time).
-    # Lowering happens once per compiled program, so the registry is bounded by
-    # the number of distinct compiled dispatches; we intentionally do not release.
-    token = gpu_ffi.register_dispatch(gpu_dispatch)
+    # The token must outlive lowering (the FFI call reads it at execution time),
+    # so it is never released. Keying on ``params`` -- a frozen, value-equal
+    # DispatchParams -- means re-lowering the same dispatch (a re-trace, cache
+    # eviction, or fresh jit) reuses one entry instead of leaking a fresh closure
+    # (and the Jaxeract/client/session it pins) each time.
+    token = gpu_ffi.register_dispatch(gpu_dispatch, key=params)
 
     rule = jax.ffi.ffi_lowering(target)
     return rule(ctx, *array_args, token=np.int64(token))

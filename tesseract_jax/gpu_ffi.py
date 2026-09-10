@@ -67,6 +67,9 @@ _register_lock = threading.Lock()
 # token -> dispatch closure. The closure takes the tuple of input arrays
 # (__cuda_array_interface__ views) and returns a tuple of output arrays.
 _registry: dict[int, Callable[..., tuple]] = {}
+# Reverse map: dispatch key -> token, so re-lowering an identical dispatch reuses
+# its entry instead of leaking a fresh one (see register_dispatch).
+_token_by_key: dict[Any, int] = {}
 _registry_lock = threading.Lock()
 _next_token = 0
 _callback_installed = False
@@ -127,13 +130,39 @@ def ensure_registered() -> str:
     return FFI_TARGET_NAME
 
 
-def register_dispatch(fn: Callable[..., tuple]) -> int:
-    """Register a dispatch closure, returning its integer token."""
+def register_dispatch(fn: Callable[..., tuple], key: Any = None) -> int:
+    """Register a dispatch closure, returning its integer token.
+
+    ``key`` deduplicates registrations: the FFI call reads the token at
+    execution time, so the closure must outlive lowering and cannot be released.
+    Lowering the *same* dispatch repeatedly -- a re-trace on new shapes, a cache
+    eviction, a fresh ``jit`` -- would otherwise keep allocating tokens, each
+    pinning the closure (and through it the Jaxeract, its client, and the HTTP
+    session), so a long-running service with varying shapes leaks steadily.
+
+    When ``key`` is hashable and equal to a prior call's, the existing token is
+    returned and no new entry is created, capping the registry at the number of
+    *distinct* dispatches. ``DispatchParams`` is a frozen, all-hashable
+    dataclass with value equality (the same property XLA relies on to common up
+    identical calls), so passing it as the key collapses the re-lowerings of one
+    program point to a single entry. ``key=None`` (or an unhashable key) falls
+    back to the previous always-fresh-token behaviour.
+    """
     global _next_token
     with _registry_lock:
+        if key is not None:
+            try:
+                existing = _token_by_key.get(key)
+            except TypeError:  # unhashable key -- skip dedup
+                existing = None
+                key = None
+            if existing is not None:
+                return existing
         token = _next_token
         _next_token += 1
         _registry[token] = fn
+        if key is not None:
+            _token_by_key[key] = token
     return token
 
 

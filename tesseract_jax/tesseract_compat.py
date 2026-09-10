@@ -3,7 +3,7 @@
 
 import contextlib
 from collections.abc import Generator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import jax.tree
 import numpy as np
@@ -11,6 +11,7 @@ from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import (
     PyTree,
+    TransportArray,
     _pytree_to_tesseract_flat,
     combine_args,
     unflatten_args,
@@ -21,12 +22,6 @@ if TYPE_CHECKING:
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
-
-# The endpoint methods are transport-agnostic: the CPU host-callback lowering
-# passes real arrays (``ArrayLike``), while the GPU FFI lowering passes bare
-# ``__cuda_array_interface__`` device views. ``Any`` admits both so a runtime
-# type-check does not reject the duck-typed GPU views.
-TransportArray = Any
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -49,12 +44,17 @@ def _on_device(values: "list | tuple") -> bool:
 def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype`` without leaving the device.
 
+    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
+
     On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer -- it is already the
-    right dtype (the server computed it), so it is returned untouched. Wrapping
-    it in ``np.asarray`` here would force a device->host copy and then hand a
-    host pointer back across the FFI boundary. On the host path ``value`` is a
-    NumPy array and we cast as before.
+    FFI handler copies straight into XLA's output buffer, so we cannot cast it
+    here (that would force a device->host round-trip) and return it untouched.
+    This is *not* a guarantee that the device array already has ``dtype``:
+    tesseract-core is deliberately not prescriptive about a jacobian endpoint's
+    output dtype, so a Tesseract may return e.g. float64 where float32 was
+    declared. The native shim closes that gap -- it compares each returned
+    array's dtype and shape against the XLA output buffer and raises on a
+    mismatch rather than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
     if _on_device([value]):
         return value
@@ -63,7 +63,7 @@ def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
 
 def _placeholder(
     shape: tuple[int, ...], dtype: np.dtype, *, on_device: bool
-) -> TransportArray:
+) -> TransportArray | None:
     """A discarded slot in a derivative call's output tuple.
 
     Used for the gradient of a non-differentiable input and the tangent of a
