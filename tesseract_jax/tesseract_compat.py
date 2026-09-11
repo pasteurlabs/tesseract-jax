@@ -12,7 +12,10 @@ from tesseract_jax.tree_util import (
     PyTree,
     _pytree_to_tesseract_flat,
     combine_args,
+    dummy_output_tree,
+    split_args,
     unflatten_args,
+    warn_on_static_output_drift,
 )
 
 if TYPE_CHECKING:
@@ -164,6 +167,7 @@ class Jaxeract:
         params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
+        static_output_mask = params.static_output_mask
         inputs = unflatten_args(
             array_args,
             params.static_args,
@@ -176,7 +180,33 @@ class Jaxeract:
         if params.output_avals is None:
             return out_data
 
-        out_data = tuple(jax.tree.flatten(out_data)[0])
+        # Keypaths are only needed to name a field in the drift warning, so build
+        # them only when that warning can fire.
+        checking = params.check_static_outputs and any(static_output_mask)
+        if checking:
+            leaves_with_path = jax.tree_util.tree_flatten_with_path(out_data)[0]
+            out_data = tuple(leaf for _, leaf in leaves_with_path)
+        else:
+            out_data = tuple(jax.tree.leaves(out_data))
+
+        if any(static_output_mask):
+            # A JAX primitive can only return arrays, so drop the response's
+            # static leaves here; apply_tesseract puts back the values
+            # abstract_eval reported once the bind has returned.
+            out_data, returned_statics = split_args(out_data, static_output_mask)
+            if checking:
+                _, static_paths = split_args(
+                    tuple(path for path, _ in leaves_with_path), static_output_mask
+                )
+                # static_output_values are wrapped so the params bundle stays
+                # hashable for XLA CSE; unwrap before comparing.
+                expected_statics = tuple(
+                    v.wrapped if hasattr(v, "wrapped") else v
+                    for v in params.static_output_values
+                )
+                warn_on_static_output_drift(
+                    static_paths, returned_statics, expected_statics
+                )
         return out_data
 
     def jacobian_vector_product(
@@ -216,8 +246,10 @@ class Jaxeract:
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(
-                params.output_pytreedef, range(len(params.output_avals))
+            dummy_output_tree(
+                params.output_pytreedef,
+                len(params.output_avals),
+                params.static_output_mask,
             ),
             schema_paths=self.differentiable_output_paths,
         )
@@ -269,8 +301,10 @@ class Jaxeract:
             jac_inputs = list(params.jac_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
-            jax.tree.unflatten(
-                params.output_pytreedef, range(len(params.output_avals))
+            dummy_output_tree(
+                params.output_pytreedef,
+                len(params.output_avals),
+                params.static_output_mask,
             ),
             schema_paths=self.differentiable_output_paths,
         )
@@ -328,6 +362,15 @@ class Jaxeract:
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
+        # A static output leaf carries no cotangent, so fill its slot with None.
+        # None is an empty pytree node and drops back out when the tree is
+        # flattened into schema paths, keeping static outputs out of them.
+        if any(params.static_output_mask):
+            cotangents = combine_args(
+                tuple(cotangents),
+                (None,) * sum(params.static_output_mask),
+                params.static_output_mask,
+            )
         cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
         flat_cotangents = _pytree_to_tesseract_flat(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
