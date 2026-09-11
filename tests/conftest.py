@@ -261,6 +261,12 @@ def nonarray_output_tess() -> Tesseract:
 
 
 @pytest.fixture
+def non_abstract_tess() -> Tesseract:
+    """No abstract_eval endpoint, so a JAX transformation has to be rejected."""
+    return _load_tesseract("non_abstract_tesseract")
+
+
+@pytest.fixture
 def drifting_static_tess() -> Tesseract:
     """Its apply reports a static output that abstract_eval did not predict."""
     return _load_tesseract("drifting_static_tesseract")

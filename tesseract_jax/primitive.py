@@ -25,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover - fallback if the private helper moves
     _trace_state_clean = None
 
+
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
@@ -38,6 +39,25 @@ from tesseract_jax.tree_util import (
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
+
+
+def _in_transformation(inputs_flat: Sequence[Any]) -> bool:
+    """Whether a JAX transformation is in play around this call.
+
+    ``trace_state_clean`` is the only reliable answer. A traced function can
+    call ``apply_tesseract`` on concrete values it closed over, and those carry
+    no tracer to find, yet the primitive is still lowered. It is private, so if
+    it ever moves this falls back to scanning the inputs, which gets that one
+    case wrong; ``tesseract_dispatch_abstract_eval`` catches the fallout and
+    says so rather than raising a ``TypeError`` on a ``None``.
+
+    The answer is taken once and used for both the ``abstract_eval`` endpoint
+    check and the eager/traced branch, so the two cannot disagree.
+    """
+    if _trace_state_clean is not None:
+        return not _trace_state_clean()
+    return any(isinstance(inp, jc.Tracer) for inp in inputs_flat)
+
 
 CHECK_STATIC_OUTPUTS_ENV_VAR = "TESSERACT_JAX_CHECK_STATIC_OUTPUTS"
 
@@ -170,6 +190,17 @@ def tesseract_dispatch_abstract_eval(
 
     # Those have the same shape as the outputs
     assert params.eval_func in ("apply", "jacobian_vector_product")
+    if params.output_avals is None:
+        # Only reachable when _in_transformation answered "no" and a trace was
+        # running after all, which needs the trace-state helper to be missing.
+        raise ValueError(
+            "apply_tesseract took its eager path inside a JAX transformation, "
+            "so it has no output shapes to report. This happens when "
+            "jax._src.core.trace_state_clean is unavailable and the traced "
+            "function passed only values it closed over, leaving no tracer to "
+            "detect. Pass a traced argument through to the call, or pin a jax "
+            "version that still provides the helper."
+        )
     return tuple(
         jax.core.ShapedArray(aval.shape, aval.dtype) for aval in params.output_avals
     )
@@ -958,14 +989,8 @@ def apply_tesseract(
     input_schema = all_schemas.get("Apply_InputSchema", {})
     inputs = _validate_and_coerce_inputs(inputs, input_schema, all_schemas)
 
-    has_func_transformation = False
-
-    # determine if any array in the input pytree is a tracer
     inputs_flat, _ = jax.tree.flatten(inputs)
-    for inp in inputs_flat:
-        if isinstance(inp, jc.Tracer):
-            has_func_transformation = True
-            break
+    has_func_transformation = _in_transformation(inputs_flat)
 
     if (
         has_func_transformation
@@ -990,14 +1015,8 @@ def apply_tesseract(
     # Outside any trace, apply runs directly and its output is returned as-is.
     # Under a transformation the primitive is lowered and returns arrays alone,
     # so abstract_eval determines how to unflatten the result (a transformation
-    # without abstract_eval was already rejected above). If the trace-state
-    # helper is unavailable, fall back to the presence of tracer inputs, which
-    # misses only concrete values closed over inside a trace.
-    if _trace_state_clean is not None:
-        is_eager = _trace_state_clean()
-    else:
-        is_eager = not has_func_transformation
-    if is_eager:
+    # without abstract_eval was already rejected above).
+    if not has_func_transformation:
         return tesseract_dispatch_p.bind(
             *array_args,
             params=DispatchParams(

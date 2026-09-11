@@ -22,7 +22,9 @@ import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
+from tesseract_jax import primitive as _primitive
 from tesseract_jax.primitive import CHECK_STATIC_OUTPUTS_ENV_VAR
+from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import _leaves_differ
 
 X = jnp.arange(3, dtype="float64")
@@ -255,3 +257,86 @@ def test_leaves_that_do_not_compare_to_a_bool_fall_back_to_identity():
 
     assert not _leaves_differ(a, a)
     assert _leaves_differ(a, np.zeros(3))
+
+
+def test_the_drift_warning_fires_on_every_call_not_only_the_trace(drifting_static_tess):
+    """The check runs in the callback `apply` is dispatched from.
+
+    A jitted function is traced once and called many times. If the comparison
+    happened at trace time the second call would be silent, so both calls are
+    checked here.
+    """
+
+    @jax.jit
+    def f(x):
+        return apply_tesseract(drifting_static_tess, dict(x=x))["y"]
+
+    for _ in range(2):
+        with pytest.warns(UserWarning, match="backend"):
+            f(-X)
+
+
+def test_abstract_eval_is_not_called_eagerly(drifting_static_tess, monkeypatch):
+    """Eager calls go straight to `apply`, which is the point of the split."""
+    calls = []
+    original = Jaxeract.abstract_eval
+
+    def spy(self, inputs):
+        calls.append(inputs)
+        return original(self, inputs)
+
+    monkeypatch.setattr(Jaxeract, "abstract_eval", spy)
+
+    out = apply_tesseract(drifting_static_tess, dict(x=-X))
+    assert calls == []
+    assert out["backend"] == "fallback"
+
+    _apply_under_jit(drifting_static_tess, X)
+    assert len(calls) == 1
+
+
+def test_a_transformation_without_abstract_eval_is_rejected(
+    non_abstract_tess, monkeypatch
+):
+    """The endpoint check and the eager branch must agree on "in a trace".
+
+    A traced function that calls `apply_tesseract` on values it closed over has
+    no tracer among its inputs. Deciding the two questions separately let that
+    call past the check and fail later with `RuntimeError: Endpoint
+    abstract_eval not found`, which says nothing about the transformation.
+    """
+    x = jnp.ones(3, dtype="float64")
+
+    @jax.jit
+    def f(unused):
+        return apply_tesseract(non_abstract_tess, dict(x=x))["y"]
+
+    with pytest.raises(ValueError, match="does not support abstract_eval"):
+        f(jnp.float64(1.0))
+
+
+def test_the_import_fallback_still_works(drifting_static_tess, monkeypatch):
+    """`trace_state_clean` is private, so its absence has to stay survivable.
+
+    Without it the tracer scan decides, which is right for every call that
+    passes a traced argument. The one case it cannot see reports what happened
+    instead of raising a TypeError on a None.
+    """
+    monkeypatch.setattr(_primitive, "_trace_state_clean", None)
+
+    out = apply_tesseract(drifting_static_tess, dict(x=-X))
+    assert out["backend"] == "fallback"
+
+    with pytest.warns(UserWarning, match="backend"):
+        backend, y = _apply_under_jit(drifting_static_tess, -X)
+    assert backend == "reference"
+    np.testing.assert_allclose(y, -2.0 * X)
+
+    closed_over = -X
+
+    @jax.jit
+    def f(unused):
+        return apply_tesseract(drifting_static_tess, dict(x=closed_over))["y"]
+
+    with pytest.raises(ValueError, match="eager path inside a JAX transformation"):
+        f(jnp.float64(1.0))
