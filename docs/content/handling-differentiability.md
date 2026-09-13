@@ -133,3 +133,58 @@ Note that the cotangent/tangent pytree structure must always match the function'
 ValueError: unexpected tree structure of argument to vjp function:
   got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
 ```
+
+## Non-array outputs
+
+An `OutputSchema` may carry fields that are not arrays at all, such as a backend
+name or a convergence flag:
+
+```python
+class OutputSchema(BaseModel):
+    y: Differentiable[Array[(3,), Float64]]
+    backend: str = "reference"
+    converged: bool = True
+```
+
+`apply_tesseract` returns those fields next to the arrays. They are plain Python
+objects rather than tracers, so a `jit`-ed function can branch on them at trace time:
+
+```python
+@jax.jit
+def f(x):
+    out = apply_tesseract(tess, {"x": x})
+    scale = 1.0 if out["converged"] else 0.0
+    return out["y"] * scale
+```
+
+Under a JAX transformation such as `jit`, `grad` or `vmap`, a JAX primitive can
+only return arrays, so a non-array field never enters the computation.
+`apply_tesseract` takes its value from `abstract_eval` and puts it back into the
+output pytree afterwards. Whatever `apply` returns for that field is therefore
+ignored, and `apply_tesseract` warns when the two disagree:
+
+```
+UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
+apply, but abstract_eval reported 'reference'. ...
+```
+
+A field whose value depends on the input values belongs in the schema as an array
+instead.
+
+Without a transformation, `apply` runs directly and its outputs are returned as-is,
+so there is nothing to reconcile and no warning. Under `jit`, a static output cannot
+be returned from the jitted function itself, since JAX has no type for a `str`
+result. Consume it inside the trace as above and return the arrays.
+
+### Turning the check off
+
+The comparison only runs under a transformation. Pass `check_static_outputs=False`
+to skip it for one call, or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it for
+the whole program. The keyword argument wins when both are set:
+
+```python
+out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
+```
+
+Skipping the check avoids building the keypaths the warning needs. The values the
+caller receives are the same either way.

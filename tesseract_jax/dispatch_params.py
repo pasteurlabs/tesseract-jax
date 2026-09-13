@@ -37,6 +37,14 @@ class DispatchParams:
         is_static_mask: One flag per input leaf, ``True`` where the leaf is static.
         has_tangent: One flag per non-static input, ``True`` where a (co)tangent
             is carried for it.
+        static_output_mask: One flag per output leaf, ``True`` where the leaf is a
+            non-array (static) value that never enters the bind. Empty when the
+            Tesseract has no ``abstract_eval`` endpoint.
+        static_output_values: The traced value of each static output leaf, wrapped
+            to stay hashable. ``apply`` compares these against what the endpoint
+            returns; the other endpoints leave it empty.
+        check_static_outputs: Whether ``apply`` makes that comparison. Set per call
+            by ``apply_tesseract``, defaulting to ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``.
         client: The Tesseract wrapper the call dispatches to.
         eval_func: Which endpoint to invoke (``apply``, ``jacobian_vector_product``,
             ``vector_jacobian_product`` or ``jacobian``).
@@ -55,6 +63,9 @@ class DispatchParams:
     has_tangent: tuple[bool, ...]
     client: "Jaxeract"
     eval_func: str
+    static_output_mask: tuple[bool, ...] = ()
+    static_output_values: tuple[Any, ...] = ()
+    check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None
     materialize_jacobian: bool | None = None
     jac_input_paths: tuple[str, ...] | None = None

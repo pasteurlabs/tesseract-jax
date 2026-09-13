@@ -1,3 +1,4 @@
+import warnings
 from collections.abc import Iterable, Sequence
 from typing import Any, TypeVar
 
@@ -187,3 +188,66 @@ def _pytree_to_tesseract_flat(
         flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict
+
+
+def _leaves_differ(returned: Any, expected: Any) -> bool:
+    """Whether two static leaves disagree.
+
+    For a served Tesseract, static leaves are JSON-decoded response data, so
+    ``!=`` always returns a bool and settles it. ``Tesseract.from_tesseract_api``
+    can return other types, since it hands back the objects the Python function
+    built directly. If ``abstract_eval`` reports a numpy array for a field, that
+    field counts as static, and ``a != b`` on two arrays is itself an array that
+    ``bool()`` rejects. The identity fallback covers that case.
+    """
+    try:
+        return bool(returned != expected)
+    except (TypeError, ValueError):
+        return returned is not expected
+
+
+def warn_on_static_output_drift(
+    paths: Sequence[Any],
+    returned_values: Sequence[Any],
+    expected_values: Sequence[Any],
+) -> None:
+    """Warn about static output leaves whose runtime value is not the traced one.
+
+    ``apply_tesseract`` returns the value ``abstract_eval`` reported for a static
+    leaf, so a different value from ``apply`` is never used. Warn rather than drop
+    it silently, since the caller would otherwise read a value the Tesseract did
+    not return from ``apply``.
+    """
+    for path, returned, expected in zip(
+        paths, returned_values, expected_values, strict=True
+    ):
+        if not _leaves_differ(returned, expected):
+            continue
+        warnings.warn(
+            f"Tesseract returned the static output {jax.tree_util.keystr(path)} as "
+            f"{returned!r} from apply, but abstract_eval reported {expected!r}. "
+            f"Static outputs are read at trace time, so the value from "
+            f"abstract_eval is the one apply_tesseract returns and the value from "
+            f"apply is ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
+def dummy_output_tree(
+    output_pytreedef: Any,
+    n_avals: int,
+    static_output_mask: Sequence[bool] = (),
+) -> Any:
+    """The output pytree with each array leaf holding its own aval index.
+
+    Static leaves get ``None``, an empty pytree node, so they drop out when the
+    tree is flattened. ``_pytree_to_tesseract_flat`` therefore never sees a static
+    output, and the path-to-position maps built from this tree line up with
+    ``output_avals``, which holds arrays only.
+    """
+    if not any(static_output_mask):
+        return jax.tree.unflatten(output_pytreedef, range(n_avals))
+    idx = iter(range(n_avals))
+    leaves = [None if static else next(idx) for static in static_output_mask]
+    return jax.tree.unflatten(output_pytreedef, leaves)
