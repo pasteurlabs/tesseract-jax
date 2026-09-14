@@ -159,10 +159,8 @@ def f(x):
 
 A JAX primitive can only return arrays, so a non-array field never enters the
 computation. `apply_tesseract` takes its value from `abstract_eval` and puts it
-back into the output pytree afterwards. This holds whether or not a transformation
-is in play, since an eager call traces, compiles and runs the primitive too.
-Whatever `apply` returns for that field is therefore ignored, and `apply_tesseract`
-warns when the two disagree:
+back into the output pytree afterwards. Whatever `apply` returns for that field
+is therefore ignored, and `apply_tesseract` warns when the two disagree:
 
 ```
 UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
@@ -171,10 +169,6 @@ apply, but abstract_eval reported 'reference'. ...
 
 A field whose value depends on the input values belongs in the schema as an array
 instead.
-
-Under `jit`, a static output cannot be returned from the jitted function itself,
-since JAX has no type for a `str` result. Consume it inside the trace as above and
-return the arrays.
 
 ### Turning the check off
 

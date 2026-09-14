@@ -68,7 +68,7 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 
 ## Sharp edges
 
-- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined. `apply_tesseract` dispatches through a JAX primitive whether or not a transformation is in play, since an eager call traces, compiles and runs the primitive too, and JAX needs the output shapes in either case. To run a Tesseract that has no `abstract_eval` endpoint, call it directly through the Tesseract client instead. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
+- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined to enable JAX tracing and FFI dispatch. To run a Tesseract that has no `abstract_eval` endpoint, call it directly through the Tesseract client instead. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
 
 ```{tip}
 When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
