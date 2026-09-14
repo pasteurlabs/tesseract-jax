@@ -177,9 +177,6 @@ class Jaxeract:
 
         out_data = self.client.apply(inputs)
 
-        if params.output_avals is None:
-            return out_data
-
         # Keypaths are only needed to name a field in the drift warning, so build
         # them only when that warning can fire.
         checking = params.check_static_outputs and any(static_output_mask)

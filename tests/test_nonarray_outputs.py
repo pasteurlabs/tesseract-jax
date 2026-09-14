@@ -3,12 +3,12 @@
 
 """Tests for an OutputSchema that mixes arrays with a str and a bool.
 
-Eagerly, `apply` runs directly and its output is returned as-is. Under a JAX
-transformation the primitive can only return arrays, so non-array leaves are
-taken from `abstract_eval`, carried as static primitive parameters, and put back
-into the output pytree after the bind. These tests check that the arrays are
-untouched either way: the static leaves must not shift, drop or reorder anything
-the gradient path depends on.
+A Tesseract is always dispatched through the JAX primitive, so an eager call
+traces, compiles and runs it just as a call under `jit` would. The primitive can
+only return arrays, so non-array leaves are taken from `abstract_eval`, carried
+as static primitive parameters, and put back into the output pytree after the
+bind. These tests check that the arrays are untouched: the static leaves must not
+shift, drop or reorder anything the gradient path depends on.
 
 Before this was supported, all of these raised
 `TypeError: string indices must be integers`.
@@ -22,7 +22,6 @@ import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
-from tesseract_jax import primitive as _primitive
 from tesseract_jax.primitive import CHECK_STATIC_OUTPUTS_ENV_VAR
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import _leaves_differ
@@ -31,11 +30,7 @@ X = jnp.arange(3, dtype="float64")
 
 
 def _apply_under_jit(tess, x, **kwargs):
-    """Run `apply_tesseract` under `jit` and return the backend and y.
-
-    The static-output check only runs under a JAX transformation, so the drift
-    tests exercise it through `jit` rather than an eager call.
-    """
+    """Run `apply_tesseract` under `jit` and return the backend and y."""
     seen = {}
 
     @jax.jit
@@ -122,19 +117,32 @@ def test_vmap_is_unaffected_by_a_static_leaf(nonarray_output_tess):
     np.testing.assert_allclose(jax.vmap(f)(xs), 2.0 * xs)
 
 
-def test_eager_forwards_the_apply_value_verbatim(drifting_static_tess):
-    """Without a transformation, `apply` runs directly and its value is returned.
+def test_eager_returns_the_abstract_eval_value_and_warns_on_drift(drifting_static_tess):
+    """An eager call is dispatched through the primitive, exactly like a jit one.
 
     `abstract_eval` reports `"reference"`, but a negative input makes `apply`
-    return `"fallback"`, and that is what an eager call gets back. There is
-    nothing to reconcile, so no warning fires.
+    return `"fallback"`. The caller holds `abstract_eval`'s value, and the
+    disagreement is warned about, with no transformation in play.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
+    with pytest.warns(UserWarning, match="backend") as record:
         out = apply_tesseract(drifting_static_tess, dict(x=-X))
 
-    assert out["backend"] == "fallback"
+    assert out["backend"] == "reference"
     np.testing.assert_allclose(out["y"], -2.0 * X)
+    message = str(record[0].message)
+    assert "'fallback'" in message
+    assert "'reference'" in message
+
+
+def test_eager_and_jit_agree_when_apply_matches_abstract_eval(drifting_static_tess):
+    """A positive input makes `apply` agree with `abstract_eval`, so both are quiet."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        eager = apply_tesseract(drifting_static_tess, dict(x=X))
+        backend, _ = _apply_under_jit(drifting_static_tess, X)
+
+    assert eager["backend"] == "reference"
+    assert backend == "reference"
 
 
 def test_no_warning_under_jit_when_apply_agrees_with_abstract_eval(
@@ -276,8 +284,8 @@ def test_the_drift_warning_fires_on_every_call_not_only_the_trace(drifting_stati
             f(-X)
 
 
-def test_abstract_eval_is_not_called_eagerly(drifting_static_tess, monkeypatch):
-    """Eager calls go straight to `apply`, which is the point of the split."""
+def test_abstract_eval_is_called_eagerly_too(drifting_static_tess, monkeypatch):
+    """Eager and jit both dispatch through the primitive, so both need abstract_eval."""
     calls = []
     original = Jaxeract.abstract_eval
 
@@ -287,24 +295,30 @@ def test_abstract_eval_is_not_called_eagerly(drifting_static_tess, monkeypatch):
 
     monkeypatch.setattr(Jaxeract, "abstract_eval", spy)
 
-    out = apply_tesseract(drifting_static_tess, dict(x=-X))
-    assert calls == []
-    assert out["backend"] == "fallback"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        out = apply_tesseract(drifting_static_tess, dict(x=-X))
+    assert len(calls) == 1
+    # The caller holds abstract_eval's value, not apply's.
+    assert out["backend"] == "reference"
 
     _apply_under_jit(drifting_static_tess, X)
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
-def test_a_transformation_without_abstract_eval_is_rejected(
-    non_abstract_tess, monkeypatch
-):
-    """The endpoint check and the eager branch must agree on "in a trace".
+def test_a_tesseract_without_abstract_eval_is_rejected_eagerly(non_abstract_tess):
+    """A Tesseract without abstract_eval is rejected with no transformation.
 
-    A traced function that calls `apply_tesseract` on values it closed over has
-    no tracer among its inputs. Deciding the two questions separately let that
-    call past the check and fail later with `RuntimeError: Endpoint
-    abstract_eval not found`, which says nothing about the transformation.
+    apply_tesseract always dispatches through the primitive, which needs
+    abstract_eval to report the output shapes.
     """
+    x = jnp.ones(3, dtype="float64")
+
+    with pytest.raises(ValueError, match="does not support abstract_eval"):
+        apply_tesseract(non_abstract_tess, dict(x=x))
+
+
+def test_a_tesseract_without_abstract_eval_is_rejected_under_jit(non_abstract_tess):
     x = jnp.ones(3, dtype="float64")
 
     @jax.jit
@@ -312,31 +326,4 @@ def test_a_transformation_without_abstract_eval_is_rejected(
         return apply_tesseract(non_abstract_tess, dict(x=x))["y"]
 
     with pytest.raises(ValueError, match="does not support abstract_eval"):
-        f(jnp.float64(1.0))
-
-
-def test_the_import_fallback_still_works(drifting_static_tess, monkeypatch):
-    """`trace_state_clean` is private, so its absence has to stay survivable.
-
-    Without it the tracer scan decides, which is right for every call that
-    passes a traced argument. The one case it cannot see reports what happened
-    instead of raising a TypeError on a None.
-    """
-    monkeypatch.setattr(_primitive, "_trace_state_clean", None)
-
-    out = apply_tesseract(drifting_static_tess, dict(x=-X))
-    assert out["backend"] == "fallback"
-
-    with pytest.warns(UserWarning, match="backend"):
-        backend, y = _apply_under_jit(drifting_static_tess, -X)
-    assert backend == "reference"
-    np.testing.assert_allclose(y, -2.0 * X)
-
-    closed_over = -X
-
-    @jax.jit
-    def f(unused):
-        return apply_tesseract(drifting_static_tess, dict(x=closed_over))["y"]
-
-    with pytest.raises(ValueError, match="eager path inside a JAX transformation"):
         f(jnp.float64(1.0))

@@ -781,15 +781,12 @@ def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
     if use_jit:
         f = jax.jit(f)
 
-        # make sure value error is raised if input shape is incorrect
-        with pytest.raises(ValueError):
-            f(a)
-
-    else:
-        # Test against Tesseract client
-        result = f(a)
-        result_ref = non_abstract_tess.apply(dict(a=a))
-        _assert_pytree_isequal(result, result_ref)
+    # apply_tesseract dispatches through the primitive whether or not jit is in
+    # play, and that needs abstract_eval to report output shapes. A Tesseract
+    # without it is rejected in both cases; call the Tesseract client directly
+    # to run it without abstract_eval.
+    with pytest.raises(ValueError, match="does not support abstract_eval"):
+        f(a)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])

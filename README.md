@@ -85,12 +85,12 @@ jax.grad(vector_sum)(x, y) # 🎉
 
 ## Sharp edges
 
-- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined when used in conjunction with automatic differentiation and JAX transformations. This is because JAX, in these cases, mandates abstract evaluation of all operations before they are executed. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
+- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined. `apply_tesseract` dispatches through a JAX primitive whether or not a transformation is in play, since an eager call traces, compiles and runs the primitive too, and JAX needs the output shapes in either case. To run a Tesseract that has no `abstract_eval` endpoint, call it directly through the Tesseract client instead. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
 
 > [!TIP]
 > When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
 
-- **Non-array outputs come from `abstract_eval` under `jit`**: an `OutputSchema` field that is not an array, such as a `str` or a `bool`, cannot enter a traced computation, so under a JAX transformation its value is the one `abstract_eval` reported and whatever `apply` returns for it is ignored. `apply_tesseract` warns when the two differ; pass `check_static_outputs=False` or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip the comparison. Without a transformation, `apply` runs directly and its outputs are returned as-is. A field whose value depends on the input values belongs in the schema as an array.
+- **Non-array outputs come from `abstract_eval`**: an `OutputSchema` field that is not an array, such as a `str` or a `bool`, cannot enter a traced computation, so its value is the one `abstract_eval` reported and whatever `apply` returns for it is ignored. `apply_tesseract` warns when the two differ; pass `check_static_outputs=False` or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip the comparison. A field whose value depends on the input values belongs in the schema as an array.
 
 ## License
 

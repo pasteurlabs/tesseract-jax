@@ -4,6 +4,7 @@
 import operator
 import os
 from collections.abc import Sequence
+from functools import partial
 from typing import Any
 
 import jax
@@ -12,19 +13,11 @@ import jax.numpy as jnp
 import jax.tree
 import numpy as np
 from jax import dtypes, extend
+from jax._src import dispatch
 from jax.core import ShapedArray
 from jax.interpreters import ad, batching, mlir
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
-
-try:
-    # True only outside any JAX trace. Unlike checking the inputs for tracers,
-    # this stays False inside a jit trace over concrete values closed over by
-    # the traced function, where the primitive is still lowered.
-    from jax._src.core import trace_state_clean as _trace_state_clean
-except ImportError:  # pragma: no cover - fallback if the private helper moves
-    _trace_state_clean = None
-
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dispatch_params import DispatchParams
@@ -39,24 +32,6 @@ from tesseract_jax.tree_util import (
 
 tesseract_dispatch_p = extend.core.Primitive("tesseract_dispatch")
 tesseract_dispatch_p.multiple_results = True
-
-
-def _in_transformation(inputs_flat: Sequence[Any]) -> bool:
-    """Whether a JAX transformation is in play around this call.
-
-    ``trace_state_clean`` is the only reliable answer. A traced function can
-    call ``apply_tesseract`` on concrete values it closed over, and those carry
-    no tracer to find, yet the primitive is still lowered. It is private, so if
-    it ever moves this falls back to scanning the inputs, which gets that one
-    case wrong; ``tesseract_dispatch_abstract_eval`` catches the fallout and
-    says so rather than raising a ``TypeError`` on a ``None``.
-
-    The answer is taken once and used for both the ``abstract_eval`` endpoint
-    check and the eager/traced branch, so the two cannot disagree.
-    """
-    if _trace_state_clean is not None:
-        return not _trace_state_clean()
-    return any(isinstance(inp, jc.Tracer) for inp in inputs_flat)
 
 
 CHECK_STATIC_OUTPUTS_ENV_VAR = "TESSERACT_JAX_CHECK_STATIC_OUTPUTS"
@@ -190,17 +165,6 @@ def tesseract_dispatch_abstract_eval(
 
     # Those have the same shape as the outputs
     assert params.eval_func in ("apply", "jacobian_vector_product")
-    if params.output_avals is None:
-        # Only reachable when _in_transformation answered "no" and a trace was
-        # running after all, which needs the trace-state helper to be missing.
-        raise ValueError(
-            "apply_tesseract took its eager path inside a JAX transformation, "
-            "so it has no output shapes to report. This happens when "
-            "jax._src.core.trace_state_clean is unavailable and the traced "
-            "function passed only values it closed over, leaving no tracer to "
-            "detect. Pass a traced argument through to the call, or pin a jax "
-            "version that still provides the helper."
-        )
     return tuple(
         jax.core.ShapedArray(aval.shape, aval.dtype) for aval in params.output_avals
     )
@@ -425,27 +389,12 @@ def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
         )
 
 
-def tesseract_dispatch(
-    *array_args: ArrayLike | ShapedArray | Any,
-    params: DispatchParams,
-) -> Any:
-    """Defines how to dispatch lowering the computation.
-
-    The dispatch that is not lowered is only called in cases where abstract eval is not needed.
-    """
-    _raise_if_unimplemented(params.eval_func, params.client)
-
-    def _dispatch(*args: ArrayLike) -> Any:
-        out = getattr(params.client, params.eval_func)(args, params)
-        if not isinstance(out, tuple) and params.output_avals is not None:
-            out = (out,)
-        return out
-
-    result = _dispatch(*array_args)
-    return result
-
-
-tesseract_dispatch_p.def_impl(tesseract_dispatch)
+# An eager ``bind`` traces the primitive to a jaxpr, compiles it and runs the
+# compiled program, exactly as a call under ``jit`` would. This routes eager and
+# traced calls through the same ``abstract_eval`` + lowering path, so a Tesseract
+# behaves identically in both. It also means eager use requires an
+# ``abstract_eval`` endpoint, which ``apply_tesseract`` checks up front.
+tesseract_dispatch_p.def_impl(partial(dispatch.apply_primitive, tesseract_dispatch_p))
 
 
 def tesseract_dispatch_lowering(
@@ -961,13 +910,12 @@ def apply_tesseract(
             methods) ``False`` may be more efficient.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
-            that differ. Only applies under a JAX transformation such as ``jit``,
-            ``grad`` or ``vmap``; without one ``apply`` runs directly and its
-            outputs are returned as-is. ``None`` (default) reads
-            ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``, which is on unless set to a
-            false value. Pass ``False`` to skip the comparison for one call.
-            Skipping it also skips building the keypaths the warning needs; the
-            caller gets the same values either way.
+            that differ. The value the caller gets is the one from
+            ``abstract_eval`` either way, since static outputs are read at trace
+            time. ``None`` (default) reads ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``,
+            which is on unless set to a false value. Pass ``False`` to skip the
+            comparison for one call. Skipping it also skips building the keypaths
+            the warning needs; the caller gets the same values either way.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -989,19 +937,15 @@ def apply_tesseract(
     input_schema = all_schemas.get("Apply_InputSchema", {})
     inputs = _validate_and_coerce_inputs(inputs, input_schema, all_schemas)
 
-    inputs_flat, _ = jax.tree.flatten(inputs)
-    has_func_transformation = _in_transformation(inputs_flat)
-
-    if (
-        has_func_transformation
-        and "abstract_eval" not in tesseract_client.available_endpoints
-    ):
+    # Every call is dispatched through the primitive (see the def_impl note
+    # above), which needs abstract_eval to report the output shapes, so a
+    # Tesseract without that endpoint cannot be used here at all.
+    if "abstract_eval" not in tesseract_client.available_endpoints:
         raise ValueError(
-            "Given Tesseract object does not support abstract_eval, "
-            "it is however called in combination with a JAX transformation "
-            "like jit, grad, vmap, or pmap. "
-            "Either remove the transformation or add an abstract_eval endpoint "
-            "to the Tesseract object."
+            "Given Tesseract object does not support abstract_eval, which "
+            "tesseract-jax requires to determine the output shapes of a call. "
+            "Add an abstract_eval endpoint to the Tesseract object, or call it "
+            "directly through the Tesseract client instead of apply_tesseract."
         )
 
     client = Jaxeract(tesseract_client)
@@ -1012,29 +956,8 @@ def apply_tesseract(
     static_args = tuple(_make_hashable(arg) for arg in static_args)
     has_tangent = (True,) * len(array_args)
 
-    # Outside any trace, apply runs directly and its output is returned as-is.
-    # Under a transformation the primitive is lowered and returns arrays alone,
-    # so abstract_eval determines how to unflatten the result (a transformation
-    # without abstract_eval was already rejected above).
-    if not has_func_transformation:
-        return tesseract_dispatch_p.bind(
-            *array_args,
-            params=DispatchParams(
-                static_args=static_args,
-                input_pytreedef=input_pytreedef,
-                output_pytreedef=None,
-                output_avals=None,
-                is_static_mask=is_static_mask,
-                has_tangent=has_tangent,
-                client=client,
-                eval_func="apply",
-                vmap_method=vmap_method,
-                materialize_jacobian=materialize_jacobian,
-            ),
-        )
-
-    # A JAX transformation is in play. Its abstract_eval output structure tells
-    # us how to unflatten the arrays the primitive returns.
+    # abstract_eval's output structure tells us how to unflatten the arrays the
+    # primitive returns.
     avals = client.abstract_eval(inputs)
 
     if check_static_outputs is None:
