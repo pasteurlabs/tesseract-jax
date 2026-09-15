@@ -835,6 +835,38 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
 
 
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_unused_output_cotangent_is_not_requested(zero_cotangent_tess, use_jit):
+    """An output with a symbolic-zero cotangent is skipped in the vjp (issue #4).
+
+    ``unsafe`` has a NaN gradient at x = 0. Differentiating a loss that uses only
+    ``safe`` leaves ``unsafe``'s cotangent a symbolic zero, so it must not be
+    requested -- otherwise its NaN gradient poisons the result.
+    """
+    x = jnp.zeros(3, dtype="float64")
+
+    def loss(x):
+        return apply_tesseract(zero_cotangent_tess, dict(x=x))["safe"].sum()
+
+    if use_jit:
+        loss = jax.jit(loss)
+
+    grad = np.asarray(jax.grad(loss)(x))
+    np.testing.assert_array_equal(grad, [2.0, 2.0, 2.0])
+
+
+def test_used_output_cotangent_is_still_requested(zero_cotangent_tess):
+    """Using ``unsafe`` too must still request it, so pruning is not over-eager."""
+    x = jnp.zeros(3, dtype="float64")
+
+    def loss(x):
+        out = apply_tesseract(zero_cotangent_tess, dict(x=x))
+        return out["safe"].sum() + out["unsafe"].sum()
+
+    grad = np.asarray(jax.grad(loss)(x))
+    assert np.isinf(grad).all()
+
+
 @pytest.mark.parametrize(
     "explicit,templates,expected",
     [
