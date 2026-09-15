@@ -146,15 +146,6 @@ def served_nested_tesseract_raw(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def served_non_abstract_tesseract(tmp_path_factory):
-    yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "non_abstract_tesseract" / "tesseract_api.py",
-        name="non_abstract",
-    )
-
-
-@pytest.fixture(scope="session")
 def served_vectoradd_tesseract(tmp_path_factory):
     yield from _serve_tesseract(
         tmp_path_factory,

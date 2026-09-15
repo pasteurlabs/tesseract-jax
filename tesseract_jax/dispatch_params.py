@@ -28,20 +28,18 @@ class DispatchParams:
     """Descriptors carried by the ``tesseract_dispatch`` primitive.
 
     Attributes:
-        static_args: Non-traced leaves of the input pytree, wrapped so they hash.
+        static_args: Non-array leaves of the input pytree (a str, int or bool).
         input_pytreedef: Treedef to reassemble the flat operands into inputs.
-        output_pytreedef: Treedef for the outputs; ``None`` when the Tesseract
-            has no ``abstract_eval`` endpoint and outputs stay unflattened.
-        output_avals: Shape/dtype of each flat output; ``None`` alongside
-            ``output_pytreedef``.
-        is_static_mask: One flag per input leaf, ``True`` where the leaf is static.
+        output_pytreedef: Treedef for the outputs, taken from ``abstract_eval``.
+        output_avals: Shape/dtype of each flat output, taken from ``abstract_eval``.
+        is_static_mask: One flag per input leaf, ``True`` where the leaf is a
+            non-array (static) value; arrays, concrete or traced, are ``False``.
         has_tangent: One flag per non-static input, ``True`` where a (co)tangent
             is carried for it.
         static_output_mask: One flag per output leaf, ``True`` where the leaf is a
-            non-array (static) value that never enters the bind. Empty when the
-            Tesseract has no ``abstract_eval`` endpoint.
-        static_output_values: The traced value of each static output leaf, wrapped
-            to stay hashable. ``apply`` compares these against what the endpoint
+            non-array (static) value that never enters the bind.
+        static_output_values: The value of each static output leaf, as reported by
+            ``abstract_eval``. ``apply`` compares these against what the endpoint
             returns; the other endpoints leave it empty.
         check_static_outputs: Whether ``apply`` makes that comparison. Set per call
             by ``apply_tesseract``, defaulting to ``TESSERACT_JAX_CHECK_STATIC_OUTPUTS``.
@@ -57,8 +55,8 @@ class DispatchParams:
 
     static_args: tuple[Any, ...]
     input_pytreedef: PyTreeDef
-    output_pytreedef: PyTreeDef | None
-    output_avals: tuple[ShapeDtypeStruct, ...] | None
+    output_pytreedef: PyTreeDef
+    output_avals: tuple[ShapeDtypeStruct, ...]
     is_static_mask: tuple[bool, ...]
     has_tangent: tuple[bool, ...]
     client: "Jaxeract"

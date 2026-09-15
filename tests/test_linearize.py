@@ -7,10 +7,8 @@ Tests use the (nonlinear) Rosenbrock tesseract unless they need several
 differentiable inputs: a linear tesseract makes the Jacobian the identity, which
 renders most assertions here tautological.
 
-Every test is parametrised over ``use_jit`` because the two settings dispatch
-through separately registered code paths -- ``tesseract_dispatch_p.def_impl``
-when eager, ``mlir.register_lowering`` when staged out -- so a change can break
-one without the other.
+Every test is parametrised over ``use_jit`` to check that an eager call and one
+staged out under ``jit`` agree.
 """
 
 import jax
