@@ -263,6 +263,12 @@ def drifting_static_tess() -> Tesseract:
     return _load_tesseract("drifting_static_tesseract")
 
 
+@pytest.fixture
+def zero_cotangent_tess() -> Tesseract:
+    """Two differentiable outputs, one with a NaN gradient at x = 0."""
+    return _load_tesseract("zero_cotangent_tesseract")
+
+
 # ---------------------------------------------------------------------------
 # Shared test inputs
 # ---------------------------------------------------------------------------

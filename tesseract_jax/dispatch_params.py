@@ -38,6 +38,10 @@ class DispatchParams:
             is carried for it.
         static_output_mask: One flag per output leaf, ``True`` where the leaf is a
             non-array (static) value that never enters the bind.
+        has_cotangent: One flag per non-static output, ``True`` where a non-zero
+            cotangent is carried for it. A ``vector_jacobian_product`` skips the
+            outputs whose cotangent is a symbolic zero, since they add nothing to
+            the input gradients. Empty outside a ``vector_jacobian_product``.
         static_output_values: The value of each static output leaf, as reported by
             ``abstract_eval``. ``apply`` compares these against what the endpoint
             returns; the other endpoints leave it empty.
@@ -62,6 +66,7 @@ class DispatchParams:
     client: "Jaxeract"
     eval_func: str
     static_output_mask: tuple[bool, ...] = ()
+    has_cotangent: tuple[bool, ...] = ()
     static_output_values: tuple[Any, ...] = ()
     check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None

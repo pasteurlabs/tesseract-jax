@@ -356,12 +356,21 @@ def tesseract_dispatch_transpose_rule(
                 f"jax.lax.stop_gradient to it before passing to apply_tesseract."
             )
 
+    # An output whose cotangent is a symbolic zero adds nothing to the input
+    # gradients, so record which outputs carry a real cotangent and skip the rest
+    # when calling the endpoint. This also stops a NaN in an unused output's
+    # gradient from poisoning the result. Capture it before _instantiate_zeros
+    # erases the distinction. ``cotangent`` is already the non-static outputs.
+    has_cotangent = tuple(not isinstance(c, jax._src.ad_util.Zero) for c in cotangent)
+
     cotan_args_ = _instantiate_zeros(cotangent)
 
     vjp = tesseract_dispatch_p.bind(
         *primal_args,
         *cotan_args_,
-        params=params.replace(eval_func="vector_jacobian_product"),
+        params=params.replace(
+            eval_func="vector_jacobian_product", has_cotangent=has_cotangent
+        ),
     )
 
     # The bind returns a cotangent only for each differentiable primal

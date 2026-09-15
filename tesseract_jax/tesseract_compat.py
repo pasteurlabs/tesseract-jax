@@ -353,6 +353,15 @@ class Jaxeract:
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
+        # Blank out outputs whose cotangent is a symbolic zero (has_cotangent
+        # False) so they drop out of the endpoint request below. It is over the
+        # non-static outputs, so apply it before the static slots are folded in.
+        if params.has_cotangent:
+            cotangents = tuple(
+                c if h else None
+                for c, h in zip(cotangents, params.has_cotangent, strict=True)
+            )
+
         # A static output leaf carries no cotangent, so fill its slot with None.
         # None is an empty pytree node and drops back out when the tree is
         # flattened into schema paths, keeping static outputs out of them.
