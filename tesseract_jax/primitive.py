@@ -85,9 +85,16 @@ def tesseract_dispatch_abstract_eval(
     n_primals = params.n_primals
 
     if params.eval_func == "vector_jacobian_product":
-        # We mustn't run forward evaluation of shapes, as out
-        # of vjp has the same shapes as the primals; thus we can return early
-        return tuple(array_args[:n_primals])
+        # A VJP output has the same shape as the primal it differentiates, so we
+        # can read the shapes off the primals without a forward evaluation. Only
+        # differentiable primals (has_tangent) carry a cotangent back; a
+        # non-differentiable input's slot is never consumed by JAX's transpose,
+        # so we omit it entirely rather than return a placeholder for it.
+        return tuple(
+            aval
+            for aval, h in zip(array_args[:n_primals], params.has_tangent, strict=True)
+            if h
+        )
 
     if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
@@ -357,7 +364,12 @@ def tesseract_dispatch_transpose_rule(
         params=params.replace(eval_func="vector_jacobian_product"),
     )
 
-    return tuple([None] * len(primal_args) + list(vjp))
+    # The bind returns a cotangent only for each differentiable primal
+    # (has_tangent). Scatter them back into full primal order, leaving None where
+    # no cotangent flows -- JAX reads None as a symbolic zero for that operand.
+    vjp_iter = iter(vjp)
+    input_cotangents = [next(vjp_iter) if h else None for h in params.has_tangent]
+    return tuple([None] * len(primal_args) + input_cotangents)
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
@@ -582,7 +594,8 @@ def _batched_via_jacobian(
     ) -> tuple:
         """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
 
-        NaN consistency with historical sequential jvp/vjp approach.
+        Non-diff output tangents are NaN so the batched JVP matches the
+        sequential one (see ``_discarded_slot``).
         """
         out, k = [], 0
         for item, diff in zip(full_order, is_diff, strict=True):
@@ -631,12 +644,12 @@ def _batched_via_jacobian(
         diff_primals,
         jac_cols,
     )
-    diff_pos_set = set(diff_input_path_to_pos.values())
-    grads = _pad_nans(
-        diff_grads,
-        primals,
-        [i in diff_pos_set for i in range(len(primals))],
-    )
+    # A VJP bind returns a gradient only for each differentiable primal; the
+    # abstract_eval declares that shorter arity. Emit the grads in primal
+    # positional order (has_tangent order), omitting the non-diff slots that
+    # JAX's transpose never consumes.
+    grad_by_pos = dict(zip(diff_input_path_to_pos.values(), diff_grads, strict=True))
+    grads = tuple(grad_by_pos[i] for i in sorted(grad_by_pos))
     return grads, (0,) * len(grads)
 
 

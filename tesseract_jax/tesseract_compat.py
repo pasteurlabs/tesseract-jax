@@ -376,37 +376,8 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        # JAX expects gradients for all inputs, even non-differentiable ones.
-        # Reconstruct the full output tuple in the same order as flat_inputs.
-        out = []
-        # all_idx indexes into flat_inputs, none_mask, and is_static_mask
-        array_idx = 0  # Index into array_args (which excludes static inputs)
-        tan_idx = 0  # Index into tangents/cotangents (which excludes non-differentiable inputs)
-        for all_idx, path in enumerate(flat_inputs):
-            if path in out_data:
-                # Path has a gradient from the server
-                out.append(out_data[path])
-                tan_idx += 1
-            elif (
-                tan_idx < len(has_tangent)
-                and not params.is_static_mask[all_idx]
-                and not has_tangent[tan_idx]
-            ):
-                # Non-differentiable but non-static input: return a NaN
-                # placeholder of the same shape/dtype as the corresponding
-                # input array. The slot exists for tuple-length contract;
-                # JAX's transpose machinery doesn't consume it for any
-                # user-requested derivative.
-                out.append(
-                    _discarded_slot(
-                        array_args[array_idx].shape,
-                        array_args[array_idx].dtype,
-                    )
-                )
-                tan_idx += 1
-
-            # Increment array_idx only for non-static inputs (which appear in array_args)
-            if not params.is_static_mask[all_idx]:
-                array_idx += 1
-
-        return tuple(out)
+        # Only differentiable inputs carry a cotangent back. A non-differentiable
+        # input's slot is never consumed by JAX's transpose, so we omit it here;
+        # abstract_eval declares the matching (shorter) output arity and the
+        # transpose rule scatters these back into full primal order.
+        return tuple(out_data[path] for path in flat_inputs if path in out_data)
