@@ -195,14 +195,8 @@ class Jaxeract:
                 _, static_paths = split_args(
                     tuple(path for path, _ in leaves_with_path), static_output_mask
                 )
-                # static_output_values are wrapped so the params bundle stays
-                # hashable for XLA CSE; unwrap before comparing.
-                expected_statics = tuple(
-                    v.wrapped if hasattr(v, "wrapped") else v
-                    for v in params.static_output_values
-                )
                 warn_on_static_output_drift(
-                    static_paths, returned_statics, expected_statics
+                    static_paths, returned_statics, params.static_output_values
                 )
         return out_data
 

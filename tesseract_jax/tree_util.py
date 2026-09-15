@@ -50,13 +50,9 @@ def unflatten_args(
 ) -> PyTree:
     """Unflatten lists of arguments (static and not) into a pytree."""
     if remove_static_args:
-        static_args_converted = [None] * len(static_args)
-    else:
-        static_args_converted = [
-            elem.wrapped if hasattr(elem, "wrapped") else elem for elem in static_args
-        ]
+        static_args = (None,) * len(static_args)
 
-    combined_args = combine_args(array_args, static_args_converted, is_static_mask)
+    combined_args = combine_args(array_args, static_args, is_static_mask)
     result = jax.tree.unflatten(input_pytreedef, combined_args)
 
     # Since jax 0.8, when tracing stuff without jit arrays are wrapped

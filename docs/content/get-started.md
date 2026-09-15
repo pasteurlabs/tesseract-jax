@@ -98,12 +98,10 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   This only affects `from_tesseract_api` (in-process execution). Tesseracts served via Docker (`from_image`) run in a separate process and are not subject to this restriction.
   ```
 
-- **Tesseracts are assumed pure functions** of their inputs. Tesseract-JAX lowers each
+- **Tesseracts are assumed pure functions of their inputs.** Tesseract-JAX lowers each
   endpoint call as a pure operation, which is what allows repeated identical calls to be
   collapsed into a single request. Where purity does not hold, the compiler is free to
-  surprise you. All of the following require compilation, so they apply under
-  `jax.jit` (including anything jitted internally) and never to eager execution, where
-  each call runs as soon as it is reached:
+  surprise you under `jax.jit`. Specifically:
   - **A call whose result is provably unused may not happen.**
 
     ```python

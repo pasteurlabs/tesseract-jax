@@ -3,8 +3,7 @@
 
 """Tests for an OutputSchema that mixes arrays with a str and a bool.
 
-A Tesseract is always dispatched through the JAX primitive, so an eager call
-traces, compiles and runs it just as a call under `jit` would. The primitive can
+A Tesseract is always dispatched through the JAX primitive. The primitive can
 only return arrays, so non-array leaves are taken from `abstract_eval`, carried
 as static primitive parameters, and put back into the output pytree after the
 bind. These tests check that the arrays are untouched: the static leaves must not

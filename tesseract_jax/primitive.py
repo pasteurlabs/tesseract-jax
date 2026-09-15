@@ -60,23 +60,6 @@ def _env_flag(name: str, default: bool) -> bool:
     )
 
 
-class _Hashable:
-    """A wrapper class to make non-hashable objects hashable by using their id.
-
-    This is not a proper hash function, as two identical objects with different memory
-    addresses will have different hashes.
-    """
-
-    def __init__(self, obj: Any) -> None:
-        self.wrapped = obj
-
-    def __hash__(self) -> int:
-        try:
-            return hash(self.wrapped)
-        except TypeError:
-            return id(self.wrapped)
-
-
 def _instantiate_zeros(tangents: Sequence[Any]) -> tuple[ArrayLike, ...]:
     """Densify symbolic zeros, which cannot be passed to ``bind`` as-is."""
     return tuple(
@@ -406,10 +389,7 @@ def tesseract_dispatch_lowering(
     _raise_if_unimplemented(params.eval_func, params.client)
 
     def _dispatch(*args: ArrayLike) -> Any:
-        out = getattr(params.client, params.eval_func)(args, params)
-        if not isinstance(out, tuple):
-            out = (out,)
-        return out
+        return getattr(params.client, params.eval_func)(args, params)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -684,14 +664,6 @@ def _check_dtype(dtype: Any) -> None:
         )
 
 
-def _make_hashable(obj: Any) -> _Hashable:
-    return _Hashable(obj)
-
-
-def _unpack_hashable(obj: _Hashable) -> Any:
-    return obj.wrapped
-
-
 def _is_array_schema(prop_schema: dict) -> bool:
     """Check if a schema property describes an array type."""
     if "array_flags" in prop_schema:
@@ -942,8 +914,8 @@ def apply_tesseract(
     # Tesseract without that endpoint cannot be used here at all.
     if "abstract_eval" not in tesseract_client.available_endpoints:
         raise ValueError(
-            "Given Tesseract object does not support abstract_eval, which "
-            "tesseract-jax requires to determine the output shapes of a call. "
+            "Tesseract object does not support abstract_eval, "
+            "tesseract-jax requires it to determine the output shapes of a call. "
             "Add an abstract_eval endpoint to the Tesseract object, or call it "
             "directly through the Tesseract client instead of apply_tesseract."
         )
@@ -951,9 +923,14 @@ def apply_tesseract(
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
-    is_static_mask = tuple(not isinstance(arg, jax.core.Tracer) for arg in flat_args)
+    # Arrays -- concrete or traced -- are operands of the primitive; only genuine
+    # non-array leaves (a str, an int, a bool) are static. Treating a concrete
+    # array as static would close it over as a bind parameter, diverging from the
+    # traced path and forcing a recompile whenever its value changes.
+    is_static_mask = tuple(
+        not isinstance(arg, (jax.Array, np.ndarray)) for arg in flat_args
+    )
     array_args, static_args = split_args(flat_args, is_static_mask)
-    static_args = tuple(_make_hashable(arg) for arg in static_args)
     has_tangent = (True,) * len(array_args)
 
     # abstract_eval's output structure tells us how to unflatten the arrays the
@@ -974,7 +951,7 @@ def apply_tesseract(
     # pytree once the bind has returned.
     static_output_mask = tuple(not is_aval(aval) for _, aval in avals_with_path)
     static_output_values = tuple(
-        _make_hashable(aval)
+        aval
         for (_, aval), static in zip(avals_with_path, static_output_mask, strict=True)
         if static
     )
@@ -1013,7 +990,7 @@ def apply_tesseract(
     if any(static_output_mask):
         out = combine_args(
             tuple(out),
-            tuple(_unpack_hashable(v) for v in static_output_values),
+            static_output_values,
             static_output_mask,
         )
 
