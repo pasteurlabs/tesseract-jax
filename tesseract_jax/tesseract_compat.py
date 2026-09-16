@@ -31,12 +31,12 @@ def _on_device(values: "list | tuple") -> bool:
     lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
     results) from the CPU host-callback lowering (real NumPy arrays).
 
-    The ``cuda_ipc`` import is deliberately lazy, not at module scope: eagerly
-    importing ``tesseract_core.runtime.cuda_ipc`` perturbs schema/typeguard state
+    The ``cuda`` import is deliberately lazy, not at module scope: eagerly
+    importing ``tesseract_core.runtime.cuda.ipc`` perturbs schema/typeguard state
     in the shared interpreter and breaks in-process (``LocalClient``) Tesseracts
     whose endpoints use ellipsis-shaped array schemas.
     """
-    from tesseract_core.runtime.cuda_ipc import has_cuda_array_interface
+    from tesseract_core.runtime.cuda.ipc import has_cuda_array_interface
 
     return any(has_cuda_array_interface(v) for v in values)
 
@@ -211,18 +211,21 @@ class Jaxeract:
 
     @contextlib.contextmanager
     def cuda_ipc(self) -> Generator[None]:
-        """Temporarily make the underlying HTTP client use ``cuda_ipc`` encoding.
+        """Temporarily make the underlying HTTP client use the ``cuda_ipc`` transport.
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
         the client exports GPU array *inputs* via CUDA IPC handles and decodes
-        ``cuda_ipc`` *outputs* back to GPU arrays -- no host round-trip. Two
-        things must change and be restored:
+        ``cuda_ipc`` *outputs* back to GPU arrays -- no host round-trip. GPU
+        transport in tesseract-core is a separate axis from ``output_format``
+        (which only governs CPU arrays), so two things must change and be
+        restored:
 
-        * ``_output_format`` (drives both the request encoder and response
-          decoder), and
-        * an ``Accept: application/json+cuda_ipc`` header, since the response
-          format is otherwise the server's default and the client never sends
-          Accept on its own.
+        * ``_gpu_transport`` (drives how GPU array *inputs* are encoded), and
+        * an ``Accept`` header carrying the transport as a media-type parameter
+          (``application/<output_format>; gpu_transport=cuda_ipc``), which is how
+          the server selects the *output* transport. The client never sends
+          Accept on its own, so without this the response falls back to the
+          server's configured transport.
 
         Scoped so the shared client is not permanently mutated (which would leak
         cuda_ipc behavior onto host-callback / CPU uses of the same client). A
@@ -233,22 +236,28 @@ class Jaxeract:
         if (
             not self._cuda_ipc
             or client is None
-            or not hasattr(client, "_output_format")
+            or not hasattr(client, "_gpu_transport")
         ):
             yield
             return
-        prev_fmt = client._output_format
+        prev_transport = client._gpu_transport
         session = getattr(client, "_session", None)
         had_accept = session is not None and "Accept" in session.headers
         prev_accept = session.headers.get("Accept") if session is not None else None
 
-        client._output_format = "json+cuda_ipc"
+        # Keep the response's CPU-array format as the client's current one and
+        # carry the GPU transport as a media-type parameter on the same header.
+        output_format = getattr(client, "_output_format", "json+base64")
+
+        client._gpu_transport = "cuda_ipc"
         if session is not None:
-            session.headers["Accept"] = "application/json+cuda_ipc"
+            session.headers["Accept"] = (
+                f"application/{output_format}; gpu_transport=cuda_ipc"
+            )
         try:
             yield
         finally:
-            client._output_format = prev_fmt
+            client._gpu_transport = prev_transport
             if session is not None:
                 if had_accept:
                     session.headers["Accept"] = prev_accept

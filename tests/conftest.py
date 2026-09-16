@@ -161,8 +161,8 @@ def serve_gpu_tesseract(tmp_path_factory, *, output_format: str = "json+base64")
         name="gpu",
         extra_env={
             "TESSERACT_OUTPUT_FORMAT": output_format,
-            # cuda_ipc output is an experimental opt-in in tesseract-core.
-            "TESSERACT_ENABLE_EXPERIMENTAL_CUDA_IPC": "1",
+            # cuda_ipc GPU transport is an experimental opt-in in tesseract-core.
+            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
         },
     )
 

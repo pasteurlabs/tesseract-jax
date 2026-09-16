@@ -10,7 +10,10 @@ requires-python = ">=3.12,<4"
 dependencies = [
     "jax>=0.7.0",
     "packaging",
-    "tesseract-core",
+    # The GPU (cuda_ipc) transport relies on the runtime CUDA package layout
+    # (``tesseract_core.runtime.cuda.{ipc,loader}``) and the ``gpu_transport``
+    # axis introduced in 1.13.0.
+    "tesseract-core>=1.13.0",
 ]
 dynamic = ["version"]
 

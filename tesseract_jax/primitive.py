@@ -962,14 +962,13 @@ def apply_tesseract(
         cuda_ipc: If ``True``, GPU array inputs are exchanged with the Tesseract
             via CUDA IPC handles instead of a host round-trip, so array data
             never leaves the device. Requires a served Tesseract (``HTTPClient``)
-            started with ``enable_experimental_cuda_ipc=True`` in its
-            ``runtime_config`` and a GPU-backed JAX (arrays on a ``cuda``
-            device); has no effect on CPU arrays or a local (in-process) client,
-            which already shares memory. Both processes must share the CUDA IPC
-            namespace (Docker's ``--ipc=host``). When ``False`` (default), GPU
-            arrays take the same host round-trip as CPU arrays. This is an
-            experimental tesseract-core feature; see
-            ``tesseract_core.runtime.cuda_ipc``.
+            started with ``gpu_transport="cuda_ipc"`` in its ``runtime_config``
+            and a GPU-backed JAX (arrays on a ``cuda`` device); has no effect on
+            CPU arrays or a local (in-process) client, which already shares
+            memory. Both processes must share the CUDA IPC namespace (Docker's
+            ``--ipc=host``). When ``False`` (default), GPU arrays take the same
+            host round-trip as CPU arrays. This is an experimental
+            tesseract-core feature; see ``tesseract_core.runtime.cuda.ipc``.
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.

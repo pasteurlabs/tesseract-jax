@@ -15,10 +15,7 @@ guard it on the CPU test runner rather than only implicitly on GPU CI.
 
 from __future__ import annotations
 
-from importlib.metadata import version as _pkg_version
-
 import pytest
-from packaging.version import Version
 
 from tesseract_jax import gpu_ffi
 
@@ -96,27 +93,18 @@ def test_ensure_registered_primes_cudart_before_registering(
 def test_cudart_candidates_non_empty() -> None:
     """``_cudart_candidates`` always yields at least one entry to try.
 
-    On both branches (tesseract-core's shared discovery, or the bare-soname
-    fallback for older core) the list must be non-empty -- an empty list is the
-    shim's hard-error condition.
+    An empty list is the shim's hard-error condition, so tesseract-core's shared
+    discovery must always surface at least one candidate to dlopen.
     """
     assert gpu_ffi._cudart_candidates()
 
 
-@pytest.mark.skipif(
-    Version(_pkg_version("tesseract-core")) < Version(gpu_ffi._CUDART_LOADER_MIN_CORE),
-    reason="tesseract-core predates the iter_cudart_candidates loader",
-)
-def test_cudart_candidates_uses_core_discovery_above_floor(monkeypatch):
-    """At/above the version floor, delegate to tesseract-core's shared discovery.
+def test_cudart_candidates_uses_core_discovery(monkeypatch):
+    """Delegate to tesseract-core's shared libcudart discovery.
 
-    The shim must resolve the same libcudart the codec does; above the floor
-    that means calling ``iter_cudart_candidates`` rather than the bare-soname
-    fallback.
+    The shim must resolve the same libcudart the codec does, so
+    ``_cudart_candidates`` returns exactly what ``iter_cudart_candidates`` yields.
     """
-    monkeypatch.setattr(
-        gpu_ffi, "_pkg_version", lambda _name: gpu_ffi._CUDART_LOADER_MIN_CORE
-    )
     sentinel = ["/wheel/libcudart.so.13", "libcudart.so"]
 
     from tesseract_core.runtime.cuda import loader
@@ -124,17 +112,6 @@ def test_cudart_candidates_uses_core_discovery_above_floor(monkeypatch):
     monkeypatch.setattr(loader, "iter_cudart_candidates", lambda: iter(sentinel))
 
     assert gpu_ffi._cudart_candidates() == sentinel
-
-
-def test_cudart_candidates_falls_back_below_floor(monkeypatch):
-    """Below the version floor, use the bare-soname fallback.
-
-    Older tesseract-core lacks ``iter_cudart_candidates``; the helper must not
-    import it and must return the static fallback instead.
-    """
-    monkeypatch.setattr(gpu_ffi, "_pkg_version", lambda _name: "1.12.0")
-
-    assert gpu_ffi._cudart_candidates() == list(gpu_ffi._CUDART_SONAME_FALLBACK)
 
 
 class _StubClient:

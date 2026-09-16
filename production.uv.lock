@@ -3106,7 +3106,7 @@ wheels = [
 
 [[package]]
 name = "tesseract-core"
-version = "1.12.0"
+version = "1.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
@@ -3121,9 +3121,9 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d5/b3/ee6638e3095b3b01c4b2273372ca18659e994e5648d8f51848cfa2261634/tesseract_core-1.12.0.tar.gz", hash = "sha256:ea22f7b4476c9d6b545e7dafe696679e1e8d2a4d1124608894c1d92c1aa05c53", size = 1371495, upload-time = "2026-08-28T14:39:56.409Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8a/b3/4ab65d9d89bd0aea3fb71e0600db3f36a5e943063f3f1af170d0f933194a/tesseract_core-1.13.0.tar.gz", hash = "sha256:f4e8fe68064827288b29254cfae2a020d663410c990fe3a76ec836c972fe3204", size = 1389025, upload-time = "2026-09-16T13:47:19.818Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e9/70/db293a954223f5f5d88292e5c791ab3fb426758779a9cddf96843275a28b/tesseract_core-1.12.0-py3-none-any.whl", hash = "sha256:d4ac167b73953ef56d8d520537d9b863461301c52dbd1ebb9be2788ee133f542", size = 193062, upload-time = "2026-08-28T14:39:54.612Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/f6/91673a28968e89d18062c132569baeff9568bfb7e4e85327a6f11310f956/tesseract_core-1.13.0-py3-none-any.whl", hash = "sha256:1e6328d86bfc68a83565f29ad73d1a3ee1761407f9e478b5b70a043f510d8d74", size = 216912, upload-time = "2026-09-16T13:47:18.066Z" },
 ]
 
 [package.optional-dependencies]
@@ -3207,7 +3207,7 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
-    { name = "tesseract-core" },
+    { name = "tesseract-core", specifier = ">=1.13.0" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
     { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
     { name = "typeguard", marker = "extra == 'dev'" },

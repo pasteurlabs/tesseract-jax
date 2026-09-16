@@ -31,35 +31,11 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Sequence
-from importlib.metadata import version as _pkg_version
 from typing import Any
 
 import numpy as np
-from packaging.version import Version
 
 FFI_TARGET_NAME = "tesseract_jax_dispatch"
-
-# The shared libcudart discovery surface
-# (``tesseract_core.runtime.cuda.loader.iter_cudart_candidates``) landed after
-# tesseract-core 1.12.0. Until the lock is bumped to a release that ships it,
-# fall back to a bare-soname list here.
-#
-# RETIRE THIS FALLBACK when the tesseract-core floor in ``pyproject.toml`` is
-# ``>= _CUDART_LOADER_MIN_CORE``: at that point ``iter_cudart_candidates`` is
-# guaranteed present, so the version gate and ``_CUDART_SONAME_FALLBACK`` below
-# can be deleted and ``_cudart_candidates`` reduced to a direct import + call.
-# The same floor gates the CI ``LD_LIBRARY_PATH`` workaround in run_tests.yml.
-_CUDART_LOADER_MIN_CORE = "1.13.0"  # projected first release after 1.12.0
-
-# Bare-soname fallback, newest-major-first. Only used against a tesseract-core
-# older than ``_CUDART_LOADER_MIN_CORE``; the loader helper's list is richer
-# (wheel dirs first, matching how JAX/CuPy resolve libcudart).
-_CUDART_SONAME_FALLBACK = (
-    "libcudart.so",
-    "libcudart.so.13",
-    "libcudart.so.12",
-    "libcudart.so.11",
-)
 
 _registered = False
 _register_lock = threading.Lock()
@@ -95,17 +71,11 @@ def _cudart_candidates() -> list[str]:
 
     Delegates to tesseract-core's shared discovery so the shim resolves the
     *same* libcudart the cuda_ipc codec does (wheel dirs first, matching JAX and
-    CuPy) -- which matters because the shim hands device memory to those
-    frameworks. Falls back to a bare-soname list when the installed
-    tesseract-core predates the discovery helper
-    (``< _CUDART_LOADER_MIN_CORE``); see the retirement note there.
+    CuPy), which matters because the shim hands device memory to those frameworks.
     """
-    if Version(_pkg_version("tesseract-core")) >= Version(_CUDART_LOADER_MIN_CORE):
-        from tesseract_core.runtime.cuda.loader import iter_cudart_candidates
+    from tesseract_core.runtime.cuda.loader import iter_cudart_candidates
 
-        return list(iter_cudart_candidates())
-
-    return list(_CUDART_SONAME_FALLBACK)
+    return list(iter_cudart_candidates())
 
 
 def ensure_registered() -> str:
