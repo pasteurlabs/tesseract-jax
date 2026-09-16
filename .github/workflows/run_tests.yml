@@ -82,14 +82,21 @@ jobs:
     # fallbacks (libcudart.so.12/.13) and the GPU-direct cuda_ipc path are
     # covered against each. cupy and jax[cudaNN] are pinned to a matching CUDA
     # build so the libcudart the runtime actually binds to differs per entry.
+    #
+    # Each CUDA leg also pins a Python version so the two legs bracket the
+    # supported range (3.12 floor / 3.14 ceiling), which incidentally covers both
+    # jaxlib majors (0.7 on <3.14, 0.8 on >=3.14). Newest CUDA rides the newest
+    # Python; the floor Python guards the oldest still-supported combination.
     strategy:
       fail-fast: false
       matrix:
         cuda:
           - major: "12"
             base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
+            python-version: "3.12"
           - major: "13"
             base_image: "nvidia/cuda:13.3.1-base-ubuntu24.04"
+            python-version: "3.14"
 
     defaults:
       run:
@@ -122,7 +129,7 @@ jobs:
           TESSERACT_JAX_GPU_REQUIRED: "1"
         run: |
           cp production.uv.lock uv.lock
-          uv sync --python 3.12 --extra dev --frozen
+          uv sync --python ${{ matrix.cuda.python-version }} --extra dev --frozen
 
       # cupy and jax with CUDA support are not declared dependencies (cupy is
       # only needed to *produce* GPU arrays in the test Tesseract's compute, and
