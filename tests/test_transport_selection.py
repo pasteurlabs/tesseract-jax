@@ -5,7 +5,7 @@
 
 These cover the transport-name plumbing that decides *which* on-device transport
 a call uses (and whether it uses one at all). The request/response encoding is
-exercised end-to-end by the GPU tests in ``test_gpu_direct.py``; only the
+exercised end-to-end by the GPU tests in ``test_gpu_direct.py``. Only the
 selection logic is unit-tested here, since it gates the GPU (FFI) lowering and a
 wrong answer silently sends an unsupported ``Accept`` to the server.
 """

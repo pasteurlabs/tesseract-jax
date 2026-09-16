@@ -197,8 +197,8 @@ class Jaxeract:
             )
 
         self.client = tesseract_client
-        # The transport name (None = host round-trip). ``_cuda_ipc`` stays as a
-        # bool alias so existing call sites keep working.
+        # The transport name, or ``None`` for a host round-trip. ``_cuda_ipc`` is
+        # the boolean "is this call on-device?" the GPU lowering gates on.
         self._device_transport = device_transport
         self._cuda_ipc = device_transport is not None
 
@@ -314,9 +314,6 @@ class Jaxeract:
                     session.headers["Accept"] = prev_accept
                 else:
                     session.headers.pop("Accept", None)
-
-    # Back-compat alias: the GPU lowering historically calls ``client.cuda_ipc()``.
-    cuda_ipc = device_transport_encoding
 
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,
