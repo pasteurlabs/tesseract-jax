@@ -162,7 +162,6 @@ class Jaxeract:
         self,
         tesseract_client: Tesseract,
         *,
-        cuda_ipc: bool = False,
         device_transport: str | None = None,
     ) -> None:
         """Initialize the Tesseract client.
@@ -171,18 +170,8 @@ class Jaxeract:
         arrays with a served Tesseract instead of a host round-trip (e.g.
         ``"cuda_ipc"``), selecting one of the runtime's registered device
         transports. It gates both the GPU FFI lowering and the
-        :meth:`device_transport_encoding` context below. ``cuda_ipc=True`` is the
-        back-compatible spelling of ``device_transport="cuda_ipc"``.
+        :meth:`device_transport_encoding` context below.
         """
-        if cuda_ipc and device_transport not in (None, "cuda_ipc"):
-            raise ValueError(
-                "Pass either cuda_ipc=True or device_transport=..., not both "
-                f"conflicting values (got cuda_ipc=True, "
-                f"device_transport={device_transport!r})."
-            )
-        if cuda_ipc and device_transport is None:
-            device_transport = "cuda_ipc"
-
         # Only transports the GPU (FFI) lowering actually implements end-to-end
         # are accepted. The lowering is currently cuda_ipc-specific, so an
         # unsupported name would otherwise route silently into that path and send
@@ -197,10 +186,8 @@ class Jaxeract:
             )
 
         self.client = tesseract_client
-        # The transport name, or ``None`` for a host round-trip. ``_cuda_ipc`` is
-        # the boolean "is this call on-device?" the GPU lowering gates on.
+        # The transport name, or ``None`` for a host round-trip.
         self._device_transport = device_transport
-        self._cuda_ipc = device_transport is not None
 
         self.tesseract_input_args = tuple(
             arg

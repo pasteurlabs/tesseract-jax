@@ -35,22 +35,14 @@ def _fake_client() -> MagicMock:
     return c
 
 
-def test_cuda_ipc_bool_maps_to_transport_name():
-    j = Jaxeract(_fake_client(), cuda_ipc=True)
-    assert j._device_transport == "cuda_ipc"
-    assert j._cuda_ipc is True
-
-
 def test_device_transport_name_selects_transport():
     j = Jaxeract(_fake_client(), device_transport="cuda_ipc")
     assert j._device_transport == "cuda_ipc"
-    assert j._cuda_ipc is True
 
 
 def test_default_is_host_roundtrip():
     j = Jaxeract(_fake_client())
     assert j._device_transport is None
-    assert j._cuda_ipc is False
 
 
 def test_unsupported_transport_is_rejected():
@@ -61,15 +53,10 @@ def test_unsupported_transport_is_rejected():
         Jaxeract(_fake_client(), device_transport="nixl")
 
 
-def test_conflicting_cuda_ipc_and_transport_rejected():
-    with pytest.raises(ValueError, match="not both"):
-        Jaxeract(_fake_client(), cuda_ipc=True, device_transport="nixl")
-
-
 def test_equality_and_hash_key_on_transport():
     c = _fake_client()
     a = Jaxeract(c, device_transport="cuda_ipc")
-    b = Jaxeract(c, cuda_ipc=True)
+    b = Jaxeract(c, device_transport="cuda_ipc")
     host = Jaxeract(c)
     # Same client + same transport -> interchangeable (so XLA may common them up);
     # different transport -> must not compare equal.
@@ -99,11 +86,11 @@ def _client_with_http() -> MagicMock:
 
 def test_device_transport_encoding_drives_gpu_transport_and_accept():
     # tesseract-core keeps CPU encoding (``_output_format``) and GPU transport
-    # (``_gpu_transport``) on separate axes: opting a call into cuda_ipc must set
+    # (``_gpu_transport``) on separate axes: selecting a device transport must set
     # ``_gpu_transport`` and negotiate the server's GPU output transport via an
     # Accept media-type parameter, without disturbing ``_output_format``.
     c = _client_with_http()
-    j = Jaxeract(c, cuda_ipc=True)
+    j = Jaxeract(c, device_transport="cuda_ipc")
     http = c._client
 
     with j.device_transport_encoding():

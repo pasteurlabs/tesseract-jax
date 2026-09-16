@@ -153,12 +153,14 @@ def _gpu_available() -> bool:
         return False
 
 
-def serve_gpu_tesseract(tmp_path_factory, *, output_format: str = "json+base64"):
-    """Serve the GPU test Tesseract with cuda_ipc enabled; yield its URL."""
+def serve_gpu_tesseract(
+    tmp_path_factory, folder: str, name: str, *, output_format: str = "json+base64"
+):
+    """Serve a GPU test Tesseract with the cuda_ipc transport; yield its URL."""
     yield from _serve_tesseract(
         tmp_path_factory,
-        here / "gpu_tesseract" / "tesseract_api.py",
-        name="gpu",
+        here / folder / "tesseract_api.py",
+        name=name,
         extra_env={
             "TESSERACT_OUTPUT_FORMAT": output_format,
             # cuda_ipc GPU transport is an experimental opt-in in tesseract-core.
@@ -167,21 +169,33 @@ def serve_gpu_tesseract(tmp_path_factory, *, output_format: str = "json+base64")
     )
 
 
-@pytest.fixture(scope="module")
-def served_gpu_tesseract(tmp_path_factory):
-    """A served GPU Tesseract (base64 default output). Skips without a GPU/CuPy."""
+def _served_gpu_tesseract(tmp_path_factory, folder: str, name: str):
+    """Skip-or-serve helper shared by the GPU Tesseract fixtures."""
     if not _gpu_available():
         pytest.skip("no GPU backend for JAX")
-    # CuPy is required by the *test Tesseract's* compute (gpu_tesseract runs its
-    # apply with cupy), not by tesseract-jax's transport, which is now
-    # CUDA-array-library-free.
+    # CuPy is required by the *test Tesseract's* compute (its apply runs on cupy),
+    # not by tesseract-jax's transport, which is CUDA-array-library-free.
     pytest.importorskip("cupy")
-    gen = serve_gpu_tesseract(tmp_path_factory)
+    gen = serve_gpu_tesseract(tmp_path_factory, folder, name)
     url = next(gen)
     try:
         yield Tesseract.from_url(url)
     finally:
         gen.close()
+
+
+@pytest.fixture(scope="module")
+def served_gpu_tesseract(tmp_path_factory):
+    """A served all-float32 GPU Tesseract. Skips without a GPU/CuPy."""
+    yield from _served_gpu_tesseract(tmp_path_factory, "gpu_tesseract", "gpu")
+
+
+@pytest.fixture(scope="module")
+def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
+    """A served GPU Tesseract with float32 in / float64 out. Skips without a GPU/CuPy."""
+    yield from _served_gpu_tesseract(
+        tmp_path_factory, "gpu_mixed_dtype_tesseract", "gpu_mixed_dtype"
+    )
 
 
 # ---------------------------------------------------------------------------

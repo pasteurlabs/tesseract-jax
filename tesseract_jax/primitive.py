@@ -446,29 +446,29 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering when the caller did not opt into
-    ``cuda_ipc`` (``client._cuda_ipc``), so a non-cuda_ipc call behaves exactly
-    as on CPU. When the caller *did* opt in but the native shim is unavailable
-    (e.g. a CPU-only install where it wasn't compiled) this raises rather than
-    silently falling back: ``cuda_ipc=True`` is an explicit request for the
-    GPU-direct path, so honouring it as a slow host round-trip with no signal
-    would hide the very thing the caller asked for.
+    Falls back to the host-callback lowering when the caller did not select a
+    device transport (``client._device_transport``), so a host-transport call
+    behaves exactly as on CPU. When the caller *did* select one but the native
+    shim is unavailable (e.g. a CPU-only install where it wasn't compiled) this
+    raises rather than silently falling back: ``device_transport=...`` is an
+    explicit request for the GPU-direct path, so honouring it as a slow host
+    round-trip with no signal would hide the very thing the caller asked for.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
 
-    if not client._cuda_ipc:
+    if client._device_transport is None:
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
-            "cuda_ipc=True was requested but the native GPU FFI shim is "
-            "unavailable (not compiled or failed to import), so GPU-direct "
-            "dispatch cannot run. Reinstall tesseract-jax with the shim built "
-            "(a source install compiles it via the hatch build hook; set "
-            "TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure fatal), or "
-            "drop cuda_ipc=True to use the host-callback transport."
+            f"device_transport={client._device_transport!r} was requested but "
+            "the native GPU FFI shim is unavailable (not compiled or failed to "
+            "import), so GPU-direct dispatch cannot run. Reinstall tesseract-jax "
+            "with the shim built (a source install compiles it via the hatch "
+            "build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure "
+            "fatal), or drop device_transport to use the host-callback transport."
         )
 
     _raise_if_unimplemented(params.eval_func, client)
@@ -853,7 +853,6 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    cuda_ipc: bool = False,
     device_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
@@ -964,10 +963,6 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
-        cuda_ipc: Back-compatible spelling of ``device_transport="cuda_ipc"``. If
-            ``True``, GPU array inputs are exchanged with the Tesseract via CUDA
-            IPC handles instead of a host round-trip, so array data never leaves
-            the device.
         device_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
             ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
@@ -976,9 +971,8 @@ def apply_tesseract(
             arrays or a local (in-process) client, which already shares memory.
             For ``cuda_ipc`` both processes must share the CUDA IPC namespace
             (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
-            the same host round-trip as CPU arrays. Pass either this or
-            ``cuda_ipc``, not both. This is an experimental tesseract-core
-            feature; see ``tesseract_core.runtime.cuda.ipc``.
+            the same host round-trip as CPU arrays. This is an experimental
+            tesseract-core feature; see ``tesseract_core.runtime.cuda.ipc``.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
@@ -1019,9 +1013,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(
-        tesseract_client, cuda_ipc=cuda_ipc, device_transport=device_transport
-    )
+    client = Jaxeract(tesseract_client, device_transport=device_transport)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine

@@ -3,12 +3,12 @@
 
 """GPU-direct dispatch tests: the native FFI (CUDA) lowering of the primitive.
 
-On GPU, ``apply_tesseract(..., cuda_ipc=True)`` lowers ``tesseract_dispatch`` to
-a native XLA FFI custom call (cuda_ipc), keeping data on the device. There is no
-separate entry point -- the ``cuda`` platform lowering routes through the FFI
-path when the call opted into ``cuda_ipc``; without the opt-in it falls back to
-the host-callback lowering (a device->host->device round-trip), so every test
-here passes ``cuda_ipc=True``.
+On GPU, ``apply_tesseract(..., device_transport="cuda_ipc")`` lowers
+``tesseract_dispatch`` to a native XLA FFI custom call, keeping data on the
+device. There is no separate entry point: the ``cuda`` platform lowering routes
+through the FFI path when the call selected a device transport, and without one
+it falls back to the host-callback lowering (a device->host->device round-trip).
+So every test here passes ``device_transport="cuda_ipc"``.
 
 These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA IPC
 is cross-process and cannot be self-opened. Marked ``gpu``; the
@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
@@ -62,7 +63,7 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     b = jnp.ones(n, dtype=jnp.float32) * 3.0
     out = jax.jit(
         lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
         )
     )(a, b)
     c = out["c"]
@@ -72,33 +73,45 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
     )
 
 
-def test_apply_via_device_transport_name(served_gpu_tesseract):
-    """The generic ``device_transport="cuda_ipc"`` path matches ``cuda_ipc=True``.
+def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
+    """A float32-in/float64-out Tesseract round-trips on-device with the right dtype.
 
-    Exercises the transport-name API end-to-end: a JAX program dispatches to the
-    served GPU Tesseract selecting the transport by name, stays on-device, and
-    produces the analytic result. This is the same on-device FFI lowering the
-    boolean opt-in uses, reached through the generalized selector.
+    ``gpu_tesseract`` is all-float32, so the shim's per-buffer dtype handling is
+    otherwise only exercised for one width. Here apply returns float64, so a
+    correct copy must move the wider buffer and preserve the dtype through the
+    cuda_ipc return path.
     """
-    a = jnp.arange(64, dtype=jnp.float32)
-    b = jnp.ones(64, dtype=jnp.float32) * 3.0
+    x = jnp.arange(64, dtype=jnp.float32)
+    y = jax.jit(
+        lambda x: apply_tesseract(
+            served_gpu_mixed_dtype_tesseract, {"x": x}, device_transport="cuda_ipc"
+        )["y"]
+    )(x)
 
-    by_name = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
-        )["c"]
-    )(a, b)
-    by_bool = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
-        )["c"]
-    )(a, b)
+    assert _on_gpu(y)
+    assert _to_np(y).dtype == np.float64
+    np.testing.assert_allclose(_to_np(y), np.asarray(x) * 2.0, rtol=0, atol=0)
 
-    assert _on_gpu(by_name)
-    np.testing.assert_array_equal(_to_np(by_name), _to_np(by_bool))
-    np.testing.assert_allclose(
-        _to_np(by_name), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+
+def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_mixed_dtype_tesseract):
+    """A returned dtype disagreeing with XLA's output buffer must raise, not reinterpret.
+
+    The jacobian response schema does not pin the output dtype, and unlike the
+    host path the shim cannot cast. ``lie_about_dtype`` makes apply return float32
+    where the schema (and XLA's buffer) expect float64: same shape, different
+    width, so nothing upstream catches it. The shim must compare dtypes and fail
+    rather than copy a narrower source into the wider buffer.
+    """
+    x = jnp.arange(64, dtype=jnp.float32)
+    f = jax.jit(
+        lambda x: apply_tesseract(
+            served_gpu_mixed_dtype_tesseract,
+            {"x": x, "lie_about_dtype": True},
+            device_transport="cuda_ipc",
+        )["y"]
     )
+    with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
+        f(x).block_until_ready()
 
 
 def test_apply_matches_host_callback(served_gpu_tesseract):
@@ -112,7 +125,7 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
 
     gpu = jax.jit(
         lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
         )["c"]
     )(a, b)
     with jax.default_device(jax.devices("cpu")[0]):
@@ -130,9 +143,9 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     b = jnp.ones(512, dtype=jnp.float32)
 
     def loss(a):
-        return apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True)[
-            "c"
-        ].sum()
+        return apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        )["c"].sum()
 
     g = jax.jit(jax.grad(loss))(a)
     assert _on_gpu(g)
@@ -144,7 +157,7 @@ def test_serial_reuse_ring1(served_gpu_tesseract):
     """Back-to-back serial dispatches: exercises the ring-1 lifetime contract."""
     f = jax.jit(
         lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
         )["c"]
     )
     for i in range(20):
@@ -179,7 +192,7 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
             served_gpu_tesseract,
             {"a": a, "b": b},
             materialize_jacobian=True,
-            cuda_ipc=True,
+            device_transport="cuda_ipc",
         )["c"]
 
     jac = jax.jit(jax.jacrev(f))(a)
@@ -209,7 +222,9 @@ def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
 
     def loss(a, mask):
         out = apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b, "mask": mask}, cuda_ipc=True
+            served_gpu_tesseract,
+            {"a": a, "b": b, "mask": mask},
+            device_transport="cuda_ipc",
         )
         return out["c"].sum()
 
@@ -238,7 +253,9 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
     tb = jnp.zeros(n, dtype=jnp.float32)
 
     def f(a, b):
-        return apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True)
+        return apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        )
 
     primal, tangent = jax.jit(lambda a, b, ta, tb: jax.jvp(f, (a, b), (ta, tb)))(
         a, b, ta, tb
@@ -303,7 +320,7 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
         b = jnp.ones(4, dtype=jnp.float32)
         f = jax.jit(
             lambda a, b: apply_tesseract(
-                served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
             )["c"]
         )
         with pytest.raises(
@@ -353,7 +370,7 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
         b = jnp.ones(8, dtype=jnp.float32)
         f = jax.jit(
             lambda a, b: apply_tesseract(
-                served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
             )["c"]
         )
         with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
@@ -363,6 +380,32 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
 
     # The interpreter survived the failure: a fresh trivial computation still runs.
     assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+
+
+def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
+    served_gpu_tesseract, served_vectoradd_tesseract
+):
+    """A single jitted graph can mix a GPU-direct and a host-callback dispatch.
+
+    The GPU Tesseract runs via cuda_ipc (device-resident, residency-checked), and
+    its output feeds a CPU Tesseract dispatched over the host transport (no
+    device_transport), which takes the usual device->host->device round-trip. The
+    two lower to different custom calls and compose without interfering.
+    """
+    cpu_tess = Tesseract.from_url(served_vectoradd_tesseract)
+
+    a = jnp.arange(64, dtype=jnp.float32)
+    b = jnp.ones(64, dtype=jnp.float32) * 3.0
+
+    def pipeline(a, b):
+        gpu_out = apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        )["c"]  # a*2 + b, on-device
+        return apply_tesseract(cpu_tess, {"a": gpu_out, "b": b})["c"]  # + b, host
+
+    out = jax.jit(pipeline)(a, b)
+    expected = (np.asarray(a) * 2.0 + np.asarray(b)) + np.asarray(b)
+    np.testing.assert_allclose(_to_np(out), expected, rtol=1e-6, atol=0)
 
 
 @pytest.mark.parametrize("n", [100_000, 10_000_000])
@@ -389,7 +432,7 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
 
     f = jax.jit(
         lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, cuda_ipc=True
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
         )["c"]
     )
     # Warm up tracing/compilation so the timed loop measures steady-state latency.
