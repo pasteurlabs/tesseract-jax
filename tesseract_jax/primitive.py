@@ -475,10 +475,10 @@ def tesseract_dispatch_gpu_lowering(
 
     inner = _build_dispatch_closure(params)
 
-    # Run the dispatch with the client in cuda_ipc mode, so GPU inputs are
-    # exported by IPC handle and outputs come back on-device.
+    # Run the dispatch with the client in device-transport mode, so GPU inputs
+    # are exported by reference and outputs come back on-device.
     def gpu_dispatch(args: tuple) -> tuple:
-        with client.cuda_ipc():
+        with client.device_transport_encoding():
             return inner(*args)
 
     target = gpu_ffi.ensure_registered()
@@ -854,6 +854,7 @@ def apply_tesseract(
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
     cuda_ipc: bool = False,
+    device_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
@@ -963,16 +964,21 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
-        cuda_ipc: If ``True``, GPU array inputs are exchanged with the Tesseract
-            via CUDA IPC handles instead of a host round-trip, so array data
-            never leaves the device. Requires a served Tesseract (``HTTPClient``)
-            started with ``gpu_transport="cuda_ipc"`` in its ``runtime_config``
-            and a GPU-backed JAX (arrays on a ``cuda`` device); has no effect on
-            CPU arrays or a local (in-process) client, which already shares
-            memory. Both processes must share the CUDA IPC namespace (Docker's
-            ``--ipc=host``). When ``False`` (default), GPU arrays take the same
-            host round-trip as CPU arrays. This is an experimental
-            tesseract-core feature; see ``tesseract_core.runtime.cuda.ipc``.
+        cuda_ipc: Back-compatible spelling of ``device_transport="cuda_ipc"``. If
+            ``True``, GPU array inputs are exchanged with the Tesseract via CUDA
+            IPC handles instead of a host round-trip, so array data never leaves
+            the device.
+        device_transport: Name of the on-device transport used to exchange GPU
+            arrays with the Tesseract instead of a host round-trip (currently
+            ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
+            with the matching ``gpu_transport`` in its ``runtime_config`` and a
+            GPU-backed JAX (arrays on a ``cuda`` device); has no effect on CPU
+            arrays or a local (in-process) client, which already shares memory.
+            For ``cuda_ipc`` both processes must share the CUDA IPC namespace
+            (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
+            the same host round-trip as CPU arrays. Pass either this or
+            ``cuda_ipc``, not both. This is an experimental tesseract-core
+            feature; see ``tesseract_core.runtime.cuda.ipc``.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
@@ -1013,7 +1019,9 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(tesseract_client, cuda_ipc=cuda_ipc)
+    client = Jaxeract(
+        tesseract_client, cuda_ipc=cuda_ipc, device_transport=device_transport
+    )
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
