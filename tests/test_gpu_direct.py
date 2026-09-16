@@ -93,25 +93,57 @@ def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
     np.testing.assert_allclose(_to_np(y), np.asarray(x) * 2.0, rtol=0, atol=0)
 
 
-def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_mixed_dtype_tesseract):
+def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     """A returned dtype disagreeing with XLA's output buffer must raise, not reinterpret.
 
-    The jacobian response schema does not pin the output dtype, and unlike the
-    host path the shim cannot cast. ``lie_about_dtype`` makes apply return float32
-    where the schema (and XLA's buffer) expect float64: same shape, different
-    width, so nothing upstream catches it. The shim must compare dtypes and fail
-    rather than copy a narrower source into the wider buffer.
+    XLA sizes each output buffer from tesseract-jax's declared avals, but the
+    Tesseract is not forced to return that dtype (an unconstrained output schema
+    is only dtype-validated server-side when it fully pins the dtype). Unlike the
+    host path the shim cannot cast, so it compares each result's
+    ``__cuda_array_interface__`` dtype against the expected buffer and raises
+    rather than copying a narrower source (an out-of-bounds device read) or
+    silently reinterpreting a same-itemsize swap.
+
+    tesseract-core validates a pinned output dtype server-side, so a genuinely
+    dtype-lying Tesseract is rejected before its bytes reach the shim. To drive
+    the shim's own guard we intercept at the dispatch callback -- the exact
+    boundary the handler reads from -- and relabel the real device buffer's dtype,
+    mirroring ``test_result_shape_mismatch_at_ffi_boundary_errors``.
     """
-    x = jnp.arange(64, dtype=jnp.float32)
-    f = jax.jit(
-        lambda x: apply_tesseract(
-            served_gpu_mixed_dtype_tesseract,
-            {"x": x, "lie_about_dtype": True},
-            device_transport="cuda_ipc",
-        )["y"]
-    )
-    with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
-        f(x).block_until_ready()
+    from tesseract_jax import gpu_ffi
+
+    gpu_ffi.ensure_registered()
+    real_dispatch = gpu_ffi._native_dispatch
+    native = gpu_ffi._native()
+
+    def _wrong_dtype_dispatch(token, inputs):
+        out = real_dispatch(token, inputs)
+        # Re-expose the first result's device buffer with a dtype that disagrees
+        # with the float32 buffer XLA allocated: same pointer/shape, wrong dtype.
+        cai = dict(out[0].__cuda_array_interface__)
+        cai["typestr"] = "<f8"
+
+        class _WrongDtype:
+            __cuda_array_interface__ = cai
+
+        return [_WrongDtype(), *out[1:]]
+
+    native.set_dispatch_callback(_wrong_dtype_dispatch)
+    try:
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        f = jax.jit(
+            lambda a, b: apply_tesseract(
+                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+            )["c"]
+        )
+        with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
+            f(a, b).block_until_ready()
+    finally:
+        native.set_dispatch_callback(real_dispatch)
+
+    # The interpreter survived the failure: a fresh trivial computation still runs.
+    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
 
 
 def test_apply_matches_host_callback(served_gpu_tesseract):

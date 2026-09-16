@@ -6,11 +6,6 @@
 Exercises the cuda_ipc return path on a genuinely mixed-dtype call (float32 in,
 float64 out) so the shim's per-buffer dtype handling is covered by more than the
 all-float32 ``gpu_tesseract``.
-
-``lie_about_dtype`` makes ``apply`` return an array whose dtype disagrees with
-what ``abstract_eval`` declared. tesseract-core does not pin the output dtype, so
-the host path would cast it. The cuda_ipc path cannot cast and must reject the
-mismatch, which is the validation branch this drives on purpose.
 """
 
 import cupy
@@ -20,10 +15,6 @@ from tesseract_core.runtime import Array, Differentiable, Float32, Float64, Shap
 
 class InputSchema(BaseModel):
     x: Differentiable[Array[(None,), Float32]] = Field(description="Input vector x.")
-    lie_about_dtype: bool = Field(
-        default=False,
-        description="If set, apply returns float32 where the schema declares float64.",
-    )
 
 
 class OutputSchema(BaseModel):
@@ -32,11 +23,6 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     x = cupy.asarray(inputs.x)
-    if inputs.lie_about_dtype:
-        # Return float32 despite the float64 schema. The (None,) output shape and
-        # equal-or-smaller itemsize mean nothing upstream catches this before the
-        # shim compares against XLA's buffer.
-        return OutputSchema(y=(x * 2.0).astype(cupy.float32))
     return OutputSchema(y=(x * 2.0).astype(cupy.float64))
 
 
