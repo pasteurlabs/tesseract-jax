@@ -68,7 +68,7 @@ Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tess
 
 ## Sharp edges
 
-- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined when used in conjunction with automatic differentiation and JAX transformations. This is because JAX, in these cases, mandates abstract evaluation of all operations before they are executed. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
+- **Additional required endpoints**: Tesseract-JAX requires the [`abstract_eval`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#abstract-eval) Tesseract endpoint to be defined to enable JAX tracing and FFI dispatch. To run a Tesseract that has no `abstract_eval` endpoint, call it directly through the Tesseract client instead. Additionally, many gradient transformations like `jax.grad` require [`vector_jacobian_product`](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/api/endpoints.html#vector-jacobian-product) to be defined.
 
 ```{tip}
 When creating a new Tesseract based on a JAX function, use `tesseract init --recipe jax` to define all required endpoints automatically, including `abstract_eval` and `vector_jacobian_product`.
@@ -98,12 +98,10 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   This only affects `from_tesseract_api` (in-process execution). Tesseracts served via Docker (`from_image`) run in a separate process and are not subject to this restriction.
   ```
 
-- **Tesseracts are assumed pure functions** of their inputs. Tesseract-JAX lowers each
+- **Tesseracts are assumed pure functions of their inputs.** Tesseract-JAX lowers each
   endpoint call as a pure operation, which is what allows repeated identical calls to be
   collapsed into a single request. Where purity does not hold, the compiler is free to
-  surprise you. All of the following require compilation, so they apply under
-  `jax.jit` (including anything jitted internally) and never to eager execution, where
-  each call runs as soon as it is reached:
+  surprise you under `jax.jit`. Specifically:
   - **A call whose result is provably unused may not happen.**
 
     ```python
