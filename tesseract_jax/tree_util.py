@@ -19,14 +19,7 @@ class TransportArray(Protocol):
     ``__cuda_array_interface__`` device views (see
     :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
     ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
-    ``dtype``, so this protocol captures exactly that surface -- narrow enough
-    that the duck-typed GPU views satisfy it without importing a CUDA array
-    library. ``runtime_checkable`` so typeguard admits both transports at the FFI
-    boundary rather than rejecting the GPU views.
-
-    A discarded derivative slot can be ``None`` on the cuda_ipc path (see
-    :func:`tesseract_jax.tesseract_compat._placeholder`); annotate those sites
-    ``TransportArray | None``.
+    ``dtype``, so this protocol captures exactly that surface.
     """
 
     @property

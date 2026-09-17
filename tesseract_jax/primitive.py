@@ -972,7 +972,7 @@ def apply_tesseract(
             For ``cuda_ipc`` both processes must share the CUDA IPC namespace
             (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
             the same host round-trip as CPU arrays. This is an experimental
-            tesseract-core feature; see ``tesseract_core.runtime.cuda.ipc``.
+            tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
