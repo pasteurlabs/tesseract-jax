@@ -357,11 +357,9 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     }
   }
 
-  // XLA's input buffers are only valid once prior stream work completes. For a
-  // correct-first implementation we synchronize the stream so the Python side
-  // (which operates on CUDA's default/per-thread stream via CuPy/ctypes) sees
-  // ready inputs. This is the conservative ordering contract from the spec;
-  // event-based ordering is a later optimization.
+  // XLA's input buffers are only valid once prior stream work completes, so
+  // synchronize the stream before dispatch: the Python side operates on CUDA's
+  // default/per-thread stream via CuPy/ctypes and must see ready inputs.
   if (cudaError_t e = rt.StreamSynchronize(stream); e != cudaSuccess) {
     return ffi::Error::Internal("cudaStreamSynchronize(pre) failed: " +
                                 cuda_err(e));

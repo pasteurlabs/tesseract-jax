@@ -50,14 +50,12 @@ def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
 
     On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer, so we cannot cast it
-    here (that would force a device->host round-trip) and return it untouched.
-    This is *not* a guarantee that the device array already has ``dtype``:
-    tesseract-core is deliberately not prescriptive about a jacobian endpoint's
-    output dtype, so a Tesseract may return e.g. float64 where float32 was
-    declared. The native shim closes that gap -- it compares each returned
-    array's dtype and shape against the XLA output buffer and raises on a
-    mismatch rather than reinterpreting bytes (see ``_cuda_shim.cc``).
+    FFI handler copies straight into XLA's output buffer, so casting here would
+    force a device->host round-trip; it is returned untouched. That is not a
+    guarantee the device array already has ``dtype`` (tesseract-core does not pin
+    a jacobian endpoint's output dtype), so the native shim compares each result's
+    dtype and shape against the XLA output buffer and raises on a mismatch rather
+    than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
     if _on_device([value]):
         return value
@@ -72,14 +70,12 @@ def _placeholder(
     Used for the gradient of a non-differentiable input and the tangent of a
     non-differentiable output. Such a slot exists only to satisfy the
     output-tuple-length contract; JAX's transpose machinery never consumes it for
-    any user-requested derivative, so its *value* is immaterial (verified:
-    substituting any value leaves every user-visible gradient unchanged).
+    any user-requested derivative, so its value is immaterial.
 
-    On the cuda_ipc path we return ``None``: the native FFI handler fills XLA's
-    (already-allocated) output buffer for that slot rather than copying from a
-    fabricated source array. On the host path we return an array filled with each
-    dtype's ``0/0`` value (see :func:`_discarded_slot`). Either way an accidental
-    consumer surfaces loudly rather than silently.
+    On the cuda_ipc path this returns ``None`` and the native FFI handler fills
+    XLA's output buffer for that slot directly. On the host path it returns an
+    array filled with each dtype's ``0/0`` value (see :func:`_discarded_slot`), so
+    an accidental consumer surfaces loudly rather than silently.
     """
     if on_device:
         return None
@@ -250,25 +246,23 @@ class Jaxeract:
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
         the client exports GPU array *inputs* by reference through the negotiated
         device transport and the served Tesseract hands the *outputs* back the
-        same way -- no host round-trip. GPU transport in tesseract-core is a
-        separate axis from ``output_format`` (which only governs CPU arrays), so
-        two things must change and be restored:
+        same way. GPU transport in tesseract-core is a separate axis from
+        ``output_format`` (which only governs CPU arrays), so two things must
+        change and be restored:
 
-        * ``_gpu_transport`` (drives how GPU array *inputs* are encoded), and
+        * ``_gpu_transport``, which drives how GPU array *inputs* are encoded, and
         * an ``Accept`` header carrying the transport as a media-type parameter
           (``application/<output_format>; gpu_transport=<transport>``), which is
           how the server selects the *output* transport. The client never sends
           Accept on its own, so without this the response falls back to the
           server's configured transport.
 
-        ``_output_format`` is left untouched, and the ``Accept`` media type reuses
-        it so the CPU leaves of a mixed response are unaffected.
+        ``_output_format`` is left untouched and the ``Accept`` media type reuses
+        it, so the CPU leaves of a mixed response are unaffected.
 
-        Scoped so the shared client is not permanently mutated (which would leak
-        the transport onto host-callback / CPU uses of the same client). A no-op
-        when this call did not opt into a device transport
-        (:attr:`_device_transport`), or for non-HTTP clients (e.g. the in-process
-        ``LocalClient``).
+        Restored on exit so the shared client is not permanently mutated. A no-op
+        when this call did not opt into a device transport, or for non-HTTP
+        clients (e.g. the in-process ``LocalClient``).
         """
         client = getattr(self.client, "_client", None)
         if (

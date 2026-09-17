@@ -1,9 +1,8 @@
 """Custom Hatchling build hook that compiles the native FFI shim.
 
 Hatchling has no native support for building C/C++ extensions, so this hook
-compiles ``tesseract_jax/_cuda_shim.cc`` during the wheel build. It is
-the moral equivalent of what ``scikit-build-core`` would do, scoped down to
-"compile + place the extension into the package tree".
+compiles ``tesseract_jax/_cuda_shim.cc`` during the wheel build and places the
+extension into the package tree.
 
 The shim links no CUDA library at build time (it ``dlopen``s the CUDA runtime at
 import), so the only build-time inputs are a C++ compiler, nanobind's headers

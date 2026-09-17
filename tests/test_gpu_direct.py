@@ -18,6 +18,7 @@ unavailable.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import jax
@@ -36,14 +37,10 @@ def _arm_residency_check():
     """Arm the FFI residency check for every GPU-direct test in this module.
 
     ``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS`` makes the native handler reject any
-    buffer that crosses the FFI boundary in host memory (an ``ffi::Error`` rather
-    than a silent host round-trip). Setting it here -- before this module runs its
-    first dispatch, and the native shim reads (and caches) the flag on first
-    dispatch -- means the on-device guarantee is enforced by the test suite
-    itself, not by an environment variable that only happens to be set in CI. So
-    every assertion below (apply / grad / jvp / vjp / jacobian) doubles as a
-    regression guard: if a host copy sneaks back onto any dispatch path, the call
-    fails loudly instead of quietly losing the GPU-direct speedup.
+    buffer that crosses the FFI boundary in host memory. The shim reads the flag
+    once on its first dispatch, so it must be set before this module runs. With
+    it armed, every assertion below (apply / grad / jvp / vjp / jacobian) also
+    guards against a host copy sneaking back onto a dispatch path.
     """
     os.environ["TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS"] = "1"
 
@@ -55,6 +52,44 @@ def _to_np(x):
 
 def _on_gpu(x) -> bool:
     return any(d.platform == "gpu" for d in x.devices())
+
+
+@contextlib.contextmanager
+def _patched_dispatch(wrap):
+    """Swap the native dispatch callback for the duration of the block.
+
+    ``wrap(real_dispatch)`` returns the replacement callback. The native shim
+    caches the callable it was last given, so the original is restored on exit in
+    a finally (monkeypatch cannot unwind a C++ setter). Used by the FFI-boundary
+    fault-injection tests below to feed the handler a malformed dispatch result.
+    """
+    from tesseract_jax import gpu_ffi
+
+    gpu_ffi.ensure_registered()
+    native = gpu_ffi._native()
+    real_dispatch = gpu_ffi._native_dispatch
+    native.set_dispatch_callback(wrap(real_dispatch))
+    try:
+        yield
+    finally:
+        native.set_dispatch_callback(real_dispatch)
+
+
+def _assert_interpreter_alive():
+    """A fresh trivial computation still runs after a handled FFI failure."""
+    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+
+
+def _apply_c(served_gpu_tesseract, n):
+    """A jitted ``apply`` returning ``c`` for ``n``-element float32 inputs."""
+    a = jnp.arange(n, dtype=jnp.float32)
+    b = jnp.ones(n, dtype=jnp.float32)
+    f = jax.jit(
+        lambda a, b: apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
+        )["c"]
+    )
+    return lambda: f(a, b).block_until_ready()
 
 
 @pytest.mark.parametrize("n", [1, 8, 1000, 100_003])
@@ -106,44 +141,31 @@ def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
 
     tesseract-core validates a pinned output dtype server-side, so a genuinely
     dtype-lying Tesseract is rejected before its bytes reach the shim. To drive
-    the shim's own guard we intercept at the dispatch callback -- the exact
-    boundary the handler reads from -- and relabel the real device buffer's dtype,
-    mirroring ``test_result_shape_mismatch_at_ffi_boundary_errors``.
+    the shim's own guard we intercept at the dispatch callback and relabel the
+    real device buffer's dtype.
     """
-    from tesseract_jax import gpu_ffi
 
-    gpu_ffi.ensure_registered()
-    real_dispatch = gpu_ffi._native_dispatch
-    native = gpu_ffi._native()
+    def _wrong_dtype_dispatch(real_dispatch):
+        def dispatch(token, inputs):
+            out = real_dispatch(token, inputs)
+            # Re-expose the first result's device buffer with a dtype that
+            # disagrees with the float32 buffer XLA allocated: same pointer/shape.
+            cai = dict(out[0].__cuda_array_interface__)
+            cai["typestr"] = "<f8"
 
-    def _wrong_dtype_dispatch(token, inputs):
-        out = real_dispatch(token, inputs)
-        # Re-expose the first result's device buffer with a dtype that disagrees
-        # with the float32 buffer XLA allocated: same pointer/shape, wrong dtype.
-        cai = dict(out[0].__cuda_array_interface__)
-        cai["typestr"] = "<f8"
+            class _WrongDtype:
+                __cuda_array_interface__ = cai
 
-        class _WrongDtype:
-            __cuda_array_interface__ = cai
+            return [_WrongDtype(), *out[1:]]
 
-        return [_WrongDtype(), *out[1:]]
+        return dispatch
 
-    native.set_dispatch_callback(_wrong_dtype_dispatch)
-    try:
-        a = jnp.arange(8, dtype=jnp.float32)
-        b = jnp.ones(8, dtype=jnp.float32)
-        f = jax.jit(
-            lambda a, b: apply_tesseract(
-                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
-            )["c"]
-        )
+    with _patched_dispatch(_wrong_dtype_dispatch):
+        run = _apply_c(served_gpu_tesseract, 8)
         with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
-            f(a, b).block_until_ready()
-    finally:
-        native.set_dispatch_callback(real_dispatch)
+            run()
 
-    # The interpreter survived the failure: a fresh trivial computation still runs.
-    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+    _assert_interpreter_alive()
 
 
 def test_apply_matches_host_callback(served_gpu_tesseract):
@@ -207,13 +229,8 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
 
     Forcing ``materialize_jacobian=True`` routes ``jacfwd``/``jacrev`` to the
     Tesseract's ``jacobian`` endpoint rather than the batched jvp/vjp path. On
-    GPU that endpoint returns dense CuPy arrays, so a device-correct return path
-    must keep them on-device end to end. The current
-    ``Jaxeract.jacobian`` builds its per-pair dtype table from
-    ``_DeviceArrayView`` inputs (which expose only ``__cuda_array_interface__``)
-    and wraps the server's device result in ``np.asarray`` -- the former has no
-    ``.dtype``, the latter forces a device->host copy that then re-crosses the
-    FFI boundary as a host pointer.
+    GPU that endpoint returns dense CuPy arrays, which must stay on-device end to
+    end rather than round-tripping through a host cast.
     """
     n = 8
     a = jnp.arange(n, dtype=jnp.float32)
@@ -238,14 +255,11 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
 def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
     """A non-differentiable array input must not force a host copy on the vjp path.
 
-    ``mask`` is passed as a *traced* argument (so it is a non-static input) but
-    the gradient is taken only wrt ``a`` (``argnums=0``); since ``mask`` is
-    non-differentiable in the schema, JAX still expects a (placeholder) gradient
-    slot for it. ``Jaxeract.vector_jacobian_product`` fills that slot with
-    ``np.full(array_args[i].shape, np.nan, dtype=array_args[i].dtype)`` -- which
-    both reads ``.shape``/``.dtype`` off a ``_DeviceArrayView`` (it has neither)
-    and, being a host array, cannot cross the GPU FFI return path. The real
-    gradient wrt ``a`` must still come back correctly on-device.
+    ``mask`` is a traced (non-static) argument, but the gradient is taken only
+    wrt ``a`` (``argnums=0``). Since ``mask`` is non-differentiable in the
+    schema, JAX still expects a placeholder gradient slot for it, which the vjp
+    path must fill without materializing a host array. The real gradient wrt
+    ``a`` must still come back correctly on-device.
     """
     n = 8
     a = jnp.arange(n, dtype=jnp.float32)
@@ -270,13 +284,10 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
     """A non-differentiable *output* must not force a host copy on the jvp path.
 
     ``c_sum`` is a non-differentiable output, so the jvp endpoint returns no
-    tangent for it and ``Jaxeract.jacobian_vector_product`` synthesises a
-    placeholder for its slot. That placeholder is keyed on an output aval (there
-    is no input device buffer to reuse), and previously used ``np.full(...)`` -- a
-    host array that cannot cross the GPU FFI return path. Now the dispatch returns
-    ``None`` and the native handler NaN-fills the slot on-device. The
-    differentiable output ``c`` must still get the correct tangent, and the
-    ``c_sum`` tangent must come back NaN (its poison placeholder), not garbage.
+    tangent for it and ``Jaxeract.jacobian_vector_product`` returns ``None`` for
+    its slot, which the native handler NaN-fills on-device. The differentiable
+    output ``c`` must still get the correct tangent, and the ``c_sum`` tangent
+    must come back NaN (its poison placeholder), not garbage.
     """
     n = 8
     a = jnp.arange(n, dtype=jnp.float32)
@@ -318,7 +329,6 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
     (so the pointer passes the interface check but fails the residency check) and
     assert we get an exception and the interpreter is still alive afterwards.
     """
-    from tesseract_jax import gpu_ffi
 
     class _HostBackedCudaArray:
         """Exposes ``__cuda_array_interface__`` but backed by host memory."""
@@ -333,37 +343,22 @@ def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
                 "version": 3,
             }
 
-    # Ensure the real callback is installed, then swap in a wrapper that returns a
-    # host-backed result. The native shim caches the callable it was last given,
-    # so we restore the original in a finally (monkeypatch can't unwind a C++
-    # setter).
-    gpu_ffi.ensure_registered()
-    real_dispatch = gpu_ffi._native_dispatch
-    native = gpu_ffi._native()
+    def _corrupt_dispatch(real_dispatch):
+        def dispatch(token, inputs):
+            out = real_dispatch(token, inputs)
+            n = out[0].__cuda_array_interface__["shape"][0]
+            return [_HostBackedCudaArray(n), *out[1:]]
 
-    def _corrupt_dispatch(token, inputs):
-        out = real_dispatch(token, inputs)
-        n = out[0].__cuda_array_interface__["shape"][0]
-        return [_HostBackedCudaArray(n), *out[1:]]
+        return dispatch
 
-    native.set_dispatch_callback(_corrupt_dispatch)
-    try:
-        a = jnp.arange(4, dtype=jnp.float32)
-        b = jnp.ones(4, dtype=jnp.float32)
-        f = jax.jit(
-            lambda a, b: apply_tesseract(
-                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
-            )["c"]
-        )
+    with _patched_dispatch(_corrupt_dispatch):
+        run = _apply_c(served_gpu_tesseract, 4)
         with pytest.raises(
             jax.errors.JaxRuntimeError, match=r"not device-resident|host"
         ):
-            f(a, b).block_until_ready()
-    finally:
-        native.set_dispatch_callback(real_dispatch)
+            run()
 
-    # The interpreter survived the failure: a fresh trivial computation still runs.
-    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+    _assert_interpreter_alive()
 
 
 def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
@@ -377,41 +372,29 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     (which would over- or under-read device memory). We inject a truncated result
     to drive that path; the process must survive the clean error.
     """
-    from tesseract_jax import gpu_ffi
 
-    gpu_ffi.ensure_registered()
-    real_dispatch = gpu_ffi._native_dispatch
-    native = gpu_ffi._native()
+    def _wrong_shape_dispatch(real_dispatch):
+        def dispatch(token, inputs):
+            out = real_dispatch(token, inputs)
+            # Re-expose the first result's device buffer with a shape one element
+            # short of what XLA allocated: same dtype, wrong (smaller) shape.
+            cai = dict(out[0].__cuda_array_interface__)
+            n = cai["shape"][0]
+            cai["shape"] = (n - 1,)
 
-    def _wrong_shape_dispatch(token, inputs):
-        out = real_dispatch(token, inputs)
-        # Re-expose the first result's device buffer with a shape one element
-        # short of what XLA allocated: same dtype, wrong (smaller) shape.
-        cai = dict(out[0].__cuda_array_interface__)
-        n = cai["shape"][0]
-        cai["shape"] = (n - 1,)
+            class _WrongShape:
+                __cuda_array_interface__ = cai
 
-        class _WrongShape:
-            __cuda_array_interface__ = cai
+            return [_WrongShape(), *out[1:]]
 
-        return [_WrongShape(), *out[1:]]
+        return dispatch
 
-    native.set_dispatch_callback(_wrong_shape_dispatch)
-    try:
-        a = jnp.arange(8, dtype=jnp.float32)
-        b = jnp.ones(8, dtype=jnp.float32)
-        f = jax.jit(
-            lambda a, b: apply_tesseract(
-                served_gpu_tesseract, {"a": a, "b": b}, device_transport="cuda_ipc"
-            )["c"]
-        )
+    with _patched_dispatch(_wrong_shape_dispatch):
+        run = _apply_c(served_gpu_tesseract, 8)
         with pytest.raises(jax.errors.JaxRuntimeError, match=r"expected|returned"):
-            f(a, b).block_until_ready()
-    finally:
-        native.set_dispatch_callback(real_dispatch)
+            run()
 
-    # The interpreter survived the failure: a fresh trivial computation still runs.
-    assert float(jnp.arange(3, dtype=jnp.float32).sum()) == 3.0
+    _assert_interpreter_alive()
 
 
 def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
@@ -446,18 +429,15 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
 
     Measures steady-state per-call latency of a jitted ``apply_tesseract`` whose
     inputs live on the GPU, so the ``cuda`` lowering routes through the native FFI
-    (cuda_ipc) path -- the code this PR adds. It lives here rather than in
-    ``benchmarks/`` because that suite is CPU-only (its Tesseracts and fixtures do
-    not build the GPU shim or require a GPU) and runs in a separate,
-    non-GPU CI job; this needs the ``served_gpu_tesseract`` fixture and a real
-    device, so it belongs with the other ``gpu``-marked tests.
+    path. It lives with the other ``gpu``-marked tests because it needs the
+    ``served_gpu_tesseract`` fixture and a real device, unlike the CPU-only
+    ``benchmarks/`` suite.
 
-    This is a regression *signal*, not a hard gate: ``pytest-benchmark`` records
+    This is a regression signal, not a hard gate: ``pytest-benchmark`` records
     the median so a slowdown shows up in the timing report, but shared-runner
     noise makes a fixed wall-clock threshold too flaky to fail CI on. The
-    hard, deterministic guard against the failure mode that actually matters -- a
-    silent host round-trip erasing the speedup -- is the residency check armed by
-    ``_arm_residency_check`` above, which every functional test already exercises.
+    deterministic guard against a silent host round-trip is the residency check
+    armed by ``_arm_residency_check`` above.
     """
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32)

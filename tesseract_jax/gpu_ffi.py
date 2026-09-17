@@ -4,9 +4,8 @@
 """GPU FFI integration for Tesseract-JAX.
 
 On CUDA, the ``tesseract_dispatch`` primitive lowers to a native XLA FFI custom
-call instead of a host callback, so array data stays on the GPU (moved by CUDA
-IPC handle, not copied through the host). This module owns the native side of
-that path:
+call instead of a host callback, so array data stays on the GPU. This module
+owns the native side of that path:
 
 * registering the compiled FFI handler with XLA,
 * a process-global registry mapping an integer ``token`` (passed to the handler
@@ -15,16 +14,12 @@ that path:
   pointers as ``__cuda_array_interface__`` views, runs the dispatch, and returns
   the result device arrays for the handler to copy into XLA's output buffers.
 
-The dispatch closure is endpoint-generic: it is exactly the same
-``getattr(client, eval_func)(...)`` closure the CPU (host-callback) lowering
-builds, so every endpoint the CPU path supports (apply / jvp / vjp / jacobian)
-routes through here unchanged. See :mod:`tesseract_jax.primitive`.
+The dispatch closure is the same ``getattr(client, eval_func)(...)`` closure the
+CPU lowering builds, so every endpoint (apply / jvp / vjp / jacobian) routes
+through here unchanged. See :mod:`tesseract_jax.primitive`.
 
-Importing this module does not require CUDA; it only touches the native shim
-lazily, when the GPU path is actually used, so CPU-only installs are unaffected.
-The dispatch itself needs no CUDA array library (CuPy/Torch): input buffers are
-wrapped as bare ``__cuda_array_interface__`` views and outputs come back as the
-runtime's framework-agnostic ``IpcDeviceArray``.
+Importing this module does not require CUDA; it touches the native shim lazily,
+only when the GPU path is used, so CPU-only installs are unaffected.
 """
 
 from __future__ import annotations
@@ -111,12 +106,11 @@ def register_dispatch(fn: Callable[..., tuple], key: Any = None) -> int:
     session), so a long-running service with varying shapes leaks steadily.
 
     When ``key`` is hashable and equal to a prior call's, the existing token is
-    returned and no new entry is created, capping the registry at the number of
-    *distinct* dispatches. ``DispatchParams`` is a frozen, all-hashable
-    dataclass with value equality (the same property XLA relies on to common up
-    identical calls), so passing it as the key collapses the re-lowerings of one
-    program point to a single entry. ``key=None`` (or an unhashable key) falls
-    back to the previous always-fresh-token behaviour.
+    returned rather than a new entry created, capping the registry at the number
+    of *distinct* dispatches. ``DispatchParams`` is frozen and value-equal, so
+    passing it as the key collapses the re-lowerings of one program point to a
+    single entry. ``key=None`` (or an unhashable key) always allocates a fresh
+    token.
     """
     global _next_token
     with _registry_lock:
@@ -161,11 +155,8 @@ class _DeviceArrayView:
             "version": 3,
         }
 
-    # ``.shape`` / ``.dtype`` mirror the metadata already carried in the CUDA
-    # array interface, so the view answers the same shape/dtype queries a real
-    # array does. The transport-agnostic dispatch code reads these off its
-    # arguments (e.g. to size a return slot); exposing them keeps that code from
-    # having to special-case the GPU path.
+    # ``.shape`` / ``.dtype`` let the transport-agnostic dispatch code read those
+    # off its arguments without special-casing the GPU path.
     @property
     def shape(self) -> tuple[int, ...]:
         return self.__cuda_array_interface__["shape"]
