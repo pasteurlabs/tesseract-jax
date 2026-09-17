@@ -58,11 +58,13 @@ requires = [
     # The shim builds against jaxlib's XLA FFI headers. XLA guarantees the FFI
     # C API is backward-compatible (old API versions supported >= 12 months, via
     # struct_size), so a shim built against an older jaxlib runs against newer
-    # ones -- but not vice versa. Pin to the jaxlib series matching each Python,
-    # and bump this deliberately (in step with dropping old JAX support) rather
-    # than letting it float.
-    "jaxlib==0.7.*; python_version < '3.14'",
-    "jaxlib==0.8.*; python_version >= '3.14'",
+    # ones -- but not vice versa. Build against the *floor* of the supported jax
+    # range (>= 0.7.0), so a single shim is valid against every jaxlib a user
+    # might actually run, latest included. Python 3.14 only got wheels from the
+    # 0.8 series, so its floor is 0.8.0. Bump these deliberately when raising the
+    # supported jax floor, rather than letting them float up to the newest series.
+    "jaxlib==0.7.0; python_version < '3.14'",
+    "jaxlib==0.8.0; python_version >= '3.14'",
 ]
 build-backend = "hatchling.build"
 

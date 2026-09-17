@@ -199,6 +199,68 @@ def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
 
 
 # ---------------------------------------------------------------------------
+# Parametrised transport fixture (host vs cuda_ipc)
+# ---------------------------------------------------------------------------
+#
+# The platform-sensitive behaviours -- dtype handling, discarded-slot fills,
+# non-differentiable inputs/outputs, jacobian fwd/bwd, batching -- must agree
+# between the two dispatch lowerings. Rather than duplicate each test, this
+# fixture serves the *array-module-agnostic* ``transport_tesseract`` in one of two
+# modes and yields the client together with the ``apply_tesseract`` kwargs that
+# select the transport, so a single test body runs on both:
+#
+#   * "host"     -> numpy compute, no device_transport (device->host->device)
+#   * "cuda_ipc" -> cupy compute + cuda_ipc opt-in, device_transport="cuda_ipc"
+#
+# The cuda_ipc leg skips where a GPU / CuPy / GPU-backed JAX is unavailable, via
+# the same guards as the standalone GPU fixtures.
+
+
+@pytest.fixture(
+    params=[
+        "host",
+        # The cuda_ipc leg carries the ``gpu`` marker so it is collected under
+        # ``-m gpu`` (the GPU CI job) and excluded from the CPU job, while the host
+        # leg runs everywhere. Both legs share one test body.
+        pytest.param("cuda_ipc", marks=pytest.mark.gpu),
+    ]
+)
+def transport(request, tmp_path_factory):
+    """Yield ``(client, apply_kwargs)`` for one dispatch transport.
+
+    Parametrised over ``"host"`` and ``"cuda_ipc"``; the cuda_ipc leg is skipped
+    when no GPU backend is available. Serves the array-agnostic
+    ``transport_tesseract`` with the matching array module.
+    """
+    mode = request.param
+    if mode == "cuda_ipc":
+        if not _gpu_available():
+            pytest.skip("no GPU backend for JAX")
+        pytest.importorskip("cupy")
+        extra_env = {
+            "TESSERACT_JAX_TEST_XP": "cupy",
+            "TESSERACT_OUTPUT_FORMAT": "json+base64",
+            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
+        }
+        apply_kwargs = {"device_transport": "cuda_ipc"}
+    else:
+        extra_env = {"TESSERACT_JAX_TEST_XP": "numpy"}
+        apply_kwargs = {}
+
+    gen = _serve_tesseract(
+        tmp_path_factory,
+        here / "transport_tesseract" / "tesseract_api.py",
+        name=f"transport_{mode}",
+        extra_env=extra_env,
+    )
+    url = next(gen)
+    try:
+        yield Tesseract.from_url(url), apply_kwargs
+    finally:
+        gen.close()
+
+
+# ---------------------------------------------------------------------------
 # Served fixtures  (session-scoped, start a tesseract-runtime process)
 # ---------------------------------------------------------------------------
 

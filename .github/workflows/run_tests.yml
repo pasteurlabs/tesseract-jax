@@ -87,6 +87,18 @@ jobs:
     # supported range (3.12 floor / 3.14 ceiling), which incidentally covers both
     # jaxlib majors (0.7 on <3.14, 0.8 on >=3.14). Newest CUDA rides the newest
     # Python; the floor Python guards the oldest still-supported combination.
+    #
+    # jax-version brackets the JAX support window on the GPU path too, mirroring
+    # the CPU job: each leg tracks latest, and a third leg pins the declared floor
+    # (jax==0.7.0) on the CUDA 12 / Python 3.12 combination. The floor is only
+    # tested there because 0.7 predates Python 3.14 wheels, so the 3.14 leg cannot
+    # install it -- its floor is whatever 0.8 series ships for 3.14.
+    #
+    # The shim is always compiled against the jaxlib *floor* (pinned in
+    # pyproject's [build-system].requires), because XLA's FFI ABI guarantee only
+    # runs old-shim-on-newer-runtime. So the floor leg's jaxlib==0.7 runtime is
+    # the exact version the shim was built against, and the latest legs exercise
+    # that same floor-built shim against a newer jaxlib -- the supported direction.
     strategy:
       fail-fast: false
       matrix:
@@ -94,9 +106,18 @@ jobs:
           - major: "12"
             base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
             python-version: "3.12"
+            jax-version: "latest"
           - major: "13"
             base_image: "nvidia/cuda:13.3.1-base-ubuntu24.04"
             python-version: "3.14"
+            jax-version: "latest"
+        include:
+          # oldest supported JAX on the CUDA 12 / floor-Python leg
+          - cuda:
+              major: "12"
+              base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
+              python-version: "3.12"
+              jax-version: "0.7.0"
 
     defaults:
       run:
@@ -134,12 +155,17 @@ jobs:
       # cupy and jax with CUDA support are not declared dependencies (cupy is
       # only needed to *produce* GPU arrays in the test Tesseract's compute, and
       # jax needs a CUDA backend to place arrays on-device); install builds for
-      # the matrix CUDA major version into the same environment here.
+      # the matrix CUDA major version into the same environment here. The floor
+      # leg pins jax to its declared minimum; latest legs leave it unconstrained.
       - name: Install GPU array frameworks
         run: |
+          jax_spec="jax[cuda${{ matrix.cuda.major }}]"
+          if [[ "${{ matrix.cuda.jax-version }}" != "latest" ]]; then
+            jax_spec="jax[cuda${{ matrix.cuda.major }}]==${{ matrix.cuda.jax-version }}"
+          fi
           uv pip install \
             "cupy-cuda${{ matrix.cuda.major }}x" \
-            "jax[cuda${{ matrix.cuda.major }}]"
+            "$jax_spec"
 
       - name: Show installed CUDA frameworks
         run: |
@@ -165,7 +191,7 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: pasteurlabs/tesseract-jax
           files: coverage*.xml
-          flags: gpu-cuda${{ matrix.cuda.major }}
+          flags: gpu-cuda${{ matrix.cuda.major }}-jax${{ matrix.cuda.jax-version }}
           fail_ci_if_error: true
 
   all-ok:
