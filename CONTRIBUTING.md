@@ -75,6 +75,48 @@ $ pip install -e .[dev]
 $ pre-commit install
 ```
 
+### Building the GPU-direct shim from source
+
+Tesseract-JAX ships an optional native shim (`tesseract_jax/_cuda_shim.cc`) that
+enables the GPU-direct (`cuda_ipc`) transport, exchanging device arrays with a
+served Tesseract without a host round-trip. The published wheels bundle it, but a
+source install (`pip install -e .`) has to compile it. The shim needs:
+
+- A C++17 compiler (`c++` by default; override with the `CXX` environment
+  variable). It links no CUDA library (the CUDA runtime is `dlopen`ed at import),
+  so no CUDA toolkit is required at build time.
+- `nanobind` and `jaxlib` (for the XLA FFI headers), which are declared as
+  build-time dependencies and installed automatically under build isolation. The
+  shim is compiled against the _oldest_ supported `jaxlib` on purpose (pinned in
+  `pyproject.toml`'s `[build-system].requires`). XLA's FFI ABI guarantee only
+  covers running an old-jaxlib shim against a newer runtime, so building at the
+  floor keeps one shim valid across the whole supported `jaxlib` range.
+
+The build **degrades gracefully by default**: if the compiler or headers are
+missing, the shim is skipped, the package still installs and imports, and the
+GPU-direct path reports itself unavailable (`tesseract_jax.gpu_ffi.is_available()`
+returns `False`) so callers fall back to the host-callback transport. Two
+environment variables control this:
+
+- `TESSERACT_JAX_GPU_REQUIRED=1` makes a shim build failure **fatal** instead of
+  falling back. Use it when you need to be sure the shim actually built (CI sets
+  it for the GPU jobs).
+- `TESSERACT_JAX_PURE_PYTHON=1` **skips** the shim entirely and produces a
+  pure-Python install, even on a platform that could compile it.
+
+If you install with `--no-build-isolation`, pre-install the build-time
+dependencies first (see `pyproject.toml`'s `[build-system].requires` for the
+exact `jaxlib` pin per Python version):
+
+```console
+$ pip install "hatchling" "hatch-vcs" "setuptools-scm!=9.0.0" "nanobind>=2.0" "jaxlib"
+$ pip install -e . --no-build-isolation
+```
+
+The version is derived from Git tags via `hatch-vcs`. A shallow clone without
+tags falls back to `0.0.0+unknown`, so fetch tags (`git fetch --tags`) before
+building if you care about the reported version.
+
 ### Tests
 
 This project uses the pytest framework for all tests. New code should be
@@ -85,6 +127,21 @@ To run the tests simply run `pytest` in the root of the project:
 ```console
 $ pytest
 ```
+
+The GPU-direct tests are marked with the `gpu` marker and require a CUDA device
+plus a shim build (see above); they are skipped automatically when no GPU is
+available. CI runs them across a small matrix of CUDA majors (12 and 13), Python
+versions (the 3.12 floor and 3.14 ceiling), and JAX versions (latest, plus the
+declared `jax==0.7.0` floor on the CUDA 12 leg) so the shim's runtime loader and
+the `cuda_ipc` path stay covered across the support window.
+
+Behaviours that must match between the host and GPU-direct transports (dtype
+handling, discarded-slot fills, non-differentiable inputs/outputs, jacobian
+fwd/bwd, batching) are written once in `tests/test_transport_parity.py` and run on
+both via the parametrised `transport` fixture, which serves the array-agnostic
+`tests/transport_tesseract` with `numpy` or `cupy` compute to match. Tests that
+have no host analogue (FFI-boundary fault injection, on-device residency checks)
+stay in `tests/test_gpu_direct.py`.
 
 ### GitHub workflow
 

@@ -3,7 +3,7 @@
 
 import operator
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
@@ -23,6 +23,7 @@ from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
+    TransportArray,
     _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
@@ -380,16 +381,40 @@ def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
 tesseract_dispatch_p.def_impl(partial(dispatch.apply_primitive, tesseract_dispatch_p))
 
 
+def _build_dispatch_closure(params: DispatchParams) -> Callable[..., tuple]:
+    """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
+
+    Returns ``dispatch(*args) -> tuple`` calling ``getattr(params.client,
+    params.eval_func)(args, params)``. This is transport-agnostic: the CPU
+    lowering runs it via a host callback; the GPU lowering runs it via the native
+    FFI handler with the client in ``cuda_ipc`` mode. Because it dispatches by
+    ``eval_func``, *every* endpoint (apply / jvp / vjp / jacobian) is generic
+    across both transports.
+    """
+
+    # ``args`` is transport-dependent: the CPU host-callback lowering passes real
+    # NumPy arrays, while the GPU FFI lowering passes bare
+    # ``__cuda_array_interface__`` device views. ``TransportArray`` is the
+    # structural type both satisfy (shape + dtype), so the shared closure accepts
+    # either without a runtime type-check rejecting the duck-typed GPU views.
+    def dispatch(*args: TransportArray) -> tuple:
+        out = getattr(params.client, params.eval_func)(args, params)
+        if not isinstance(out, tuple):
+            out = (out,)
+        return out
+
+    return dispatch
+
+
 def tesseract_dispatch_lowering(
     ctx: Any,
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """Defines how to dispatch lowering the computation."""
+    """CPU lowering: run the dispatch closure via a host callback."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
-    def _dispatch(*args: ArrayLike) -> Any:
-        return getattr(params.client, params.eval_func)(args, params)
+    dispatch = _build_dispatch_closure(params)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -403,7 +428,7 @@ def tesseract_dispatch_lowering(
     # call's order against other effects.
     result, _, keepalive = mlir.emit_python_callback(
         ctx,
-        _dispatch,
+        dispatch,
         None,
         array_args,
         ctx.avals_in,
@@ -414,7 +439,64 @@ def tesseract_dispatch_lowering(
     return result
 
 
+def tesseract_dispatch_gpu_lowering(
+    ctx: Any,
+    *array_args: ArrayLike | ShapedArray | Any,
+    params: DispatchParams,
+) -> Any:
+    """GPU lowering: run the dispatch closure via the native FFI handler.
+
+    Falls back to the host-callback lowering when the caller did not select a
+    device transport (``client._device_transport``), so a host-transport call
+    behaves exactly as on CPU. When the caller *did* select one but the native
+    shim is unavailable (e.g. a CPU-only install where it wasn't compiled) this
+    raises rather than silently falling back: ``device_transport=...`` is an
+    explicit request for the GPU-direct path, so honouring it as a slow host
+    round-trip with no signal would hide the very thing the caller asked for.
+    """
+    from tesseract_jax import gpu_ffi
+
+    client = params.client
+
+    if client._device_transport is None:
+        return tesseract_dispatch_lowering(ctx, *array_args, params=params)
+
+    if not gpu_ffi.is_available():
+        raise RuntimeError(
+            f"device_transport={client._device_transport!r} was requested but "
+            "the native GPU FFI shim is unavailable (not compiled or failed to "
+            "import), so GPU-direct dispatch cannot run. Reinstall tesseract-jax "
+            "with the shim built (a source install compiles it via the hatch "
+            "build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure "
+            "fatal), or drop device_transport to use the host-callback transport."
+        )
+
+    _raise_if_unimplemented(params.eval_func, client)
+
+    inner = _build_dispatch_closure(params)
+
+    # Run the dispatch with the client in device-transport mode, so GPU inputs
+    # are exported by reference and outputs come back on-device.
+    def gpu_dispatch(args: tuple) -> tuple:
+        with client.device_transport_encoding():
+            return inner(*args)
+
+    target = gpu_ffi.ensure_registered()
+    # The token must outlive lowering (the FFI call reads it at execution time),
+    # so it is never released. Keying on ``params`` -- a frozen, value-equal
+    # DispatchParams -- means re-lowering the same dispatch (a re-trace, cache
+    # eviction, or fresh jit) reuses one entry instead of leaking a fresh closure
+    # (and the Jaxeract/client/session it pins) each time.
+    token = gpu_ffi.register_dispatch(gpu_dispatch, key=params)
+
+    rule = jax.ffi.ffi_lowering(target)
+    return rule(ctx, *array_args, token=np.int64(token))
+
+
 mlir.register_lowering(tesseract_dispatch_p, tesseract_dispatch_lowering)
+mlir.register_lowering(
+    tesseract_dispatch_p, tesseract_dispatch_gpu_lowering, platform="cuda"
+)
 
 
 def tesseract_dispatch_batching(
@@ -771,6 +853,7 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
+    device_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
@@ -880,6 +963,16 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
+        device_transport: Name of the on-device transport used to exchange GPU
+            arrays with the Tesseract instead of a host round-trip (currently
+            ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
+            with the matching ``gpu_transport`` in its ``runtime_config`` and a
+            GPU-backed JAX (arrays on a ``cuda`` device); has no effect on CPU
+            arrays or a local (in-process) client, which already shares memory.
+            For ``cuda_ipc`` both processes must share the CUDA IPC namespace
+            (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
+            the same host round-trip as CPU arrays. This is an experimental
+            tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
@@ -920,7 +1013,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(tesseract_client)
+    client = Jaxeract(tesseract_client, device_transport=device_transport)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
