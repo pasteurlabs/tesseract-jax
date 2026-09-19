@@ -182,3 +182,14 @@ out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
 
 Skipping the check avoids building the keypaths the warning needs. The values the
 caller receives are the same either way.
+
+## Higher-order derivatives
+
+Tesseracts only expose first derivatives (`jacobian`, `jacobian_vector_product` and `vector_jacobian_product`), so `apply_tesseract` can be differentiated once with respect to its inputs. Anything that needs a second derivative, such as `jax.hessian(f)`, `jax.grad(jax.grad(f))` or `jax.jacfwd(jax.jacrev(f))`, raises a `RuntimeError`:
+
+```
+RuntimeError: Cannot take higher-order derivatives of 'jacobian'
+RuntimeError: Cannot differentiate a Tesseract derivative endpoint with respect to its primal inputs, as this needs a second derivative.
+```
+
+A derivative is linear in its tangent, so differentiating the output of `jax.jvp` with respect to the tangent (rather than the primal) still works.
