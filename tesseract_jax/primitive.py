@@ -471,6 +471,19 @@ def tesseract_dispatch_gpu_lowering(
             "fatal), or drop device_transport to use the host-callback transport."
         )
 
+    # Every supported device transport is CUDA-based, so this lowering cannot run
+    # without a CUDA device. Reaching here means the caller selected a transport
+    # and the program is being lowered for the GPU, so a missing device is a
+    # misconfiguration worth raising over rather than the (much slower) host path.
+    try:
+        jax.devices("cuda")
+    except RuntimeError as exc:
+        raise RuntimeError(
+            f"device_transport={client._device_transport!r} was requested but "
+            "JAX sees no CUDA device. Install a CUDA-enabled jaxlib and run on a "
+            "GPU host, or drop device_transport to use the host-callback transport."
+        ) from exc
+
     _raise_if_unimplemented(params.eval_func, client)
 
     inner = _build_dispatch_closure(params)

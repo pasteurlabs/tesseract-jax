@@ -402,6 +402,9 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     } catch (nb::python_error& e) {
       return ffi::Error::Internal(std::string("dispatch callback raised: ") +
                                   e.what());
+    } catch (const std::exception& e) {
+      return ffi::Error::Internal(std::string("dispatch callback raised: ") +
+                                  e.what());
     }
 
     // Clear any sticky CUDA runtime error left by the Python decode. The

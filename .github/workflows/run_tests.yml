@@ -78,27 +78,16 @@ jobs:
   tests-gpu:
     runs-on: tesseract-ci-gpu
 
-    # Exercise both CUDA major versions so the shim's dlopen loader version
-    # fallbacks (libcudart.so.12/.13) and the GPU-direct cuda_ipc path are
-    # covered against each. cupy and jax[cudaNN] are pinned to a matching CUDA
-    # build so the libcudart the runtime actually binds to differs per entry.
-    #
-    # Each CUDA leg also pins a Python version so the two legs bracket the
-    # supported range (3.12 floor / 3.14 ceiling), which incidentally covers both
-    # jaxlib majors (0.7 on <3.14, 0.8 on >=3.14). Newest CUDA rides the newest
-    # Python; the floor Python guards the oldest still-supported combination.
-    #
-    # jax-version brackets the JAX support window on the GPU path too, mirroring
-    # the CPU job: each leg tracks latest, and a third leg pins the declared floor
-    # (jax==0.7.0) on the CUDA 12 / Python 3.12 combination. The floor is only
-    # tested there because 0.7 predates Python 3.14 wheels, so the 3.14 leg cannot
-    # install it -- its floor is whatever 0.8 series ships for 3.14.
-    #
-    # The shim is always compiled against the jaxlib *floor* (pinned in
-    # pyproject's [build-system].requires), because XLA's FFI ABI guarantee only
-    # runs old-shim-on-newer-runtime. So the floor leg's jaxlib==0.7 runtime is
-    # the exact version the shim was built against, and the latest legs exercise
-    # that same floor-built shim against a newer jaxlib -- the supported direction.
+    # The matrix brackets what we support along three axes at once:
+    # - CUDA/Python: the two legs pin (CUDA 12, 3.12) and (CUDA 13, 3.14), covering
+    #   both dlopen loader fallbacks (libcudart.so.12/.13), both supported Python
+    #   versions, and both jaxlib majors (0.7 on <3.14, 0.8 on >=3.14).
+    # - JAX: each leg tracks latest. A third leg pins the declared floor (jax==0.7.0)
+    #   on CUDA 12 / 3.12, the only combination where 0.7 has wheels.
+    # - ABI direction: the shim is always built against the jaxlib floor (pinned in
+    #   pyproject's [build-system].requires), so the floor leg runs the shim on its own
+    #   jaxlib and the latest legs run an old shim on a newer jaxlib. That is the only
+    #   direction XLA's FFI ABI guarantee covers.
     strategy:
       fail-fast: false
       matrix:
