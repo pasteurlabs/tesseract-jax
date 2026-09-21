@@ -203,7 +203,7 @@ jax.grad(jax.grad(f))(x)
 
 Which of the two errors you see depends on how the second derivative is taken. "Primal inputs" means the values `f` is evaluated at, here `x`.
 
-Differentiating with respect to the direction of a derivative instead of `x` works, because a derivative is linear in its direction:
+Differentiating with respect to a tangent / cotangent works, because a derivative is linear in its direction:
 
 ```python
 v = jnp.ones_like(x)
