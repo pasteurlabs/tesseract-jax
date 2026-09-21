@@ -280,8 +280,17 @@ def tesseract_dispatch_transpose_rule(
     *args: ArrayLike | ad.UndefinedPrimal,
     params: DispatchParams,
 ) -> tuple[ArrayLike | None, ...]:
-    """Defines how to dispatch vjp operation."""
-    assert params.eval_func in ("jacobian_vector_product",)
+    """Defines how to dispatch the transpose of a derivative endpoint.
+
+    ``jacobian_vector_product`` and ``vector_jacobian_product``
+    are linear in their (co)tangent slots and are each other's transpose.
+    """
+    if params.eval_func not in ("jacobian_vector_product", "vector_jacobian_product"):
+        raise AssertionError(
+            f"Tesseract primitive transpose rule reached with unexpected "
+            f"eval_func={params.eval_func!r}; expected 'jacobian_vector_product' "
+            f"or 'vector_jacobian_product'. Please raise an issue on GitHub."
+        )
 
     n_primals = params.n_primals
     primal_args = args[:n_primals]
@@ -302,62 +311,53 @@ def tesseract_dispatch_transpose_rule(
             "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
         )
 
-    # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
-    # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
-    # (e.g. via jax.lax.stop_gradient) or when the output is not used in the loss.
-    # Any other cotangent means the user accidentally included a non-diff output
-    # in the gradient computation, likely due to a missing Differentiable[] annotation.
-    dummy_output = dummy_output_tree(
-        params.output_pytreedef,
-        len(params.output_avals),
-        params.static_output_mask,
-    )
-    flat_output_info = _pytree_to_tesseract_flat(
-        dummy_output, schema_paths=params.client.differentiable_output_paths
-    )
-    for cotan, (path, is_diff) in zip(cotangent, flat_output_info.items(), strict=True):
-        if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
-            raise ValueError(
-                f"Non-symbolic-zero cotangent passed for non-differentiable output '{path}'. "
-                f"If this output should be differentiable, mark it as "
-                f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
-                f"exclude it from the function return value (using pop or has_aux=True), "
-                f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
-            )
+    if params.eval_func == "jacobian_vector_product":
+        # `cotangent` aligns with the Tesseract's own outputs.
+        # Raise if a cotangent for a non-differentiable one is not a symbolic zero.
+        # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
+        # (e.g. via jax.lax.stop_gradient) or when the output is not used in the
+        # loss. Any other cotangent means the user accidentally included a
+        # non-diff output in the gradient computation, likely due to a missing
+        # Differentiable[] annotation.
+        #
+        # No analogous check when transposing `vector_jacobian_product`
+        # as should already be validated on initial forward pass in
+        # `tesseract_dispatch_jvp_rule`.
+        dummy_output = dummy_output_tree(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.static_output_mask,
+        )
+        flat_output_info = _pytree_to_tesseract_flat(
+            dummy_output, schema_paths=params.client.differentiable_output_paths
+        )
+        for cotan, (path, is_diff) in zip(
+            cotangent, flat_output_info.items(), strict=True
+        ):
+            if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
+                raise ValueError(
+                    f"Non-symbolic-zero cotangent passed for non-differentiable output '{path}'. "
+                    f"If this output should be differentiable, mark it as "
+                    f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
+                    f"exclude it from the function return value (using pop or has_aux=True), "
+                    f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
+                )
 
-    # Raise if a gradient is requested for a non-differentiable input.
-    _primal_inputs = unflatten_args(
-        primal_args, params.static_args, params.input_pytreedef, params.is_static_mask
-    )
-    _flat_inputs = _pytree_to_tesseract_flat(
-        _primal_inputs, schema_paths=params.client.differentiable_input_paths
-    )
-    _non_static_paths = [
-        p for p, m in zip(_flat_inputs, params.is_static_mask, strict=True) if not m
-    ]
-    _vjp_inputs_with_tangent = [
-        p for p, h in zip(_non_static_paths, params.has_tangent, strict=True) if h
-    ]
-    for path in _vjp_inputs_with_tangent:
-        if _flat_inputs[path] is None:
-            raise ValueError(
-                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
-                f"If this input should be differentiable, mark it as "
-                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
-                f"exclude it from the differentiated function's argument list "
-                f"(using a closure or the `argnums` parameter), or apply "
-                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
-            )
+    # May need to change after #263 when transposing vjp
+    linear_args_ = _instantiate_zeros(cotangent)
 
-    cotan_args_ = _instantiate_zeros(cotangent)
-
-    vjp = tesseract_dispatch_p.bind(
+    transposed_eval_func = (
+        "vector_jacobian_product"
+        if params.eval_func == "jacobian_vector_product"
+        else "jacobian_vector_product"
+    )
+    result = tesseract_dispatch_p.bind(
         *primal_args,
-        *cotan_args_,
-        params=params.replace(eval_func="vector_jacobian_product"),
+        *linear_args_,
+        params=params.replace(eval_func=transposed_eval_func),
     )
 
-    return tuple([None] * len(primal_args) + list(vjp))
+    return tuple([None] * len(primal_args) + list(result))
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
