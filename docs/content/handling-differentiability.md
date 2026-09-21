@@ -185,11 +185,27 @@ caller receives are the same either way.
 
 ## Higher-order derivatives
 
-Tesseracts only expose first derivatives (`jacobian`, `jacobian_vector_product` and `vector_jacobian_product`), so `apply_tesseract` can be differentiated once with respect to its inputs. Anything that needs a second derivative, such as `jax.hessian(f)`, `jax.grad(jax.grad(f))` or `jax.jacfwd(jax.jacrev(f))`, raises a `RuntimeError`:
+Tesseracts only expose first derivatives (the `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints), so a function that calls `apply_tesseract` can be differentiated once, but not twice:
 
-```
-RuntimeError: Cannot take higher-order derivatives of 'jacobian'
-RuntimeError: Cannot differentiate a Tesseract derivative endpoint with respect to its primal inputs, as this needs a second derivative.
+```python
+def f(x):
+    return apply_tesseract(tess, {"x": x})["y"]
+
+jax.grad(f)(x)  # ✅ first derivative
+
+jax.hessian(f)(x)
+# RuntimeError: Cannot take higher-order derivatives of 'jacobian'
+
+jax.grad(jax.grad(f))(x)
+# RuntimeError: Cannot differentiate a Tesseract derivative endpoint with respect
+# to its primal inputs, as this needs a second derivative.
 ```
 
-A derivative is linear in its tangent, so differentiating the output of `jax.jvp` with respect to the tangent (rather than the primal) still works.
+Which of the two errors you see depends on how the second derivative is taken. "Primal inputs" means the values `f` is evaluated at, here `x`.
+
+Differentiating with respect to the direction of a derivative instead of `x` works, because a derivative is linear in its direction:
+
+```python
+v = jnp.ones_like(x)
+jax.grad(lambda v: jax.jvp(f, (x,), (v,))[1])(v)  # ✅
+```
