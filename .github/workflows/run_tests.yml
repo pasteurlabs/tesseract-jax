@@ -68,16 +68,108 @@ jobs:
             --cov=tesseract_jax
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: pasteurlabs/tesseract-jax
           files: coverage*.xml
           fail_ci_if_error: true
 
+  tests-gpu:
+    runs-on: tesseract-ci-gpu
+
+    # Run oldest and newest supported combinations of the {CUDA, Python, JAX} stack
+    strategy:
+      fail-fast: false
+      matrix:
+        cuda:
+          - major: "12"
+            base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
+            python-version: "3.12"
+            jax-version: "0.7.0"
+          - major: "13"
+            base_image: "nvidia/cuda:13.3.1-base-ubuntu24.04"
+            python-version: "3.14"
+            jax-version: "latest"
+
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Set up Git repository
+        uses: actions/checkout@v7
+
+      - name: Show GPU info
+        run: |
+          nvidia-smi
+          # Confirm Docker can see the GPU via the NVIDIA container runtime; the
+          # GPU tests serve a GPU Tesseract in a subprocess, so a broken runtime
+          # must fail loudly here rather than silently skip.
+          docker info
+          docker run --rm --gpus all ${{ matrix.cuda.base_image }} nvidia-smi
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      # Build + install the package (this compiles the native FFI shim via the
+      # hatch build hook). TESSERACT_JAX_GPU_REQUIRED=1 makes a shim build
+      # failure fatal instead of degrading to a pure-Python (CPU-only) install,
+      # so the GPU job never runs against a silently-missing shim.
+      - name: Install package
+        env:
+          TESSERACT_JAX_GPU_REQUIRED: "1"
+        run: |
+          cp production.uv.lock uv.lock
+          uv sync --python ${{ matrix.cuda.python-version }} --extra dev --frozen
+
+      # cupy and jax with CUDA support are not declared dependencies (cupy is
+      # only needed to *produce* GPU arrays in the test Tesseract's compute, and
+      # jax needs a CUDA backend to place arrays on-device); install builds for
+      # the matrix CUDA major version into the same environment here. The floor
+      # leg pins jax to its declared minimum; latest legs leave it unconstrained.
+      - name: Install GPU array frameworks
+        run: |
+          jax_spec="jax[cuda${{ matrix.cuda.major }}]"
+          if [[ "${{ matrix.cuda.jax-version }}" != "latest" ]]; then
+            jax_spec="jax[cuda${{ matrix.cuda.major }}]==${{ matrix.cuda.jax-version }}"
+          fi
+          uv pip install \
+            "cupy-cuda${{ matrix.cuda.major }}x" \
+            "$jax_spec"
+
+      - name: Show installed CUDA frameworks
+        run: |
+          uv run --no-sync python -c "import cupy; print('cupy', cupy.__version__, 'runtime', cupy.cuda.runtime.runtimeGetVersion(), 'devices', cupy.cuda.runtime.getDeviceCount())"
+          uv run --no-sync python -c "import jax; print('jax', jax.__version__, 'devices', jax.devices())"
+          uv run --no-sync python -c "import tesseract_jax.gpu_ffi as g; print('shim available:', g.is_available())"
+
+      - name: Run GPU test suite
+        run: |
+          set -o pipefail
+          uv run --no-sync pytest \
+            -v \
+            -m gpu \
+            --timeout=300 \
+            --cov-report=term-missing:skip-covered \
+            --cov-report=xml:coverage.xml \
+            --cov=tesseract_jax \
+            --cov-branch
+
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v7.0.0
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: pasteurlabs/tesseract-jax
+          files: coverage*.xml
+          flags: gpu-cuda${{ matrix.cuda.major }}-jax${{ matrix.cuda.jax-version }}
+          fail_ci_if_error: true
+
   all-ok:
     if: always()
-    needs: [tests]
+    needs: [tests, tests-gpu]
 
     runs-on: ubuntu-latest
 
@@ -86,6 +178,11 @@ jobs:
         run: |
           if [[ "${{ needs.tests.result }}" != "success" && "${{ needs.tests.result }}" != "skipped" ]]; then
             echo "Tests failed"
+            exit 1
+          fi
+
+          if [[ "${{ needs.tests-gpu.result }}" != "success" && "${{ needs.tests-gpu.result }}" != "skipped" ]]; then
+            echo "GPU tests failed"
             exit 1
           fi
 

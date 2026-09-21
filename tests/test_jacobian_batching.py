@@ -255,8 +255,8 @@ def test_materialize_jacobian_true_errors_without_endpoint(vectoradd_tess, monke
 
     orig_init = Jaxeract.__init__
 
-    def patched_init(self, tess):
-        orig_init(self, tess)
+    def patched_init(self, tess, **kwargs):
+        orig_init(self, tess, **kwargs)
         self.available_methods = [m for m in self.available_methods if m != "jacobian"]
 
     monkeypatch.setattr(Jaxeract, "__init__", patched_init)
@@ -376,6 +376,49 @@ def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
 
     np.testing.assert_allclose(g, -400.0, rtol=1e-5)
     assert captured["jac_inputs"] == ["x"]
+
+
+def test_jacrev_partial_output_restricts_jac_outputs(
+    pytree_tess, pytree_tess_inputs, monkeypatch
+):
+    """``jacrev`` of one of several diff outputs requests only that output's rows.
+
+    On the batched VJP shortcut the unused outputs carry symbolic-zero
+    cotangents. ``has_cotangent`` records that, so the ``jacobian`` request must
+    drop them rather than materialize (and contract against zero) every row.
+    """
+    inputs = {k: jax.tree.map(jnp.asarray, v) for k, v in pytree_tess_inputs.items()}
+
+    captured: dict[str, Any] = {}
+    orig = pytree_tess.jacobian
+
+    def spy(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_outputs"] = sorted(jac_outputs)
+        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    monkeypatch.setattr(pytree_tess, "jacobian", spy)
+
+    def f(x):
+        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
+        # Only `result` enters; result_dict / result_list stay unused, so JAX
+        # hands their cotangents in as symbolic zeros.
+        return apply_tesseract(pytree_tess, i)["result"]
+
+    x = inputs["alpha"]["x"]
+    got = jax.jacrev(f)(x)
+
+    # Reference via the sequential VJP path (no jacobian-materialization shortcut).
+    def f_seq(x):
+        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
+        return apply_tesseract(
+            pytree_tess, i, materialize_jacobian=False, vmap_method="sequential"
+        )["result"]
+
+    expected = jax.jacrev(f_seq)(x)
+    np.testing.assert_allclose(got, expected, rtol=1e-5)
+    assert captured["jac_outputs"] == ["result"], (
+        f"expected only 'result' rows to be requested, got {captured['jac_outputs']}"
+    )
 
 
 def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
@@ -521,6 +564,15 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) == Jaxeract(vectoradd_tess)
     assert hash(Jaxeract(vectoradd_tess)) == hash(Jaxeract(vectoradd_tess))
     assert Jaxeract(vectoradd_tess) != object()
+
+
+def test_jaxeract_device_transport_breaks_equality(vectoradd_tess):
+    """A device-transport wrapper differs from a host one, so XLA won't common them up."""
+    on_device = Jaxeract(vectoradd_tess, device_transport="cuda_ipc")
+    host = Jaxeract(vectoradd_tess)
+    assert on_device != host
+    assert hash(on_device) != hash(host)
+    assert on_device == Jaxeract(vectoradd_tess, device_transport="cuda_ipc")
 
 
 # ---------------------------------------------------------------------------
