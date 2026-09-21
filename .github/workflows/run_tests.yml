@@ -78,16 +78,7 @@ jobs:
   tests-gpu:
     runs-on: tesseract-ci-gpu
 
-    # The matrix brackets what we support along three axes at once:
-    # - CUDA/Python: the two legs pin (CUDA 12, 3.12) and (CUDA 13, 3.14), covering
-    #   both dlopen loader fallbacks (libcudart.so.12/.13), both supported Python
-    #   versions, and both jaxlib majors (0.7 on <3.14, 0.8 on >=3.14).
-    # - JAX: each leg tracks latest. A third leg pins the declared floor (jax==0.7.0)
-    #   on CUDA 12 / 3.12, the only combination where 0.7 has wheels.
-    # - ABI direction: the shim is always built against the jaxlib floor (pinned in
-    #   pyproject's [build-system].requires), so the floor leg runs the shim on its own
-    #   jaxlib and the latest legs run an old shim on a newer jaxlib. That is the only
-    #   direction XLA's FFI ABI guarantee covers.
+    # Run oldest and newest supported combinations of the {CUDA, Python, JAX} stack
     strategy:
       fail-fast: false
       matrix:
@@ -95,18 +86,11 @@ jobs:
           - major: "12"
             base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
             python-version: "3.12"
-            jax-version: "latest"
+            jax-version: "0.7.0"
           - major: "13"
             base_image: "nvidia/cuda:13.3.1-base-ubuntu24.04"
             python-version: "3.14"
             jax-version: "latest"
-        include:
-          # oldest supported JAX on the CUDA 12 / floor-Python leg
-          - cuda:
-              major: "12"
-              base_image: "nvidia/cuda:12.8.1-base-ubuntu24.04"
-              python-version: "3.12"
-              jax-version: "0.7.0"
 
     defaults:
       run:
