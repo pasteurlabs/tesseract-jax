@@ -15,6 +15,7 @@ guard it on the CPU test runner rather than only implicitly on GPU CI.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from tesseract_jax import gpu_ffi
@@ -143,3 +144,197 @@ def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
         pytest.raises(RuntimeError, match="device_transport='cuda_ipc' was requested"),
     ):
         primitive.tesseract_dispatch_gpu_lowering(object(), params=params)
+
+
+def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
+    """A device transport with no CUDA device visible to JAX is a hard error.
+
+    The shim can import on a CPU-only host, so an available shim does not imply a
+    usable GPU. Selecting a transport and then lowering without a CUDA device is a
+    misconfiguration the lowering surfaces rather than silently falling back.
+    """
+    from types import SimpleNamespace
+
+    import jax
+    import typeguard
+
+    from tesseract_jax import primitive
+
+    # Get past the shim-availability guard so the device check is what fires.
+    monkeypatch.setattr(gpu_ffi, "is_available", lambda: True)
+
+    def no_cuda(*args, **kwargs):
+        raise RuntimeError("Unknown backend: 'cuda'")
+
+    monkeypatch.setattr(jax, "devices", no_cuda)
+    params = SimpleNamespace(client=_StubClient())
+
+    with (
+        typeguard.suppress_type_checks(),
+        pytest.raises(RuntimeError, match="JAX sees no CUDA device"),
+    ):
+        primitive.tesseract_dispatch_gpu_lowering(object(), params=params)
+
+
+def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
+    """No device transport selected: defer to the host-callback lowering.
+
+    A client that did not opt into a device transport must behave exactly as on
+    CPU, so the GPU lowering delegates straight to the host lowering.
+    """
+    from types import SimpleNamespace
+
+    import typeguard
+
+    from tesseract_jax import primitive
+
+    class _HostClient:
+        _device_transport = None
+
+    sentinel = object()
+    seen: dict = {}
+
+    def fake_host_lowering(ctx, *array_args, params):
+        seen["ctx"] = ctx
+        seen["array_args"] = array_args
+        return sentinel
+
+    monkeypatch.setattr(primitive, "tesseract_dispatch_lowering", fake_host_lowering)
+    params = SimpleNamespace(client=_HostClient())
+
+    with typeguard.suppress_type_checks():
+        result = primitive.tesseract_dispatch_gpu_lowering(
+            "ctx", "arg0", "arg1", params=params
+        )
+
+    assert result is sentinel
+    assert seen == {"ctx": "ctx", "array_args": ("arg0", "arg1")}
+
+
+def test_is_available_false_when_shim_import_fails(monkeypatch):
+    """``is_available`` reports False when the shim import fails.
+
+    A CPU-only install has no compiled shim, so callers must be able to probe
+    availability cheaply without the import error propagating.
+    """
+    import builtins
+    import sys
+
+    # A cached shim would satisfy the import without hitting the patched importer.
+    monkeypatch.delitem(sys.modules, "tesseract_jax._cuda_shim", raising=False)
+
+    real_import = builtins.__import__
+
+    def failing_import(name, globals=None, locals=None, fromlist=(), level=0):
+        # ``from tesseract_jax import _cuda_shim`` imports the package with
+        # ``_cuda_shim`` in the fromlist, so match on either form.
+        if name.endswith("_cuda_shim") or "_cuda_shim" in (fromlist or ()):
+            raise ImportError("no compiled shim on this platform")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", failing_import)
+
+    assert gpu_ffi.is_available() is False
+
+
+def test_register_dispatch_dedupes_on_hashable_key(fresh_registry, monkeypatch):
+    """A repeated hashable key reuses its token instead of leaking a fresh one.
+
+    Each registry entry pins the dispatch closure (and the client and session
+    behind it) for the process lifetime, so re-lowering the same program point
+    must collapse to a single entry.
+    """
+    monkeypatch.setattr(gpu_ffi, "_registry", {})
+    monkeypatch.setattr(gpu_ffi, "_token_by_key", {})
+    monkeypatch.setattr(gpu_ffi, "_next_token", 0)
+
+    def fn(views):
+        return ()
+
+    first = gpu_ffi.register_dispatch(fn, key="dispatch-a")
+    again = gpu_ffi.register_dispatch(fn, key="dispatch-a")
+    other = gpu_ffi.register_dispatch(fn, key="dispatch-b")
+
+    assert first == again
+    assert other != first
+    assert set(gpu_ffi._registry) == {first, other}
+
+
+def test_register_dispatch_unhashable_key_allocates_fresh(fresh_registry, monkeypatch):
+    """An unhashable key skips dedup and always allocates a new token.
+
+    Dedup is a best-effort optimisation keyed on a frozen, value-equal object; an
+    unhashable key must degrade to a fresh registration rather than raising.
+    """
+    monkeypatch.setattr(gpu_ffi, "_registry", {})
+    monkeypatch.setattr(gpu_ffi, "_token_by_key", {})
+    monkeypatch.setattr(gpu_ffi, "_next_token", 0)
+
+    def fn(views):
+        return ()
+
+    first = gpu_ffi.register_dispatch(fn, key=["unhashable"])
+    second = gpu_ffi.register_dispatch(fn, key=["unhashable"])
+
+    assert first != second
+    assert set(gpu_ffi._registry) == {first, second}
+    # Nothing was recorded in the dedup map for an unhashable key.
+    assert gpu_ffi._token_by_key == {}
+
+
+def test_device_array_view_exposes_cuda_array_interface() -> None:
+    """``_DeviceArrayView`` presents a raw pointer as a zero-copy CUDA array.
+
+    The cuda_ipc encoder consumes only ``__cuda_array_interface__`` plus the
+    ``shape`` and ``dtype`` properties, so those must reflect the pointer,
+    C-contiguous layout, and dtype it was built with.
+    """
+    view = gpu_ffi._DeviceArrayView(0xDEADBEEF, "<f4", (2, 3))
+
+    cai = view.__cuda_array_interface__
+    assert cai["shape"] == (2, 3)
+    assert cai["typestr"] == "<f4"
+    assert cai["data"] == (0xDEADBEEF, False)
+    assert cai["strides"] is None  # XLA hands us C-contiguous buffers
+    assert cai["version"] == 3
+    assert view.shape == (2, 3)
+    assert view.dtype == np.dtype("<f4")
+
+
+def test_native_dispatch_unknown_token_raises(monkeypatch):
+    """An unknown token from the native side is a hard error.
+
+    The handler passes the token it was lowered with; a token missing from the
+    registry means state was corrupted or cleared out from under a live
+    executable, so the callback raises rather than returning garbage buffers.
+    """
+    monkeypatch.setattr(gpu_ffi, "_registry", {})
+
+    with pytest.raises(RuntimeError, match="unknown dispatch token 123"):
+        gpu_ffi._native_dispatch(123, [])
+
+
+def test_native_dispatch_wraps_inputs_as_views(monkeypatch):
+    """The callback wraps each XLA input buffer as a ``_DeviceArrayView``.
+
+    The native shim marshals inputs as ``(ptr, typestr, shape)`` with ``shape`` a
+    list; the callback must normalise them into views the dispatch closure reads
+    through ``__cuda_array_interface__``, then return the closure's outputs as a
+    list for the handler to copy back.
+    """
+    captured: dict = {}
+    out_arrays = (np.zeros(1),)
+
+    def fn(views):
+        captured["views"] = views
+        return out_arrays
+
+    monkeypatch.setattr(gpu_ffi, "_registry", {7: fn})
+
+    result = gpu_ffi._native_dispatch(7, [(0x1000, "<f8", [2, 2])])
+
+    assert result == list(out_arrays)
+    (view,) = captured["views"]
+    assert isinstance(view, gpu_ffi._DeviceArrayView)
+    assert view.shape == (2, 2)  # list shape normalised to a tuple
+    assert view.dtype == np.dtype("<f8")
