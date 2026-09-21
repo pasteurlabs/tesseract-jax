@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-09-21
+
+### Features
+
+- Support differentiating Tesseract derivative endpoints wrt (co)tangents (#229)
+- Support non-array output leaves in apply_tesseract (#248)
+- Support device-to-device GPU interop (#239)
+
+### Bug Fixes
+
+- Guard transpose rule against UndefinedPrimal (#228)
+- Keep list indices stable when pruning static leaves (#236)
+- Carry vmap_method and the jacobian params through nested binds (#242)
+- Keep dotted dict keys whole when matching schema templates (#252)
+- Fill discarded derivative slots with each dtype's 0/0 value (#259)
+
+### Refactor
+
+- Bundle primitive dispatch kwargs into a DispatchParams dataclass (#256)
+- [**breaking**] Dispatch through the primitive in eager mode, always requiring abstract_eval (#262)
+
+### Performance
+
+- Enable CSE with `has_side_effect=False` (#233)
+
 ## [0.4.1] - 2026-07-21
 
 ### Bug Fixes
