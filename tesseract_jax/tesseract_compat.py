@@ -1,15 +1,17 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import contextlib
+from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import jax.tree
 import numpy as np
-from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import (
     PyTree,
+    TransportArray,
     _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
@@ -23,6 +25,61 @@ if TYPE_CHECKING:
 
 # WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
 # and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+
+
+def _on_device(values: "list | tuple") -> bool:
+    """Whether ``values`` are cuda_ipc device arrays (vs host NumPy arrays).
+
+    The endpoint methods are transport-agnostic; this distinguishes the GPU FFI
+    lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
+    results) from the CPU host-callback lowering (real NumPy arrays).
+
+    The ``cuda`` import is deliberately lazy, not at module scope: eagerly
+    importing ``tesseract_core.runtime.cuda.ipc`` perturbs schema/typeguard state
+    in the shared interpreter and breaks in-process (``LocalClient``) Tesseracts
+    whose endpoints use ellipsis-shaped array schemas.
+    """
+    from tesseract_core.runtime.cuda.ipc import has_cuda_array_interface
+
+    return any(has_cuda_array_interface(v) for v in values)
+
+
+def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+    """Coerce a dispatch result to the return ``dtype`` without leaving the device.
+
+    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
+
+    On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
+    FFI handler copies straight into XLA's output buffer, so casting here would
+    force a device->host round-trip; it is returned untouched. That is not a
+    guarantee the device array already has ``dtype`` (tesseract-core does not pin
+    a jacobian endpoint's output dtype), so the native shim compares each result's
+    dtype and shape against the XLA output buffer and raises on a mismatch rather
+    than reinterpreting bytes (see ``_cuda_shim.cc``).
+    """
+    if _on_device([value]):
+        return value
+    return np.asarray(value, dtype=dtype)
+
+
+def _placeholder(
+    shape: tuple[int, ...], dtype: np.dtype, *, on_device: bool
+) -> TransportArray | None:
+    """A discarded slot in a derivative call's output tuple.
+
+    Used for the gradient of a non-differentiable input and the tangent of a
+    non-differentiable output. Such a slot exists only to satisfy the
+    output-tuple-length contract; JAX's transpose machinery never consumes it for
+    any user-requested derivative, so its value is immaterial.
+
+    On the cuda_ipc path this returns ``None`` and the native FFI handler fills
+    XLA's output buffer for that slot directly. On the host path it returns an
+    array filled with each dtype's ``0/0`` value (see :func:`_discarded_slot`), so
+    an accidental consumer surfaces loudly rather than silently.
+    """
+    if on_device:
+        return None
+    return _discarded_slot(shape, dtype)
 
 
 # Every dtype a Tesseract schema can carry; see the `dtype` enum in the
@@ -88,12 +145,45 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
     return np.full(shape, fill, dtype=dtype)
 
 
+# Device transports the GPU (FFI) lowering supports end-to-end. cuda_ipc is the
+# only one wired through the native shim today; add names here as the FFI path
+# learns to drive them.
+_SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
+
+
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
-    def __init__(self, tesseract_client: Tesseract) -> None:
-        """Initialize the Tesseract client."""
+    def __init__(
+        self,
+        tesseract_client: Tesseract,
+        *,
+        device_transport: str | None = None,
+    ) -> None:
+        """Initialize the Tesseract client.
+
+        ``device_transport`` names the on-device transport used to exchange GPU
+        arrays with a served Tesseract instead of a host round-trip (e.g.
+        ``"cuda_ipc"``), selecting one of the runtime's registered device
+        transports. It gates both the GPU FFI lowering and the
+        :meth:`device_transport_encoding` context below.
+        """
+        # Only transports the GPU (FFI) lowering actually implements end-to-end
+        # are accepted. The lowering is currently cuda_ipc-specific, so an
+        # unsupported name would otherwise route silently into that path and send
+        # an Accept the server has no backend for.
+        if (
+            device_transport is not None
+            and device_transport not in _SUPPORTED_TRANSPORTS
+        ):
+            raise ValueError(
+                f"Unsupported device_transport {device_transport!r}; "
+                f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
+            )
+
         self.client = tesseract_client
+        # The transport name, or ``None`` for a host round-trip.
+        self._device_transport = device_transport
 
         self.tesseract_input_args = tuple(
             arg
@@ -131,14 +221,80 @@ class Jaxeract:
     # so that distinct Tesseracts stay distinct; if ``Tesseract`` ever gains value
     # semantics of its own, this inherits them.
     def __eq__(self, other: object) -> bool:
-        """Whether ``other`` wraps the same Tesseract."""
+        """Whether ``other`` wraps the same Tesseract in the same transport mode.
+
+        ``_device_transport`` participates: calls using different transports (or a
+        transport vs. the host round-trip) to the same Tesseract lower to
+        different custom calls, so they must not compare equal or XLA would common
+        them up.
+        """
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        return self.client == other.client
+        return (
+            self.client == other.client
+            and self._device_transport == other._device_transport
+        )
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client))
+        return hash((Jaxeract, self.client, self._device_transport))
+
+    @contextlib.contextmanager
+    def device_transport_encoding(self) -> Generator[None]:
+        """Temporarily make the HTTP client use this call's device transport.
+
+        Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
+        the client exports GPU array *inputs* by reference through the negotiated
+        device transport and the served Tesseract hands the *outputs* back the
+        same way. GPU transport in tesseract-core is a separate axis from
+        ``output_format`` (which only governs CPU arrays), so two things must
+        change and be restored:
+
+        * ``_gpu_transport``, which drives how GPU array *inputs* are encoded, and
+        * an ``Accept`` header carrying the transport as a media-type parameter
+          (``application/<output_format>; gpu_transport=<transport>``), which is
+          how the server selects the *output* transport. The client never sends
+          Accept on its own, so without this the response falls back to the
+          server's configured transport.
+
+        ``_output_format`` is left untouched and the ``Accept`` media type reuses
+        it, so the CPU leaves of a mixed response are unaffected.
+
+        Restored on exit so the shared client is not permanently mutated. A no-op
+        when this call did not opt into a device transport, or for non-HTTP
+        clients (e.g. the in-process ``LocalClient``).
+        """
+        client = getattr(self.client, "_client", None)
+        if (
+            self._device_transport is None
+            or client is None
+            or not hasattr(client, "_gpu_transport")
+        ):
+            yield
+            return
+        prev_transport = client._gpu_transport
+        session = getattr(client, "_session", None)
+        had_accept = session is not None and "Accept" in session.headers
+        prev_accept = session.headers.get("Accept") if session is not None else None
+
+        # Keep the response's CPU-array format as the client's current one and
+        # carry the GPU transport as a media-type parameter on the same header.
+        output_format = getattr(client, "_output_format", "json+base64")
+
+        client._gpu_transport = self._device_transport
+        if session is not None:
+            session.headers["Accept"] = (
+                f"application/{output_format}; gpu_transport={self._device_transport}"
+            )
+        try:
+            yield
+        finally:
+            client._gpu_transport = prev_transport
+            if session is not None:
+                if had_accept:
+                    session.headers["Accept"] = prev_accept
+                else:
+                    session.headers.pop("Accept", None)
 
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,
@@ -163,7 +319,7 @@ class Jaxeract:
 
     def apply(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's apply endpoint with the given arguments."""
@@ -202,7 +358,7 @@ class Jaxeract:
 
     def jacobian_vector_product(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jvp endpoint with the given arguments."""
@@ -254,18 +410,19 @@ class Jaxeract:
             tangent_vector=flat_tangents,
         )
 
+        on_device = _on_device(array_args)
         out = []
         for path, aval in zip(output_flat, params.output_avals, strict=False):
             if path in out_data:
                 out.append(out_data[path])
             else:
-                out.append(_discarded_slot(aval.shape, aval.dtype))
+                out.append(_placeholder(aval.shape, aval.dtype, on_device=on_device))
 
         return tuple(out)
 
     def jacobian(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's jacobian endpoint with the given arguments.
@@ -324,12 +481,12 @@ class Jaxeract:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                out.append(np.asarray(out_data[op][ip], dtype=target))
+                out.append(_cast_return(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
         self,
-        array_args: tuple[ArrayLike, ...],
+        array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
         """Call the Tesseract's vjp endpoint with the given arguments."""
@@ -392,16 +549,13 @@ class Jaxeract:
                 and not params.is_static_mask[all_idx]
                 and not has_tangent[tan_idx]
             ):
-                # Non-differentiable but non-static input: return a NaN
-                # placeholder of the same shape/dtype as the corresponding
-                # input array. The slot exists for tuple-length contract;
-                # JAX's transpose machinery doesn't consume it for any
-                # user-requested derivative.
+                # Non-differentiable but non-static input: emit a placeholder of
+                # the same shape/dtype as the corresponding input array. The slot
+                # exists for the tuple-length contract; JAX's transpose machinery
+                # doesn't consume it for any user-requested derivative.
+                arg = array_args[array_idx]
                 out.append(
-                    _discarded_slot(
-                        array_args[array_idx].shape,
-                        array_args[array_idx].dtype,
-                    )
+                    _placeholder(arg.shape, arg.dtype, on_device=_on_device([arg]))
                 )
                 tan_idx += 1
 
