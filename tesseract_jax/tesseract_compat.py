@@ -157,32 +157,29 @@ class Jaxeract:
         self,
         tesseract_client: Tesseract,
         *,
-        device_transport: str | None = None,
+        gpu_transport: str | None = None,
     ) -> None:
         """Initialize the Tesseract client.
 
-        ``device_transport`` names the on-device transport used to exchange GPU
+        ``gpu_transport`` names the on-device transport used to exchange GPU
         arrays with a served Tesseract instead of a host round-trip (e.g.
         ``"cuda_ipc"``), selecting one of the runtime's registered device
         transports. It gates both the GPU FFI lowering and the
-        :meth:`device_transport_encoding` context below.
+        :meth:`gpu_transport_encoding` context below.
         """
         # Only transports the GPU (FFI) lowering actually implements end-to-end
         # are accepted. The lowering is currently cuda_ipc-specific, so an
         # unsupported name would otherwise route silently into that path and send
         # an Accept the server has no backend for.
-        if (
-            device_transport is not None
-            and device_transport not in _SUPPORTED_TRANSPORTS
-        ):
+        if gpu_transport is not None and gpu_transport not in _SUPPORTED_TRANSPORTS:
             raise ValueError(
-                f"Unsupported device_transport {device_transport!r}; "
+                f"Unsupported gpu_transport {gpu_transport!r}; "
                 f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
             )
 
         self.client = tesseract_client
         # The transport name, or ``None`` for a host round-trip.
-        self._device_transport = device_transport
+        self._gpu_transport = gpu_transport
 
         self.tesseract_input_args = tuple(
             arg
@@ -222,7 +219,7 @@ class Jaxeract:
     def __eq__(self, other: object) -> bool:
         """Whether ``other`` wraps the same Tesseract in the same transport mode.
 
-        ``_device_transport`` participates: calls using different transports (or a
+        ``_gpu_transport`` participates: calls using different transports (or a
         transport vs. the host round-trip) to the same Tesseract lower to
         different custom calls, so they must not compare equal or XLA would common
         them up.
@@ -230,16 +227,15 @@ class Jaxeract:
         if not isinstance(other, Jaxeract):
             return NotImplemented
         return (
-            self.client == other.client
-            and self._device_transport == other._device_transport
+            self.client == other.client and self._gpu_transport == other._gpu_transport
         )
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client, self._device_transport))
+        return hash((Jaxeract, self.client, self._gpu_transport))
 
     @contextlib.contextmanager
-    def device_transport_encoding(self) -> Generator[None]:
+    def gpu_transport_encoding(self) -> Generator[None]:
         """Temporarily make the HTTP client use this call's device transport.
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
@@ -265,7 +261,7 @@ class Jaxeract:
         """
         client = getattr(self.client, "_client", None)
         if (
-            self._device_transport is None
+            self._gpu_transport is None
             or client is None
             or not hasattr(client, "_gpu_transport")
         ):
@@ -280,10 +276,10 @@ class Jaxeract:
         # carry the GPU transport as a media-type parameter on the same header.
         output_format = getattr(client, "_output_format", "json+base64")
 
-        client._gpu_transport = self._device_transport
+        client._gpu_transport = self._gpu_transport
         if session is not None:
             session.headers["Accept"] = (
-                f"application/{output_format}; gpu_transport={self._device_transport}"
+                f"application/{output_format}; gpu_transport={self._gpu_transport}"
             )
         try:
             yield
