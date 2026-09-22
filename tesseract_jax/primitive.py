@@ -288,8 +288,17 @@ def tesseract_dispatch_transpose_rule(
     *args: ArrayLike | ad.UndefinedPrimal,
     params: DispatchParams,
 ) -> tuple[ArrayLike | None, ...]:
-    """Defines how to dispatch vjp operation."""
-    assert params.eval_func in ("jacobian_vector_product",)
+    """Defines how to dispatch the transpose of a derivative endpoint.
+
+    ``jacobian_vector_product`` and ``vector_jacobian_product``
+    are linear in their (co)tangent slots and are each other's transpose.
+    """
+    if params.eval_func not in ("jacobian_vector_product", "vector_jacobian_product"):
+        raise AssertionError(
+            f"Tesseract primitive transpose rule reached with unexpected "
+            f"eval_func={params.eval_func!r}; expected 'jacobian_vector_product' "
+            f"or 'vector_jacobian_product'. Please raise an issue on GitHub."
+        )
 
     n_primals = params.n_primals
     primal_args = args[:n_primals]
@@ -310,28 +319,72 @@ def tesseract_dispatch_transpose_rule(
             "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
         )
 
-    # Raise if a cotangent for a non-differentiable output is not a symbolic zero.
-    # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
-    # (e.g. via jax.lax.stop_gradient) or when the output is not used in the loss.
-    # Any other cotangent means the user accidentally included a non-diff output
-    # in the gradient computation, likely due to a missing Differentiable[] annotation.
-    dummy_output = dummy_output_tree(
-        params.output_pytreedef,
-        len(params.output_avals),
-        params.static_output_mask,
-    )
-    flat_output_info = _pytree_to_tesseract_flat(
-        dummy_output, schema_paths=params.client.differentiable_output_paths
-    )
-    for cotan, (path, is_diff) in zip(cotangent, flat_output_info.items(), strict=True):
-        if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
-            raise ValueError(
-                f"Non-symbolic-zero cotangent passed for non-differentiable output '{path}'. "
-                f"If this output should be differentiable, mark it as "
-                f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
-                f"exclude it from the function return value (using pop or has_aux=True), "
-                f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
-            )
+    if params.eval_func == "jacobian_vector_product":
+        # `cotangent` aligns with the Tesseract's own outputs.
+        # Raise if a cotangent for a non-differentiable one is not a symbolic zero.
+        # Symbolic zeros (ad.Zero) are produced by JAX when gradients are blocked
+        # (e.g. via jax.lax.stop_gradient) or when the output is not used in the
+        # loss. Any other cotangent means the user accidentally included a
+        # non-diff output in the gradient computation, likely due to a missing
+        # Differentiable[] annotation.
+        #
+        # No analogous check when transposing `vector_jacobian_product`
+        # as should already be validated on initial forward pass in
+        # `tesseract_dispatch_jvp_rule`.
+        dummy_output = dummy_output_tree(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.static_output_mask,
+        )
+        flat_output_info = _pytree_to_tesseract_flat(
+            dummy_output, schema_paths=params.client.differentiable_output_paths
+        )
+        for cotan, (path, is_diff) in zip(
+            cotangent, flat_output_info.items(), strict=True
+        ):
+            if is_diff is None and not isinstance(cotan, jax._src.ad_util.Zero):
+                raise ValueError(
+                    f"Non-symbolic-zero cotangent passed for non-differentiable output '{path}'. "
+                    f"If this output should be differentiable, mark it as "
+                    f"`Differentiable[...]` in the Tesseract output schema. Otherwise, "
+                    f"exclude it from the function return value (using pop or has_aux=True), "
+                    f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
+                )
+
+    if params.eval_func == "vector_jacobian_product":
+        # Transposing a `vector_jacobian_product` back into a
+        # `jacobian_vector_product`, the two being each other's transpose. The
+        # forward VJP bind takes only the real cotangents (``has_cotangent``) as
+        # linear operands and returns one output per differentiated primal
+        # (``has_tangent``), so both masks must be threaded through the reverse
+        # bind here; the non-differentiable-input check above is specific to the
+        # forward direction and does not apply.
+        has_tangent = params.has_tangent
+
+        # ``cotangent`` aligns with the forward VJP's outputs, i.e. the
+        # differentiated primals. Scatter it into a full tangent per primal so the
+        # JVP bind sees the one-slot-per-primal layout its dispatch expects. A
+        # non-differentiated primal's slot is filtered out before the endpoint
+        # call, but still has to be a concrete array for the bind, so fill it with
+        # a dense zero shaped like that primal.
+        # ``primal_args`` are all concrete here (UndefinedPrimals were rejected
+        # above), so each doubles as a shape/dtype template for its zero tangent.
+        cotan_iter = iter(_instantiate_zeros(cotangent))
+        tangents = tuple(
+            next(cotan_iter) if h else jnp.zeros_like(p)
+            for p, h in zip(primal_args, has_tangent, strict=True)
+        )
+        jvp = tesseract_dispatch_p.bind(
+            *primal_args,
+            *tangents,
+            params=params.replace(eval_func="jacobian_vector_product"),
+        )
+        # The JVP bind returns one output per Tesseract output; the forward VJP's
+        # linear operands were only the real cotangents, so return those slots.
+        has_cotangent = params.has_cotangent or (True,) * len(jvp)
+        jvp_iter = iter(jvp)
+        cotan_out = [next(jvp_iter) for h in has_cotangent if h]
+        return tuple([None] * len(primal_args) + cotan_out)
 
     # Raise if a gradient is requested for a non-differentiable input.
     _primal_inputs = unflatten_args(
