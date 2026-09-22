@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import requests
@@ -399,6 +400,33 @@ def non_abstract_tess() -> Tesseract:
 def drifting_static_tess() -> Tesseract:
     """Its apply reports a static output that abstract_eval did not predict."""
     return _load_tesseract("drifting_static_tesseract")
+
+
+@pytest.fixture
+def vectoradd_jax_tess() -> Tesseract:
+    """The flagship JAX-recipe example, loaded in-process from its own source.
+
+    Points at ``examples/simple/vectoradd_jax`` directly, so a change to the
+    documented recipe is exercised here too.
+    """
+    return Tesseract.from_tesseract_api(
+        str(here.parent / "examples" / "simple" / "vectoradd_jax" / "tesseract_api.py")
+    )
+
+
+@pytest.fixture
+def vectoradd_jax_ab() -> dict:
+    """``{"a": ..., "b": ...}`` inputs for ``vectoradd_jax_tess`` (no ``norm_ord``)."""
+    return {
+        "a": {
+            "v": jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32),
+            "s": jnp.float32(2.0),
+        },
+        "b": {
+            "v": jnp.array([4.0, 5.0, 6.0], dtype=jnp.float32),
+            "s": jnp.float32(0.5),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------

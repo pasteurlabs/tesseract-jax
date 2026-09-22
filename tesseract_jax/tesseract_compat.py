@@ -16,6 +16,7 @@ from tesseract_jax.tree_util import (
     combine_args,
     dummy_output_tree,
     split_args,
+    to_shape_dtype_pytree,
     unflatten_args,
     warn_on_static_output_drift,
 )
@@ -307,14 +308,7 @@ class Jaxeract:
 
         This used in order to get output shapes given input shapes.
         """
-        abstract_inputs = jax.tree.map(
-            lambda x: (
-                {"shape": x.shape, "dtype": x.dtype.name} if hasattr(x, "shape") else x
-            ),
-            inputs,
-        )
-
-        out_data = self.client.abstract_eval(abstract_inputs)
+        out_data = self.client.abstract_eval(to_shape_dtype_pytree(inputs))
         return out_data
 
     def apply(

@@ -20,6 +20,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
+from tesseract_jax.direct_trace import build_direct_endpoint, is_traceable
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -411,8 +412,14 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: run the dispatch closure via a host callback."""
+    """CPU lowering: inline the endpoint when traceable, else run it via a host callback."""
     _raise_if_unimplemented(params.eval_func, params.client)
+
+    if params.traceable:
+        # Inline and trace the real endpoint (see tesseract_jax.direct_trace)
+        # instead of dispatching it as an opaque call.
+        direct_endpoint = build_direct_endpoint(params)
+        return mlir.lower_fun(direct_endpoint, multiple_results=True)(ctx, *array_args)
 
     dispatch = _build_dispatch_closure(params)
 
@@ -868,6 +875,7 @@ def apply_tesseract(
     materialize_jacobian: bool | None = None,
     device_transport: str | None = None,
     check_static_outputs: bool | None = None,
+    traceable: bool = False,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -994,6 +1002,14 @@ def apply_tesseract(
             which is on unless set to a false value. Pass ``False`` to skip the
             comparison for one call. Skipping it also skips building the keypaths
             the warning needs; the caller gets the same values either way.
+        traceable: Whether to inline the Tesseract's real endpoint into the jaxpr
+            instead of dispatching through a host callback. Requires an in-process
+            Tesseract (``Tesseract.from_tesseract_api(...)``); raises ``ValueError``
+            otherwise. Mutually exclusive with ``device_transport``. Every endpoint
+            actually invoked must return a plain ``dict`` (or build via
+            ``model_construct``), not via the schema's validating constructor
+            (``OutputSchema(...)``). Validation is shape/dtype only (the same schema
+            ``abstract_eval`` uses).
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -1026,7 +1042,23 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
+    if traceable and device_transport is not None:
+        raise ValueError(
+            "traceable=True and device_transport are mutually exclusive: "
+            "traceable inlines the Tesseract's own Python code in-process, "
+            "which needs no transport at all, while device_transport only "
+            "applies to a served (HTTPClient) Tesseract."
+        )
+
     client = Jaxeract(tesseract_client, device_transport=device_transport)
+
+    if traceable and not is_traceable(client):
+        raise ValueError(
+            "traceable=True requires a Tesseract an in-process Tesseract "
+            "constructed through Tesseract.from_tesseract_api(...), however "
+            f"{tesseract_client!r} has no importable apply function to trace "
+            "directly."
+        )
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
@@ -1089,6 +1121,7 @@ def apply_tesseract(
             eval_func="apply",
             vmap_method=vmap_method,
             materialize_jacobian=materialize_jacobian,
+            traceable=traceable,
         ),
     )
 

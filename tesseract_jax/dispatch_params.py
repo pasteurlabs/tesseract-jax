@@ -51,6 +51,7 @@ class DispatchParams:
         jac_input_paths: When set, restrict a ``jacobian`` call to these input columns.
         jac_output_paths: When set, restrict a ``jacobian`` call to these output rows.
         jac_mode: Dtype convention for a ``jacobian`` call (``"bwd"`` / ``"fwd"``).
+        traceable: Whether to inline the endpoint instead of using a host callback.
     """
 
     static_args: tuple[Any, ...]
@@ -69,6 +70,7 @@ class DispatchParams:
     jac_input_paths: tuple[str, ...] | None = None
     jac_output_paths: tuple[str, ...] | None = None
     jac_mode: Literal["fwd", "bwd"] = "bwd"
+    traceable: bool = False
 
     @property
     def n_primals(self) -> int:

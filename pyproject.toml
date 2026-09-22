@@ -10,7 +10,7 @@ requires-python = ">=3.12,<4"
 dependencies = [
     "jax>=0.7.0",
     "packaging",
-    "tesseract-core>=1.13.0",
+    "tesseract-core[runtime]>=1.13.0",
 ]
 dynamic = ["version"]
 
@@ -107,6 +107,12 @@ filterwarnings = [
     "ignore:numpy.ufunc size changed",
     # sometimes, dependencies leak resources
     "ignore:.*socket\\.socket.*:pytest.PytestUnraisableExceptionWarning",
+    # vectoradd_jax's Vector_and_Scalar.s default is a numpy scalar, not a
+    # plain float: not JSON-serializable (schema generation), and not a
+    # ShapeDType (abstract_eval's model_dump) when the field is omitted.
+    # Harmless in both cases; a pre-existing wart in the example, not a bug.
+    "ignore:Default value 1.0 is not JSON serializable",
+    "ignore:Pydantic serializer warnings",
 ]
 
 [tool.coverage.run]
