@@ -520,15 +520,10 @@ class Jaxeract:
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
 
-        # The bind carries only the real cotangents (symbolic zeros are dropped
-        # from its operands). Scatter them back to full non-static-output width,
-        # ``None`` where the cotangent was a symbolic zero, so the unflatten below
-        # sees the whole output pytree. It is over the non-static outputs, so apply
-        # it before the static slots fold in.
+        # Scatter cotangents back to full non-static-output width, inserting
+        # ``None`` where the cotangent was a symbolic zero.
         if params.has_cotangent:
-            # The bind is set up (in the transpose rule) so its cotangent operands
-            # are exactly the ``has_cotangent``-True slots; a mismatch here would
-            # silently misalign the scatter and corrupt the gradient.
+            # Guard against misalignment
             assert len(cotangents) == sum(params.has_cotangent)
             cotan_iter = iter(cotangents)
             cotangents = tuple(

@@ -390,13 +390,24 @@ def test_jacrev_partial_output_restricts_jac_outputs(
     inputs = {k: jax.tree.map(jnp.asarray, v) for k, v in pytree_tess_inputs.items()}
 
     captured: dict[str, Any] = {}
-    orig = pytree_tess.jacobian
+    orig_jac = pytree_tess.jacobian
+    orig_vjp = pytree_tess.vector_jacobian_product
 
-    def spy(*, inputs, jac_inputs, jac_outputs):
+    def spy_jac(*, inputs, jac_inputs, jac_outputs):
         captured["jac_outputs"] = sorted(jac_outputs)
-        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+        return orig_jac(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
 
-    monkeypatch.setattr(pytree_tess, "jacobian", spy)
+    def spy_vjp(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
+        captured["vjp_outputs"] = sorted(vjp_outputs)
+        return orig_vjp(
+            inputs=inputs,
+            vjp_inputs=vjp_inputs,
+            vjp_outputs=vjp_outputs,
+            cotangent_vector=cotangent_vector,
+        )
+
+    monkeypatch.setattr(pytree_tess, "jacobian", spy_jac)
+    monkeypatch.setattr(pytree_tess, "vector_jacobian_product", spy_vjp)
 
     def f(x):
         i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
@@ -418,6 +429,10 @@ def test_jacrev_partial_output_restricts_jac_outputs(
     np.testing.assert_allclose(got, expected, rtol=1e-5)
     assert captured["jac_outputs"] == ["result"], (
         f"expected only 'result' rows to be requested, got {captured['jac_outputs']}"
+    )
+    # The sequential reference path prunes the same unused outputs.
+    assert captured["vjp_outputs"] == ["result"], (
+        f"expected only 'result' cotangents to be requested, got {captured['vjp_outputs']}"
     )
 
 

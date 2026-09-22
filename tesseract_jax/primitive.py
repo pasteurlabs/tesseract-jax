@@ -656,16 +656,13 @@ def _batched_via_jacobian(
 
     # Map each diff output path to its leaf index in the output pytree.
     # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions. ``output_flat``
-    # is over non-static outputs in leaf order, so the enumerate index lines up
-    # with ``has_cotangent``. On the VJP path an output whose cotangent is a
-    # symbolic zero adds nothing to the input gradients, so drop it here and never
-    # request its Jacobian rows.
-    is_vjp = params.eval_func == "vector_jacobian_product"
+    # the corresponding ``tans`` / ``output_avals`` positions, dropping unrequested
+    # outputs on the reverse-mode path (signalled by ``has_cotangent``).
+    is_jvp = params.eval_func == "jacobian_vector_product"
     diff_output_path_to_pos: dict[str, int] = {
         p: i
         for i, (p, v) in enumerate(output_flat.items())
-        if v is not None and (not is_vjp or params.has_cotangent[i])
+        if v is not None and (is_jvp or params.has_cotangent[i])
     }
 
     jac_arrays = tesseract_dispatch_p.bind(
@@ -747,22 +744,21 @@ def _batched_via_jacobian(
     # tuple (only ``has_cotangent``-True outputs, symbolic zeros dropped at the
     # bind), in the same order as the surviving rows of ``diff_output_path_to_pos``,
     # so take them straight through.
-    filtered_cots = list(tans)
     jac_cols = [list(col) for col in zip(*jac_blocks, strict=True)]
     diff_primals = [primals[pos] for pos in diff_input_path_to_pos.values()]
     diff_grads = jax.tree.map(
         lambda slot, jac_col: _tree_sum(
-            jax.tree.map(_rmatmul, jac_col, filtered_cots), slot
+            jax.tree.map(_rmatmul, jac_col, list(tans)), slot
         ),
         diff_primals,
         jac_cols,
     )
     # A VJP bind returns a gradient only for each differentiated primal; the
-    # abstract_eval declares that shorter arity. Emit the grads in primal
-    # positional order (has_tangent order), omitting the non-diff slots that
-    # JAX's transpose never consumes.
-    grad_by_pos = dict(zip(diff_input_path_to_pos.values(), diff_grads, strict=True))
-    grads = tuple(grad_by_pos[i] for i in sorted(grad_by_pos))
+    # abstract_eval declares that shorter arity. ``diff_input_path_to_pos`` is
+    # built in primal positional order, so ``diff_grads`` is already emitted in
+    # that order, with the non-diff slots that JAX's transpose never consumes
+    # omitted.
+    grads = tuple(diff_grads)
     return grads, (0,) * len(grads)
 
 
