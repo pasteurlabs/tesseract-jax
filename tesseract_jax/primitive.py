@@ -415,18 +415,15 @@ def tesseract_dispatch_lowering(
     """CPU lowering: inline the endpoint when traceable, else run it via a host callback."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
-    if params.traceable:
-        # Reuses the same dispatch closure as the callback path below, just
-        # aimed at a TracedClient and traced (mlir.lower_fun) instead of
-        # dispatched through an opaque call (mlir.emit_python_callback) -- see
-        # tesseract_jax.direct_trace.
-        traced_params = params.replace(
-            client=Jaxeract(TracedClient(params.client.client))
-        )
-        dispatch = _build_dispatch_closure(traced_params)
-        return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
-
     dispatch = _build_dispatch_closure(params)
+
+    if params.traceable:
+        # params.client is already a Jaxeract(TracedClient(...)) when
+        # traceable=True (apply_tesseract sets it up front) -- the closure
+        # above is identical either way, only the lowering mechanism differs:
+        # traced (mlir.lower_fun) instead of an opaque call
+        # (mlir.emit_python_callback). See tesseract_jax.direct_trace.
+        return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -1064,6 +1061,11 @@ def apply_tesseract(
         )
 
     client = Jaxeract(tesseract_client, device_transport=device_transport)
+    # abstract_eval is always dispatched through the real client -- it only
+    # ever deals in shapes/dtypes, never traced values, so there is nothing
+    # for a TracedClient to buy here. Only the actual dispatch endpoint
+    # (apply / a derivative) needs the traced client when traceable=True.
+    dispatch_client = Jaxeract(TracedClient(tesseract_client)) if traceable else client
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
@@ -1122,7 +1124,7 @@ def apply_tesseract(
             check_static_outputs=check_static_outputs,
             is_static_mask=is_static_mask,
             has_tangent=has_tangent,
-            client=client,
+            client=dispatch_client,
             eval_func="apply",
             vmap_method=vmap_method,
             materialize_jacobian=materialize_jacobian,
