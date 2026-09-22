@@ -20,7 +20,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
-from tesseract_jax.direct_trace import TracedClient, is_traceable
+from tesseract_jax.direct_trace import is_traceable, traced_tesseract
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -418,7 +418,7 @@ def tesseract_dispatch_lowering(
     dispatch = _build_dispatch_closure(params)
 
     if params.traceable:
-        # params.client is already a Jaxeract(TracedClient(...)) when
+        # params.client already wraps a traced_tesseract() shim when
         # traceable=True (apply_tesseract sets it up front) -- the closure
         # above is identical either way, only the lowering mechanism differs:
         # traced (mlir.lower_fun) instead of an opaque call
@@ -1060,12 +1060,13 @@ def apply_tesseract(
             "directly."
         )
 
-    client = Jaxeract(tesseract_client, device_transport=device_transport)
-    # abstract_eval is always dispatched through the real client -- it only
-    # ever deals in shapes/dtypes, never traced values, so there is nothing
-    # for a TracedClient to buy here. Only the actual dispatch endpoint
-    # (apply / a derivative) needs the traced client when traceable=True.
-    dispatch_client = Jaxeract(TracedClient(tesseract_client)) if traceable else client
+    # traced_tesseract() only swaps the client's dispatch endpoints; abstract_eval
+    # (called below) and everything else still delegate to the real LocalClient,
+    # so one Jaxeract serves both that call and the later bind.
+    client = Jaxeract(
+        traced_tesseract(tesseract_client) if traceable else tesseract_client,
+        device_transport=device_transport,
+    )
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
@@ -1124,7 +1125,7 @@ def apply_tesseract(
             check_static_outputs=check_static_outputs,
             is_static_mask=is_static_mask,
             has_tangent=has_tangent,
-            client=dispatch_client,
+            client=client,
             eval_func="apply",
             vmap_method=vmap_method,
             materialize_jacobian=materialize_jacobian,

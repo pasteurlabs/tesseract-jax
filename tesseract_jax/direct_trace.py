@@ -1,19 +1,24 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""A Tesseract client that traces its real endpoints instead of dispatching them.
+"""Trace a Tesseract's real dispatch endpoints instead of dispatching them.
 
-``TracedClient`` duck-types the same interface ``Jaxeract`` (in
-``tesseract_compat.py``) expects from a real ``tesseract_core.Tesseract``
-client: ``.openapi_schema``, ``.available_endpoints``, and
-``apply``/``jacobian_vector_product``/``vector_jacobian_product``/``jacobian``
-methods taking and returning plain dicts. Feeding a ``Jaxeract(TracedClient(...))``
-into the existing dispatch closure (``primitive.py``'s ``_build_dispatch_closure``)
-and lowering it with ``jax.interpreters.mlir.lower_fun`` instead of
-``mlir.emit_python_callback`` gets ``apply_tesseract(..., traceable=True)`` for
-free: every endpoint's path/tangent/placeholder bookkeeping is ``Jaxeract``'s
-existing, already-tested code, unchanged. ``TracedClient`` itself only does the
-one genuinely new thing -- validate and call the real Python endpoint directly.
+``traced_tesseract(tesseract_client)`` returns a shallow copy of
+``tesseract_client`` whose ``LocalClient`` is replaced by ``TracedClient``.
+``Tesseract``'s own ``apply``/``jacobian_vector_product``/
+``vector_jacobian_product``/``jacobian`` methods are thin forwarders to
+``self._client.run_tesseract(endpoint, payload, ...)`` -- swapping only
+``_client`` means every one of them, plus ``openapi_schema`` /
+``available_endpoints`` (which route through ``run_tesseract`` too), keeps
+working unchanged; only the four differentiable-dispatch endpoints are
+actually intercepted, everything else delegates to the real ``LocalClient``.
+Feeding this into ``Jaxeract`` and lowering the resulting dispatch closure
+with ``jax.interpreters.mlir.lower_fun`` instead of
+``mlir.emit_python_callback`` gets ``apply_tesseract(..., traceable=True)``
+for free: every endpoint's path/tangent/placeholder bookkeeping is
+``Jaxeract``'s existing, already-tested code (``tesseract_compat.py``),
+unchanged. ``TracedClient`` itself only does the one genuinely new thing --
+validate and call the real Python endpoint directly.
 
 An endpoint's ``inputs: InputSchema`` argument is validated for shape/dtype
 only, against the same ``AbstractEval_``-prefixed sibling schema
@@ -29,6 +34,7 @@ build via ``model_construct``) -- the existing ``apply_jit(inputs.model_dump())`
 recipe pattern -- for every endpoint, not just ``apply``.
 """
 
+import copy
 import functools
 import warnings
 from types import ModuleType
@@ -46,26 +52,30 @@ def _extract_api_module(
     """The real ``tesseract_api`` module backing an in-process Tesseract, or ``None``.
 
     Only a ``LocalClient`` (``Tesseract.from_tesseract_api``) has one: a
-    served (``HTTPClient``) Tesseract runs in another process. ``LocalClient``
-    doesn't keep the module itself, only the endpoint wrapper functions
-    ``tesseract_core.runtime.core.create_endpoints`` built from it -- so it's
-    recovered from the closure cell those wrappers hold it in. This depends
-    on ``create_endpoints`` closing over a free variable named ``api_module``;
-    if a future ``tesseract-core`` release changes that shape, this returns
-    ``None`` (a loud error at the call site) rather than tracing the wrong
-    thing.
+    served (``HTTPClient``) Tesseract runs in another process.
+
+    Tries the public ``LocalClient.api_module`` first (added in
+    pasteurlabs/tesseract-core#784). Falls back to recovering it from a
+    closure cell of the schema-validating endpoint wrapper
+    ``tesseract_core.runtime.core.create_endpoints`` built -- a private
+    integration point, tied to that function closing over a free variable
+    named ``api_module`` -- for tesseract-core versions before that PR.
+    TODO: delete the fallback once the floor is bumped past it.
     """
     local_client = getattr(tesseract_client, "_client", None)
+
+    api_module = getattr(local_client, "api_module", None)
+    if isinstance(api_module, ModuleType):
+        return api_module
+
     endpoints = getattr(local_client, "_endpoints", None)
     if not endpoints or endpoint not in endpoints:
         return None
-
     func = endpoints[endpoint]
     freevars = func.__code__.co_freevars
     closure = func.__closure__
     if not closure or "api_module" not in freevars:
         return None
-
     api_module = closure[freevars.index("api_module")].cell_contents
     if not isinstance(api_module, ModuleType):
         return None
@@ -177,21 +187,24 @@ def _call_with_patched_inputs(endpoint_fn: Any, **kwargs: Any) -> Any:
 
 
 class TracedClient:
-    """Duck-types a ``Tesseract`` client, tracing its real endpoints directly.
+    """Stands in for a Tesseract's ``LocalClient``, tracing four of its endpoints.
 
-    Wrap a ``Jaxeract`` around one of these instead of a real
-    ``tesseract_core.Tesseract`` to make its ``apply`` /
-    ``jacobian_vector_product`` / ``vector_jacobian_product`` / ``jacobian``
-    calls trace the underlying Python functions in-process, rather than
-    dispatching through the real client's (HTTP or validated-local) endpoint
-    boundary. See the module docstring for the mechanism and its two
-    preconditions (in-process Tesseract; dict-returning endpoints).
+    Traces ``apply``/``jacobian_vector_product``/``vector_jacobian_product``/
+    ``jacobian`` directly instead of dispatching them through the
+    schema-validated wrapper. Every other endpoint (``openapi_schema``,
+    ``abstract_eval``, ``health``, ``test``) is delegated to the real
+    ``LocalClient`` unchanged -- there is nothing to trace there
+    (``abstract_eval`` in particular only ever deals in shapes/dtypes, never
+    a traced value, so the real, fully-validated path is strictly better,
+    not just adequate).
     """
+
+    _TRACED_ENDPOINTS = frozenset(
+        {"apply", "jacobian_vector_product", "vector_jacobian_product", "jacobian"}
+    )
 
     def __init__(self, tesseract_client: Tesseract) -> None:
         self._tesseract_client = tesseract_client
-        self.openapi_schema = tesseract_client.openapi_schema
-        self.available_endpoints = tesseract_client.available_endpoints
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TracedClient):
@@ -201,56 +214,36 @@ class TracedClient:
     def __hash__(self) -> int:
         return hash((TracedClient, self._tesseract_client))
 
-    def apply(self, inputs: dict) -> dict:
-        """Trace the real ``apply`` directly."""
+    def run_tesseract(
+        self,
+        endpoint: str,
+        payload: dict | None = None,
+        run_id: str | None = None,
+        stream_logs: Any = False,
+    ) -> dict:
+        """Dispatch ``endpoint``, tracing it directly if it's one of the four traced ones."""
+        if endpoint not in self._TRACED_ENDPOINTS:
+            return self._tesseract_client._client.run_tesseract(
+                endpoint, payload, run_id, stream_logs
+            )
         api_module, schema = _abstract_inputs_schema_for(
-            self._tesseract_client, "apply"
+            self._tesseract_client, endpoint
         )
-        patched = _patch_inputs(schema, inputs)
-        out = _call_with_patched_inputs(api_module.apply, inputs=patched)
+        payload = dict(payload)
+        patched_inputs = _patch_inputs(schema, payload.pop("inputs"))
+        out = _call_with_patched_inputs(
+            getattr(api_module, endpoint), inputs=patched_inputs, **payload
+        )
         return out.model_dump() if isinstance(out, BaseModel) else out
 
-    def jacobian_vector_product(
-        self, inputs: dict, jvp_inputs: list, jvp_outputs: list, tangent_vector: dict
-    ) -> dict:
-        """Trace the real ``jacobian_vector_product`` directly."""
-        api_module, schema = _abstract_inputs_schema_for(
-            self._tesseract_client, "jacobian_vector_product"
-        )
-        patched = _patch_inputs(schema, inputs)
-        return _call_with_patched_inputs(
-            api_module.jacobian_vector_product,
-            inputs=patched,
-            jvp_inputs=jvp_inputs,
-            jvp_outputs=jvp_outputs,
-            tangent_vector=tangent_vector,
-        )
 
-    def vector_jacobian_product(
-        self, inputs: dict, vjp_inputs: list, vjp_outputs: list, cotangent_vector: dict
-    ) -> dict:
-        """Trace the real ``vector_jacobian_product`` directly."""
-        api_module, schema = _abstract_inputs_schema_for(
-            self._tesseract_client, "vector_jacobian_product"
-        )
-        patched = _patch_inputs(schema, inputs)
-        return _call_with_patched_inputs(
-            api_module.vector_jacobian_product,
-            inputs=patched,
-            vjp_inputs=vjp_inputs,
-            vjp_outputs=vjp_outputs,
-            cotangent_vector=cotangent_vector,
-        )
+def traced_tesseract(tesseract_client: Tesseract) -> Tesseract:
+    """A copy of ``tesseract_client`` that traces its dispatch endpoints directly.
 
-    def jacobian(self, inputs: dict, jac_inputs: list, jac_outputs: list) -> dict:
-        """Trace the real ``jacobian`` directly."""
-        api_module, schema = _abstract_inputs_schema_for(
-            self._tesseract_client, "jacobian"
-        )
-        patched = _patch_inputs(schema, inputs)
-        return _call_with_patched_inputs(
-            api_module.jacobian,
-            inputs=patched,
-            jac_inputs=jac_inputs,
-            jac_outputs=jac_outputs,
-        )
+    A shallow copy with ``_client`` replaced by a ``TracedClient`` wrapping
+    the original -- everything else (``._stream_logs``, etc.) is shared with
+    the original unchanged.
+    """
+    shim = copy.copy(tesseract_client)
+    shim._client = TracedClient(tesseract_client)
+    return shim
