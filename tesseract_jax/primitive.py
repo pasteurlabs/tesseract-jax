@@ -102,7 +102,7 @@ def tesseract_dispatch_abstract_eval(
 
     if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
-        # `live_input_paths` / `live_output_paths` (when provided) restrict the
+        # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
@@ -254,7 +254,7 @@ def tesseract_dispatch_jvp_rule(
     # size such a mask and it keeps the inherited value -- as does `res`, which
     # reproduces the original call over the original operands.
     #
-    # Not cosmetic: the batching rule turns `has_tangent` into `live_input_paths`,
+    # Not cosmetic: the batching rule turns `has_tangent` into `jac_input_paths`,
     # i.e. which columns of the Jacobian get requested, so an inherited mask
     # over-fetches whenever only some arguments are differentiated.
     # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the

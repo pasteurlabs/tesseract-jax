@@ -6,9 +6,9 @@
 Forward-mode AD requests the derivative of *every* differentiable output even
 when only a few survive downstream (e.g. ``jacfwd`` of a function that returns
 one leaf of a multi-output Tesseract). JAX exposes the survivors to a primitive's
-DCE rule, letting us narrow the requested sub-block (``live_output_paths`` /
-``live_input_paths``) and drop the dead outvars so the Tesseract computes only
-what is used.
+DCE rule, letting us narrow the requested sub-block (the ``jac_*_paths`` for a
+``jacobian``, ``live_output_paths`` for a ``jacobian_vector_product``) and drop
+the dead outvars so the Tesseract computes only what is used.
 
 Like :mod:`tesseract_jax.batching`, this module holds primitive-agnostic logic —
 it operates purely on the ``JaxprEqn`` and never imports ``tesseract_dispatch_p``;
@@ -39,12 +39,13 @@ def tesseract_dispatch_dce_rule(
     """Drop dead derivative outputs from a ``tesseract_dispatch`` equation.
 
     JAX surfaces which outputs survive downstream as ``used_outputs``; we narrow
-    the requested sub-block (via ``live_output_paths`` / ``live_input_paths``) and
-    drop the dead outvars so the Tesseract computes only what is used.
+    the requested sub-block (the ``jac_*_paths`` for a ``jacobian``,
+    ``live_output_paths`` for a ``jacobian_vector_product``) and drop the dead
+    outvars so the Tesseract computes only what is used.
 
     Only ``jacobian`` and ``jacobian_vector_product`` carry prunable output
     structure; ``apply`` and ``vector_jacobian_product`` defer to JAX's default
-    rule. This optimisation only kicks in when JAX runs DCE — i.e. under ``jit``
+    rule. This optimization only kicks in when JAX runs DCE — i.e. under ``jit``
     (any mode) and un-jitted reverse mode; un-jitted ``jacfwd`` is unaffected.
 
     Inputs are always kept: the endpoints evaluate the full primal regardless of

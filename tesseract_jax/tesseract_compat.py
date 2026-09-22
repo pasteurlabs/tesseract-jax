@@ -408,8 +408,9 @@ class Jaxeract:
         )
 
         # Emit only the output tangents that survived DCE (``live_output_paths``).
-        # ``live_output_positions`` is the single source of truth for which leaves
-        # we return and in what order; abstract_eval sizes its result the same way.
+        # ``live_jvp_output_positions`` is the single source of truth for which
+        # leaves we return and in what order; abstract_eval sizes its result the
+        # same way.
         live_positions = live_jvp_output_positions(
             params.output_pytreedef,
             len(params.output_avals),
