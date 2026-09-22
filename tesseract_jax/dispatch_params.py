@@ -32,12 +32,16 @@ class DispatchParams:
         input_pytreedef: Treedef to reassemble the flat operands into inputs.
         output_pytreedef: Treedef for the outputs, taken from ``abstract_eval``.
         output_avals: Shape/dtype of each flat output, taken from ``abstract_eval``.
-        is_static_mask: One flag per input leaf, ``True`` where the leaf is a
+        static_input_mask: One flag per input leaf, ``True`` where the leaf is a
             non-array (static) value; arrays, concrete or traced, are ``False``.
-        has_tangent: One flag per non-static input, ``True`` where a (co)tangent
-            is carried for it.
+        has_tangent: One flag per non-static input, ``True`` where it carries a
+            nonzero tangent (apply/JVP) or receives a nonzero cotangent (VJP).
         static_output_mask: One flag per output leaf, ``True`` where the leaf is a
             non-array (static) value that never enters the bind.
+        has_cotangent: One flag per non-static output, ``True`` where a non-zero
+            cotangent is carried for it. A ``vector_jacobian_product`` skips the
+            outputs whose cotangent is a symbolic zero, since they add nothing to
+            the input gradients. Empty outside a ``vector_jacobian_product``.
         static_output_values: The value of each static output leaf, as reported by
             ``abstract_eval``. ``apply`` compares these against what the endpoint
             returns; the other endpoints leave it empty.
@@ -57,11 +61,12 @@ class DispatchParams:
     input_pytreedef: PyTreeDef
     output_pytreedef: PyTreeDef
     output_avals: tuple[ShapeDtypeStruct, ...]
-    is_static_mask: tuple[bool, ...]
+    static_input_mask: tuple[bool, ...]
     has_tangent: tuple[bool, ...]
     client: "Jaxeract"
     eval_func: str
     static_output_mask: tuple[bool, ...] = ()
+    has_cotangent: tuple[bool, ...] = ()
     static_output_values: tuple[Any, ...] = ()
     check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None
@@ -73,7 +78,7 @@ class DispatchParams:
     @property
     def n_primals(self) -> int:
         """Number of non-static input leaves."""
-        return len(self.is_static_mask) - sum(self.is_static_mask)
+        return len(self.static_input_mask) - sum(self.static_input_mask)
 
     def replace(self, **changes: Any) -> "DispatchParams":
         """Return a copy with the given fields overridden."""

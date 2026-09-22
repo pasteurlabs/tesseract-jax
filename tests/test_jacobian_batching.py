@@ -378,6 +378,64 @@ def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
     assert captured["jac_inputs"] == ["x"]
 
 
+def test_jacrev_partial_output_restricts_jac_outputs(
+    pytree_tess, pytree_tess_inputs, monkeypatch
+):
+    """``jacrev`` of one of several diff outputs requests only that output's rows.
+
+    On the batched VJP shortcut the unused outputs carry symbolic-zero
+    cotangents. ``has_cotangent`` records that, so the ``jacobian`` request must
+    drop them rather than materialize (and contract against zero) every row.
+    """
+    inputs = {k: jax.tree.map(jnp.asarray, v) for k, v in pytree_tess_inputs.items()}
+
+    captured: dict[str, Any] = {}
+    orig_jac = pytree_tess.jacobian
+    orig_vjp = pytree_tess.vector_jacobian_product
+
+    def spy_jac(*, inputs, jac_inputs, jac_outputs):
+        captured["jac_outputs"] = sorted(jac_outputs)
+        return orig_jac(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
+
+    def spy_vjp(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
+        captured["vjp_outputs"] = sorted(vjp_outputs)
+        return orig_vjp(
+            inputs=inputs,
+            vjp_inputs=vjp_inputs,
+            vjp_outputs=vjp_outputs,
+            cotangent_vector=cotangent_vector,
+        )
+
+    monkeypatch.setattr(pytree_tess, "jacobian", spy_jac)
+    monkeypatch.setattr(pytree_tess, "vector_jacobian_product", spy_vjp)
+
+    def f(x):
+        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
+        # Only `result` enters. result_dict / result_list stay unused, so JAX
+        # hands their cotangents in as symbolic zeros.
+        return apply_tesseract(pytree_tess, i)["result"]
+
+    x = inputs["alpha"]["x"]
+    got = jax.jacrev(f)(x)
+
+    # Reference via the sequential VJP path (no jacobian-materialization shortcut).
+    def f_seq(x):
+        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
+        return apply_tesseract(
+            pytree_tess, i, materialize_jacobian=False, vmap_method="sequential"
+        )["result"]
+
+    expected = jax.jacrev(f_seq)(x)
+    np.testing.assert_allclose(got, expected, rtol=1e-5)
+    assert captured["jac_outputs"] == ["result"], (
+        f"expected only 'result' rows to be requested, got {captured['jac_outputs']}"
+    )
+    # The sequential reference path prunes the same unused outputs.
+    assert captured["vjp_outputs"] == ["result"], (
+        f"expected only 'result' cotangents to be requested, got {captured['vjp_outputs']}"
+    )
+
+
 def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
     """``jacfwd`` of a linearized function wrt one argument narrows the request too.
 

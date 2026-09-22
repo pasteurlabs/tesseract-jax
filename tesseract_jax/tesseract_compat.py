@@ -47,13 +47,12 @@ def _on_device(values: "list | tuple") -> bool:
 def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype`` without leaving the device.
 
-    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
-
-    On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer, so casting here would
-    force a device->host round-trip; it is returned untouched. That is not a
+    On the host path ``value`` is a NumPy array, cast to ``dtype`` here. On the
+    cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the FFI
+    handler copies straight into XLA's output buffer, so casting here would force
+    a device->host round-trip; it is returned untouched. Since that does not
     guarantee the device array already has ``dtype`` (tesseract-core does not pin
-    a jacobian endpoint's output dtype), so the native shim compares each result's
+    a jacobian endpoint's output dtype), the native shim checks each result's
     dtype and shape against the XLA output buffer and raises on a mismatch rather
     than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
@@ -328,7 +327,7 @@ class Jaxeract:
             array_args,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
         )
 
         out_data = self.client.apply(inputs)
@@ -377,13 +376,16 @@ class Jaxeract:
         full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
         tangent_inputs = unflatten_args(
             full_tangents,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
             remove_static_args=True,
         )
 
@@ -437,7 +439,10 @@ class Jaxeract:
         primals = array_args[:n_primals]
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
@@ -496,7 +501,10 @@ class Jaxeract:
         cotangents = array_args[n_primals:]
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
 
         flat_inputs = _pytree_to_tesseract_flat(
@@ -504,11 +512,22 @@ class Jaxeract:
         )
 
         vjp_inputs = [
-            p for p, m in zip(flat_inputs, params.is_static_mask, strict=True) if not m
+            p
+            for p, m in zip(flat_inputs, params.static_input_mask, strict=True)
+            if not m
         ]
 
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
+
+        # Scatter cotangents back to full non-static-output width, inserting
+        # ``None`` where the cotangent was a symbolic zero.
+        if params.has_cotangent:
+            assert len(cotangents) == sum(params.has_cotangent)
+            cotan_iter = iter(cotangents)
+            cotangents = tuple(
+                next(cotan_iter) if h else None for h in params.has_cotangent
+            )
 
         # A static output leaf carries no cotangent, so fill its slot with None.
         # None is an empty pytree node and drops back out when the tree is
@@ -533,34 +552,8 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        # JAX expects gradients for all inputs, even non-differentiable ones.
-        # Reconstruct the full output tuple in the same order as flat_inputs.
-        out = []
-        # all_idx indexes into flat_inputs, none_mask, and is_static_mask
-        array_idx = 0  # Index into array_args (which excludes static inputs)
-        tan_idx = 0  # Index into tangents/cotangents (which excludes non-differentiable inputs)
-        for all_idx, path in enumerate(flat_inputs):
-            if path in out_data:
-                # Path has a gradient from the server
-                out.append(out_data[path])
-                tan_idx += 1
-            elif (
-                tan_idx < len(has_tangent)
-                and not params.is_static_mask[all_idx]
-                and not has_tangent[tan_idx]
-            ):
-                # Non-differentiable but non-static input: emit a placeholder of
-                # the same shape/dtype as the corresponding input array. The slot
-                # exists for the tuple-length contract; JAX's transpose machinery
-                # doesn't consume it for any user-requested derivative.
-                arg = array_args[array_idx]
-                out.append(
-                    _placeholder(arg.shape, arg.dtype, on_device=_on_device([arg]))
-                )
-                tan_idx += 1
-
-            # Increment array_idx only for non-static inputs (which appear in array_args)
-            if not params.is_static_mask[all_idx]:
-                array_idx += 1
-
-        return tuple(out)
+        # Only differentiated inputs carry a cotangent back. A non-differentiated
+        # input's slot is never consumed by JAX's transpose, so we omit it here;
+        # abstract_eval declares the matching (shorter) output arity and the
+        # transpose rule scatters these back into full primal order.
+        return tuple(out_data[path] for path in flat_inputs if path in out_data)
