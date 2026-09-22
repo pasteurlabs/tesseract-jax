@@ -15,7 +15,6 @@ it operates purely on the ``JaxprEqn`` and never imports ``tesseract_dispatch_p`
 the rule is registered against the primitive in :mod:`tesseract_jax.primitive`.
 """
 
-import jax.tree
 from jax._src.interpreters import partial_eval as pe
 
 try:
@@ -29,6 +28,7 @@ except ImportError:  # pragma: no cover - exercised only on older JAX
 
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
+    dummy_output_tree,
     live_jvp_output_positions,
 )
 
@@ -55,7 +55,7 @@ def tesseract_dispatch_dce_rule(
     if not any(used_outputs):
         return pe._default_dce_rule(used_outputs, eqn)
 
-    eval_func = eqn.params["eval_func"]
+    eval_func = eqn.params["params"].eval_func
     if eval_func == "jacobian":
         return _dce_jacobian(used_outputs, eqn)
     if eval_func == "jacobian_vector_product":
@@ -67,8 +67,9 @@ def _dce_jacobian(
     used_outputs: list[bool], eqn: JaxprEqn
 ) -> tuple[list[bool], JaxprEqn | None]:
     """Prune a ``jacobian`` equation's (out x in) block grid to its live rectangle."""
-    in_paths = eqn.params.get("live_input_paths")
-    out_paths = eqn.params.get("live_output_paths")
+    dispatch_params = eqn.params["params"]
+    in_paths = dispatch_params.jac_input_paths
+    out_paths = dispatch_params.jac_output_paths
     if in_paths is None or out_paths is None:
         # No explicit path layout to map ``used_outputs`` onto; keep everything.
         return [True] * len(eqn.invars), eqn
@@ -81,8 +82,10 @@ def _dce_jacobian(
 
     new_params = dict(
         eqn.params,
-        live_output_paths=tuple(out_paths[i] for i in live_out),
-        live_input_paths=tuple(in_paths[j] for j in live_in),
+        params=dispatch_params.replace(
+            jac_output_paths=tuple(out_paths[i] for i in live_out),
+            jac_input_paths=tuple(in_paths[j] for j in live_in),
+        ),
     )
     # Emit the live rectangle in the same row-major order abstract_eval expects.
     # Blocks inside the rectangle that are individually dead become DropVars.
@@ -100,20 +103,25 @@ def _dce_jacobian_vector_product(
     used_outputs: list[bool], eqn: JaxprEqn
 ) -> tuple[list[bool], JaxprEqn | None]:
     """Prune a ``jacobian_vector_product`` equation's dead output tangents."""
-    params = eqn.params
-    client = params["client"]
-    output_pytreedef = params["output_pytreedef"]
-    n_outputs = len(params["output_avals"])
+    dispatch_params = eqn.params["params"]
+    client = dispatch_params.client
+    output_pytreedef = dispatch_params.output_pytreedef
+    n_outputs = len(dispatch_params.output_avals)
+    static_output_mask = dispatch_params.static_output_mask
     diff_output_paths = client.differentiable_output_paths
 
     # Positions this bind currently emits (in output_avals order). Must line up
     # 1:1 with ``used_outputs`` / ``eqn.outvars``.
     cur_positions = live_jvp_output_positions(
-        output_pytreedef, n_outputs, diff_output_paths, params.get("live_output_paths")
+        output_pytreedef,
+        n_outputs,
+        diff_output_paths,
+        dispatch_params.live_output_paths,
+        static_output_mask,
     )
     flat_items = list(
         _pytree_to_tesseract_flat(
-            jax.tree.unflatten(output_pytreedef, range(n_outputs)),
+            dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
             schema_paths=diff_output_paths,
         ).items()
     )
@@ -132,5 +140,7 @@ def _dce_jacobian_vector_product(
             live_paths.append(path)
         # else: differentiable but dead -> dropped from the output contract.
 
-    new_params = dict(params, live_output_paths=tuple(live_paths))
+    new_params = dict(
+        eqn.params, params=dispatch_params.replace(live_output_paths=tuple(live_paths))
+    )
     return [True] * len(eqn.invars), eqn.replace(outvars=new_outvars, params=new_params)

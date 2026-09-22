@@ -7,10 +7,8 @@ Tests use the (nonlinear) Rosenbrock tesseract unless they need several
 differentiable inputs: a linear tesseract makes the Jacobian the identity, which
 renders most assertions here tautological.
 
-Every test is parametrised over ``use_jit`` because the two settings dispatch
-through separately registered code paths -- ``tesseract_dispatch_p.def_impl``
-when eager, ``mlir.register_lowering`` when staged out -- so a change can break
-one without the other.
+Every test is parametrised over ``use_jit`` to check that an eager call and one
+staged out under ``jit`` agree.
 """
 
 import jax
@@ -213,6 +211,78 @@ def test_jvp_of_vjp_fn(univariate_tess, use_jit):
 
     np.testing.assert_allclose(primal_out[0], vjp_fn(ct)[0], rtol=1e-5)
     np.testing.assert_allclose(tangent_out[0], vjp_fn(dct)[0], rtol=1e-5)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_transpose_of_vjp_fn(univariate_tess, use_jit):
+    """The VJP endpoint's transpose wrt its cotangent slot is the JVP endpoint.
+
+    Regression test for #266: reverse mode through vjp_fn's cotangent (grad,
+    linear_transpose) used to hit a bare AssertionError, even though forward
+    mode (test_jvp_of_vjp_fn) already worked.
+    """
+    x = np.array(1.5, dtype="float64")
+    y = np.array(0.5, dtype="float64")
+    ct = np.array(1.0, dtype="float64")
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y))["result"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _primal_out, vjp_fn = jax.vjp(f, x)
+    g = lambda ct: vjp_fn(ct)[0]
+
+    _, expected = jax.jvp(f, (x,), (1.0,))
+
+    grad_out = jax.grad(g)(ct)
+    np.testing.assert_allclose(grad_out, expected, rtol=1e-5)
+
+    (transposed,) = jax.linear_transpose(g, ct)(ct)
+    np.testing.assert_allclose(transposed, expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_transpose_of_vjp_fn_with_undifferentiated_array_primals(
+    univariate_tess, use_jit
+):
+    """Canary for a VJP-arity assumption in the transpose rule's ``else`` branch.
+
+    ``a``/``b`` are passed as real arrays (not left at their schema defaults),
+    so ``n_primals`` (4: x, y, a, b) is strictly larger than the number of
+    differentiated primals (1: x). Today the VJP bind's own output is
+    ``n_primals``-long regardless of ``has_tangent``, which is what
+    ``tesseract_dispatch_transpose_rule``'s ``else`` branch assumes when it
+    zips the incoming cotangent against ``_flat_inputs`` (strict=True).
+
+    PR #263 shrinks that output to just the differentiated primals. If it
+    lands without updating the transpose rule's ``else`` branch to match,
+    this test should start failing loudly (a ``strict=True`` zip
+    length-mismatch, not a silently wrong gradient) -- that failure is the
+    signal that the `else` branch needs a coordinated update for the new
+    VJP arity contract, the same way the rest of the file was updated in
+    that PR.
+    """
+    x = np.array(1.5, dtype="float64")
+    y, a, b = (np.array(v, dtype="float64") for v in (0.5, 1.0, 100.0))
+
+    def f(x):
+        return apply_tesseract(univariate_tess, inputs=dict(x=x, y=y, a=a, b=b))[
+            "result"
+        ]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    _primal_out, vjp_fn = jax.vjp(f, x)
+    g = lambda ct: vjp_fn(ct)[0]
+    ct = np.array(1.0, dtype="float64")
+
+    _, expected = jax.jvp(f, (x,), (1.0,))
+
+    grad_out = jax.grad(g)(ct)
+    np.testing.assert_allclose(grad_out, expected, rtol=1e-5)
 
 
 @pytest.mark.parametrize("argnums", [0, 1])

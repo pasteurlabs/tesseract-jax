@@ -133,3 +133,79 @@ Note that the cotangent/tangent pytree structure must always match the function'
 ValueError: unexpected tree structure of argument to vjp function:
   got PyTreeDef({'nondiff_res': *, 'result': *}), but expected PyTreeDef({'result': *})
 ```
+
+## Non-array outputs
+
+An `OutputSchema` may carry fields that are not arrays at all, such as a backend
+name or a convergence flag:
+
+```python
+class OutputSchema(BaseModel):
+    y: Differentiable[Array[(3,), Float64]]
+    backend: str = "reference"
+    converged: bool = True
+```
+
+`apply_tesseract` returns those fields next to the arrays. They are plain Python
+objects rather than tracers, so a `jit`-ed function can branch on them at trace time:
+
+```python
+@jax.jit
+def f(x):
+    out = apply_tesseract(tess, {"x": x})
+    scale = 1.0 if out["converged"] else 0.0
+    return out["y"] * scale
+```
+
+A JAX primitive can only return arrays, so a non-array field never enters the
+computation. `apply_tesseract` takes its value from `abstract_eval` and puts it
+back into the output pytree afterwards. Whatever `apply` returns for that field
+is therefore ignored, and `apply_tesseract` warns when the two disagree:
+
+```
+UserWarning: Tesseract returned the static output ['backend'] as 'fallback' from
+apply, but abstract_eval reported 'reference'. ...
+```
+
+A field whose value depends on the input values belongs in the schema as an array
+instead.
+
+### Turning the check off
+
+Pass `check_static_outputs=False` to skip the comparison for one call, or set
+`TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip it for the whole program. The keyword
+argument wins when both are set:
+
+```python
+out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
+```
+
+Skipping the check avoids building the keypaths the warning needs. The values the
+caller receives are the same either way.
+
+## Higher-order derivatives
+
+Tesseracts only expose first derivatives (the `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints), so a function that calls `apply_tesseract` can be differentiated once, but not twice:
+
+```python
+def f(x):
+    return apply_tesseract(tess, {"x": x})["y"]
+
+jax.grad(f)(x)  # ✅ first derivative
+
+jax.hessian(f)(x)
+# RuntimeError: Cannot take higher-order derivatives of 'jacobian'
+
+jax.grad(jax.grad(f))(x)
+# RuntimeError: Cannot differentiate a Tesseract derivative endpoint with respect
+# to its primal inputs, as this needs a second derivative.
+```
+
+Which of the two errors you see depends on how the second derivative is taken. "Primal inputs" means the values `f` is evaluated at, here `x`.
+
+Differentiating with respect to a tangent / cotangent works, because a derivative is linear in its direction:
+
+```python
+v = jnp.ones_like(x)
+jax.grad(lambda v: jax.jvp(f, (x,), (v,))[1])(v)  # ✅
+```

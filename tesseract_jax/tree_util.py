@@ -1,13 +1,36 @@
+import warnings
 from collections.abc import Iterable, Sequence
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 import jax.tree
-from jax.core import ShapedArray
+import numpy as np
 from jax.tree_util import PyTreeDef
-from jax.typing import ArrayLike
 
 T = TypeVar("T")
 type PyTree = Any
+
+
+@runtime_checkable
+class TransportArray(Protocol):
+    """Structural type for an array crossing the dispatch boundary.
+
+    The endpoint methods are transport-agnostic: the CPU host-callback lowering
+    passes real NumPy arrays, while the GPU FFI lowering passes bare
+    ``__cuda_array_interface__`` device views (see
+    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
+    ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
+    ``dtype``, so this protocol captures exactly that surface.
+    """
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        """Array shape."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype:
+        """Array dtype."""
+        ...
 
 
 def split_args[T](
@@ -39,25 +62,23 @@ def combine_args(args0: Sequence, args1: Sequence, mask: Sequence[bool]) -> tupl
 
 
 def unflatten_args(
-    array_args: tuple[ArrayLike | ShapedArray, ...],
+    # ``array_args`` is transport-dependent: real arrays / avals on the CPU
+    # host-callback path, or bare ``__cuda_array_interface__`` device views on
+    # the GPU FFI path. ``None`` marks an argument with no tangent -- the JVP
+    # rule passes such a sentinel per non-differentiated input. ``Any`` admits
+    # all three so a runtime type-check does not reject the duck-typed GPU views.
+    array_args: tuple[Any, ...],
     static_args: tuple[Any, ...],
     input_pytreedef: PyTreeDef,
-    is_static_mask: tuple[bool, ...],
+    static_input_mask: tuple[bool, ...],
     remove_static_args: bool = False,
 ) -> PyTree:
     """Unflatten lists of arguments (static and not) into a pytree."""
     if remove_static_args:
-        static_args_converted = [None] * len(static_args)
-    else:
-        static_args_converted = [
-            elem.wrapped if hasattr(elem, "wrapped") else elem for elem in static_args
-        ]
+        static_args = (None,) * len(static_args)
 
-    combined_args = combine_args(array_args, static_args_converted, is_static_mask)
+    combined_args = combine_args(array_args, static_args, static_input_mask)
     result = jax.tree.unflatten(input_pytreedef, combined_args)
-
-    if remove_static_args:
-        result = _prune_nones(result)
 
     # Since jax 0.8, when tracing stuff without jit arrays are wrapped
     # by TypedNdArray (thin wrapper around a numpy array); this snippet converts them
@@ -75,29 +96,53 @@ def unflatten_args(
     return result
 
 
-def _prune_nones(tree: PyTree) -> PyTree:
-    if isinstance(tree, dict):
-        return {k: _prune_nones(v) for k, v in tree.items() if v is not None}
-    elif isinstance(tree, tuple | list):
-        return type(tree)(_prune_nones(v) for v in tree if v is not None)
-    else:
-        return tree
+def _split_path(path: str) -> list[str]:
+    """Split a path on the dots that separate segments.
+
+    A dot inside ``{...}`` belongs to the key, so ``a.{b.c}`` is two segments
+    rather than three.
+    """
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for char in path:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        if char == "." and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(char)
+    parts.append("".join(buf))
+    return parts
 
 
 def _merge_path(
-    explicit_path: str, array_paths: Iterable[str]
+    explicit_path: str | Sequence[str], array_paths: Iterable[str]
 ) -> tuple[str, str | None]:
     """Merges and formats explicit path with array paths containing templates.
 
     Returns a tuple of (formatted_path, matched_template) where matched_template
     is the template string that matched, or None if no template matched.
 
+    ``explicit_path`` may be given as the already-joined string or as the
+    segments it was built from. A dict key is free to contain dots, so passing
+    the segments is the only way to say where one ends; joining first and
+    splitting again cannot tell ``{"a": {"b.c": v}}`` from ``{"a": {"b": {"c": v}}}``.
+
     Examples:
         _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
         _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
         _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
+        _merge_path(['params', 'a.b'], ['params.{}']) -> ('params.{a.b}', 'params.{}')
     """
-    explicit_parts = explicit_path.split(".")
+    if isinstance(explicit_path, str):
+        explicit_parts = _split_path(explicit_path)
+    else:
+        explicit_parts = list(explicit_path)
+
     for array_path in array_paths:
         template_parts = array_path.split(".")
         if len(template_parts) != len(explicit_parts):
@@ -109,7 +154,9 @@ def _merge_path(
             if tp == ep:
                 result_parts.append(ep)
             elif tp == "{}":
-                result_parts.append(f"{{{ep}}}")
+                # Idempotent: batching re-merges paths this function produced.
+                already = ep.startswith("{") and ep.endswith("}")
+                result_parts.append(ep if already else f"{{{ep}}}")
             elif tp == "[]":
                 result_parts.append(ep)  # already "[n]"
             else:
@@ -119,7 +166,7 @@ def _merge_path(
         if matched:
             return ".".join(result_parts), array_path
 
-    return explicit_path, None
+    return ".".join(explicit_parts), None
 
 
 def live_jvp_output_positions(
@@ -127,6 +174,7 @@ def live_jvp_output_positions(
     n_outputs: int,
     diff_output_paths: dict[str, Any],
     live_output_paths: tuple[str, ...] | None,
+    static_output_mask: Sequence[bool] = (),
 ) -> list[int]:
     """Output-leaf positions a ``jacobian_vector_product`` bind should emit.
 
@@ -137,12 +185,16 @@ def live_jvp_output_positions(
     ``live_output_paths is None`` means "keep everything" (the un-pruned default,
     e.g. when DCE never ran).
 
+    Static (non-array) output leaves never enter the bind, so ``static_output_mask``
+    drops them from the layout via :func:`dummy_output_tree`; the positions returned
+    then index ``output_avals``, which holds arrays only.
+
     This is the single source of truth shared by ``abstract_eval`` (which sizes
     the primitive's outputs) and ``Jaxeract.jacobian_vector_product`` (which
     assembles them); keeping them in lock-step is what makes pruning safe.
     """
     output_flat = _pytree_to_tesseract_flat(
-        jax.tree.unflatten(output_pytreedef, range(n_outputs)),
+        dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
         schema_paths=diff_output_paths,
     )
     positions = []
@@ -176,21 +228,82 @@ def _pytree_to_tesseract_flat(
 
     flat_dict = {}
     for jax_path, val in leaves:
-        tesseract_path = ""
+        # Keep the segments rather than joining them: a dict key may itself
+        # contain a dot, and joining first loses where the key ends.
+        path_parts: list[str] = []
         for elem in jax_path:
             # for handling dicts
             if hasattr(elem, "key"):
-                tesseract_path += f".{elem.key}"
+                path_parts.append(str(elem.key))
             # for handling lists/tuples
             elif hasattr(elem, "idx"):
-                tesseract_path += f".[{elem.idx}]"
-        # remove leading dot
-        tesseract_path = tesseract_path.lstrip(".")
+                path_parts.append(f"[{elem.idx}]")
 
-        tesseract_path, matched_template = _merge_path(
-            tesseract_path, schema_paths or []
-        )
+        tesseract_path, matched_template = _merge_path(path_parts, schema_paths or [])
 
         flat_dict[tesseract_path] = val if matched_template else None
 
     return flat_dict
+
+
+def _leaves_differ(returned: Any, expected: Any) -> bool:
+    """Whether two static leaves disagree.
+
+    For a served Tesseract, static leaves are JSON-decoded response data, so
+    ``!=`` always returns a bool and settles it. ``Tesseract.from_tesseract_api``
+    can return other types, since it hands back the objects the Python function
+    built directly. If ``abstract_eval`` reports a numpy array for a field, that
+    field counts as static, and ``a != b`` on two arrays is itself an array that
+    ``bool()`` rejects. The identity fallback covers that case.
+    """
+    try:
+        return bool(returned != expected)
+    except (TypeError, ValueError):
+        return returned is not expected
+
+
+def warn_on_static_output_drift(
+    paths: Sequence[Any],
+    returned_values: Sequence[Any],
+    expected_values: Sequence[Any],
+) -> None:
+    """Warn about static output leaves whose runtime value is not the traced one.
+
+    ``apply_tesseract`` returns the value ``abstract_eval`` reported for a static
+    leaf, so a different value from ``apply`` is never used. Warn rather than drop
+    it silently, since the caller would otherwise read a value the Tesseract did
+    not return from ``apply``.
+    """
+    for path, returned, expected in zip(
+        paths, returned_values, expected_values, strict=True
+    ):
+        if not _leaves_differ(returned, expected):
+            continue
+        warnings.warn(
+            f"Tesseract returned the static output {jax.tree_util.keystr(path)} as "
+            f"{returned!r} from apply, but abstract_eval reported {expected!r}. "
+            f"Static outputs are read at trace time, so the value from "
+            f"abstract_eval is the one apply_tesseract returns and the value from "
+            f"apply is ignored.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
+def dummy_output_tree(
+    output_pytreedef: Any,
+    n_avals: int,
+    static_output_mask: Sequence[bool] = (),
+) -> Any:
+    """The output pytree with each array leaf holding its own aval index.
+
+    Static leaves get ``None``, an empty pytree node, so they drop out when the
+    tree is flattened. ``_pytree_to_tesseract_flat`` therefore never sees a static
+    output, and the path-to-position maps built from this tree line up with
+    ``output_avals``, which holds arrays only.
+    """
+    if not any(static_output_mask):
+        return jax.tree.unflatten(output_pytreedef, range(n_avals))
+    idx = iter(range(n_avals))
+    leaves = [None if static else next(idx) for static in static_output_mask]
+    return jax.tree.unflatten(output_pytreedef, leaves)

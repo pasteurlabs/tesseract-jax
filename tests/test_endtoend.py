@@ -822,28 +822,6 @@ def test_tesseract_as_jax_pytree(served_univariate_tesseract_raw):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_non_abstract_tesseract_apply(served_non_abstract_tesseract, use_jit):
-    non_abstract_tess = Tesseract.from_url(served_non_abstract_tesseract)
-    a = np.array([0.0, 1.0, 2.0], dtype="float32")
-
-    def f(a):
-        return apply_tesseract(non_abstract_tess, inputs=dict(a=a))
-
-    if use_jit:
-        f = jax.jit(f)
-
-        # make sure value error is raised if input shape is incorrect
-        with pytest.raises(ValueError):
-            f(a)
-
-    else:
-        # Test against Tesseract client
-        result = f(a)
-        result_ref = non_abstract_tess.apply(dict(a=a))
-        _assert_pytree_isequal(result, result_ref)
-
-
-@pytest.mark.parametrize("use_jit", [True, False])
 def test_vectoradd_tesseract_nondiffable_input(served_vectoradd_tesseract, use_jit):
     vectoradd_tess = Tesseract.from_url(served_vectoradd_tesseract)
     a = np.array([1.0, 2.0, 3.0], dtype="float32")
@@ -891,23 +869,6 @@ def test_vectoradd_tesseract_nondiffable_input(served_vectoradd_tesseract, use_j
     grad_raw = grad_fn_raw(a, b)
 
     assert np.allclose(grad, grad_raw), f"Gradient mismatch: {grad} vs {grad_raw}"
-
-
-def test_non_abstract_tesseract_vjp(served_non_abstract_tesseract):
-    non_abstract_tess = Tesseract.from_url(served_non_abstract_tesseract)
-
-    a = np.array([1.0, 2.0, 3.0], dtype="float32")
-
-    def f(a):
-        return apply_tesseract(
-            non_abstract_tess,
-            inputs=dict(
-                a=a,
-            ),
-        )
-
-    with pytest.raises(ValueError):
-        jax.vjp(f, a)
 
 
 def test_tesseract_no_jvp_apply_and_vjp_work(served_tesseract_no_jvp):

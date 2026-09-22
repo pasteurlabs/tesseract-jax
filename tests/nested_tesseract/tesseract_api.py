@@ -3,7 +3,7 @@
 
 import numpy as np
 from pydantic import BaseModel, Field
-from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
 
 
 class Scalars(BaseModel):
@@ -97,14 +97,24 @@ def jacobian(inputs: InputSchema, jac_inputs: set[str], jac_outputs: set[str]):
 
 
 def abstract_eval(abstract_inputs):
-    """Calculate output shape of apply from the shape of its inputs."""
+    """Calculate output shape of apply from the shape of its inputs.
+
+    The OutputSchema declares every field as Float32, and apply coerces its
+    outputs to match, so report float32 here regardless of the input dtype.
+    Echoing the input dtype would drift from apply whenever a caller passes a
+    float64 value (e.g. a coerced Python scalar) for a float32 field.
+    """
+
+    def as_float32(aval):
+        return ShapeDType(shape=aval.shape, dtype="float32")
+
     return {
         "scalars": {
-            "a": abstract_inputs.scalars.a,
-            "b": abstract_inputs.scalars.b,
+            "a": as_float32(abstract_inputs.scalars.a),
+            "b": as_float32(abstract_inputs.scalars.b),
         },
         "vectors": {
-            "v": abstract_inputs.vectors.v,
-            "w": abstract_inputs.vectors.w,
+            "v": as_float32(abstract_inputs.vectors.v),
+            "w": as_float32(abstract_inputs.vectors.w),
         },
     }
