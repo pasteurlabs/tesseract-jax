@@ -5,10 +5,12 @@ import contextlib
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
+import jax.numpy as jnp
 import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
 
+from tesseract_jax.direct_trace import TracedClient
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
@@ -24,8 +26,12 @@ from tesseract_jax.tree_util import (
 if TYPE_CHECKING:
     from tesseract_jax.dispatch_params import DispatchParams
 
-# WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
-# and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+# WARNING: Do NOT use jax.numpy within Jaxeract methods when ``self.client`` is a
+# real Tesseract client -- these run from within an FFI callback and cannot safely
+# allocate JAX arrays there. Use vanilla numpy instead. The one exception is
+# ``TracedClient`` (tesseract_jax.direct_trace): wrapped around one, these methods
+# run during ordinary JAX tracing instead of inside a callback, where jax.numpy is
+# required (numpy raises on a Tracer).
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -157,7 +163,7 @@ class Jaxeract:
 
     def __init__(
         self,
-        tesseract_client: Tesseract,
+        tesseract_client: Tesseract | TracedClient,
         *,
         device_transport: str | None = None,
     ) -> None:
@@ -475,7 +481,14 @@ class Jaxeract:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                out.append(_cast_return(out_data[op][ip], dtype=target))
+                value = out_data[op][ip]
+                # A TracedClient's value is a Tracer mid-trace, not a concrete
+                # array or device pointer -- np.asarray (_cast_return) raises
+                # on it; jnp.asarray is the traced equivalent.
+                if isinstance(self.client, TracedClient):
+                    out.append(jnp.asarray(value, dtype=target))
+                else:
+                    out.append(_cast_return(value, dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(

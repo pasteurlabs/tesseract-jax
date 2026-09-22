@@ -20,7 +20,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
-from tesseract_jax.direct_trace import build_direct_endpoint, is_traceable
+from tesseract_jax.direct_trace import TracedClient, is_traceable
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -416,10 +416,15 @@ def tesseract_dispatch_lowering(
     _raise_if_unimplemented(params.eval_func, params.client)
 
     if params.traceable:
-        # Inline and trace the real endpoint (see tesseract_jax.direct_trace)
-        # instead of dispatching it as an opaque call.
-        direct_endpoint = build_direct_endpoint(params)
-        return mlir.lower_fun(direct_endpoint, multiple_results=True)(ctx, *array_args)
+        # Reuses the same dispatch closure as the callback path below, just
+        # aimed at a TracedClient and traced (mlir.lower_fun) instead of
+        # dispatched through an opaque call (mlir.emit_python_callback) -- see
+        # tesseract_jax.direct_trace.
+        traced_params = params.replace(
+            client=Jaxeract(TracedClient(params.client.client))
+        )
+        dispatch = _build_dispatch_closure(traced_params)
+        return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     dispatch = _build_dispatch_closure(params)
 
@@ -1050,15 +1055,15 @@ def apply_tesseract(
             "applies to a served (HTTPClient) Tesseract."
         )
 
-    client = Jaxeract(tesseract_client, device_transport=device_transport)
-
-    if traceable and not is_traceable(client):
+    if traceable and not is_traceable(tesseract_client):
         raise ValueError(
-            "traceable=True requires a Tesseract an in-process Tesseract "
-            "constructed through Tesseract.from_tesseract_api(...), however "
+            "traceable=True requires an in-process Tesseract built via "
+            "Tesseract.from_tesseract_api(...); "
             f"{tesseract_client!r} has no importable apply function to trace "
             "directly."
         )
+
+    client = Jaxeract(tesseract_client, device_transport=device_transport)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine

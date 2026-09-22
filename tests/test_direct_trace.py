@@ -114,10 +114,10 @@ def test_patch_falls_back_to_schema_default_for_an_omitted_field(
     reason unrelated to this fix.
     """
     from tesseract_jax.direct_trace import _abstract_inputs_schema_for, _patch_inputs
-    from tesseract_jax.tesseract_compat import Jaxeract
 
-    client = Jaxeract(vectoradd_jax_tess)
-    _api_module, AbstractInputSchema = _abstract_inputs_schema_for(client, "apply")
+    _api_module, AbstractInputSchema = _abstract_inputs_schema_for(
+        vectoradd_jax_tess, "apply"
+    )
 
     a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"
     real_inputs_omitted = {"a": a_no_s, "b": vectoradd_jax_ab["b"], "norm_ord": 2}
