@@ -10,7 +10,6 @@ import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
 
-from tesseract_jax.direct_trace import TracedClient
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
@@ -26,12 +25,9 @@ from tesseract_jax.tree_util import (
 if TYPE_CHECKING:
     from tesseract_jax.dispatch_params import DispatchParams
 
-# WARNING: Do NOT use jax.numpy within Jaxeract methods when self.client's
-# _client is a real LocalClient/HTTPClient -- these run from within an FFI
-# callback and cannot safely allocate JAX arrays there. Use vanilla numpy
-# instead. The one exception is a traced_tesseract() shim (tesseract_jax.
-# direct_trace), whose _client is a TracedClient: wrapped around one, these
-# methods run during ordinary JAX tracing instead of inside a callback, where
+# WARNING: Jaxeract methods normally run inside an FFI callback, where
+# allocating jax.numpy arrays is unsafe -- use vanilla numpy. Under
+# params.traceable they run during ordinary JAX tracing instead, where
 # jax.numpy is required (numpy raises on a Tracer).
 
 
@@ -476,22 +472,16 @@ class Jaxeract:
             )
             if v is not None
         }
+        # A traced value is a Tracer, which np.asarray (_cast_return) rejects;
+        # jnp.asarray is the traced equivalent.
+        cast = jnp.asarray if params.traceable else _cast_return
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                value = out_data[op][ip]
-                # self.client is a traced_tesseract() shim with a TracedClient
-                # in place of its real LocalClient/HTTPClient when traced;
-                # value is then a Tracer mid-trace, not a concrete array or
-                # device pointer -- np.asarray (_cast_return) raises on it,
-                # jnp.asarray is the traced equivalent.
-                if isinstance(self.client._client, TracedClient):
-                    out.append(jnp.asarray(value, dtype=target))
-                else:
-                    out.append(_cast_return(value, dtype=target))
+                out.append(cast(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(

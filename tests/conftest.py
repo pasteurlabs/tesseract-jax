@@ -15,6 +15,8 @@ import pytest
 import requests
 from tesseract_core import Tesseract
 
+from tesseract_jax import apply_tesseract
+
 here = Path(__file__).parent
 
 jax.config.update("jax_enable_x64", True)
@@ -427,6 +429,18 @@ def vectoradd_jax_ab() -> dict:
             "s": jnp.float32(0.5),
         },
     }
+
+
+@pytest.fixture
+def vectoradd_apply(vectoradd_jax_tess):
+    """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
+
+    def call(ab: dict, traceable: bool, norm_ord: int = 2) -> dict:
+        return apply_tesseract(
+            vectoradd_jax_tess, {**ab, "norm_ord": norm_ord}, traceable=traceable
+        )
+
+    return call
 
 
 # ---------------------------------------------------------------------------

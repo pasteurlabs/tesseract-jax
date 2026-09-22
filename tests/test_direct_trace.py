@@ -44,20 +44,17 @@ def test_traceable_and_device_transport_are_mutually_exclusive(
 
 
 def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
-    vectoradd_jax_tess, vectoradd_jax_ab
+    vectoradd_apply, vectoradd_jax_ab
 ):
     """The whole point of traceable=True: no opaque call in the lowering.
 
-    Checked against the uncompiled lowering, not the compiled one -- stays
-    backend-independent and fast, and the target's presence/absence agrees
-    at both stages anyway.
+    Checked against the uncompiled lowering: backend-independent and fast.
     """
-    inputs = {**vectoradd_jax_ab, "norm_ord": 2}
 
     def f(traceable):
-        return apply_tesseract(vectoradd_jax_tess, inputs, traceable=traceable)[
-            "vector_add"
-        ]["result"].sum()
+        return vectoradd_apply(vectoradd_jax_ab, traceable)["vector_add"][
+            "result"
+        ].sum()
 
     direct_hlo = jax.jit(lambda: f(True)).lower().as_text()
     callback_hlo = jax.jit(lambda: f(False)).lower().as_text()
@@ -68,17 +65,13 @@ def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
 
 
 def test_traceable_jvp_has_no_host_callback_in_lowered_hlo(
-    vectoradd_jax_tess, vectoradd_jax_ab
+    vectoradd_apply, vectoradd_jax_ab
 ):
     """Same check for a derivative endpoint, not just the primal apply."""
     tangents = jax.tree.map(jnp.ones_like, vectoradd_jax_ab)
 
     def f(traceable):
-        def full(ab):
-            return apply_tesseract(
-                vectoradd_jax_tess, {**ab, "norm_ord": 2}, traceable=traceable
-            )
-
+        full = lambda ab: vectoradd_apply(ab, traceable)
         return jax.jvp(full, (vectoradd_jax_ab,), (tangents,))[1]["vector_add"][
             "result"
         ]
@@ -113,10 +106,13 @@ def test_patch_falls_back_to_schema_default_for_an_omitted_field(
     errors on this omission, for a pre-existing tesseract-core/example
     reason unrelated to this fix.
     """
-    from tesseract_jax.direct_trace import _abstract_inputs_schema_for, _patch_inputs
+    from tesseract_jax.direct_trace import (
+        _abstract_inputs_schema_for_local_client,
+        _patch_inputs,
+    )
 
-    _api_module, AbstractInputSchema = _abstract_inputs_schema_for(
-        vectoradd_jax_tess, "apply"
+    _api_module, AbstractInputSchema = _abstract_inputs_schema_for_local_client(
+        vectoradd_jax_tess._client, "apply"
     )
 
     a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"

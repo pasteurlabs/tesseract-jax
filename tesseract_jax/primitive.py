@@ -418,11 +418,9 @@ def tesseract_dispatch_lowering(
     dispatch = _build_dispatch_closure(params)
 
     if params.traceable:
-        # params.client already wraps a traced_tesseract() shim when
-        # traceable=True (apply_tesseract sets it up front) -- the closure
-        # above is identical either way, only the lowering mechanism differs:
-        # traced (mlir.lower_fun) instead of an opaque call
-        # (mlir.emit_python_callback). See tesseract_jax.direct_trace.
+        # params.client already wraps a traced_tesseract() shim (set up front
+        # by apply_tesseract). Same dispatch closure as below; only the
+        # lowering mechanism changes to mlir.lower_fun. See tesseract_jax.direct_trace.
         return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
@@ -1009,8 +1007,7 @@ def apply_tesseract(
             Tesseract (``Tesseract.from_tesseract_api(...)``); raises ``ValueError``
             otherwise. Mutually exclusive with ``device_transport``. Every endpoint
             actually invoked must return a plain ``dict`` (or build via
-            ``model_construct``), not via the schema's validating constructor
-            (``OutputSchema(...)``). Validation is shape/dtype only (the same schema
+            ``model_construct``). Validation is shape/dtype only (the same schema
             ``abstract_eval`` uses).
 
     Returns:
