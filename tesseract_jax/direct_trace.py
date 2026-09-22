@@ -10,8 +10,9 @@
 ``self._client.run_tesseract(endpoint, payload, ...)`` -- swapping only
 ``_client`` means every one of them, plus ``openapi_schema`` /
 ``available_endpoints`` (which route through ``run_tesseract`` too), keeps
-working unchanged; only the four differentiable-dispatch endpoints are
-actually intercepted, everything else delegates to the real ``LocalClient``.
+working unchanged; only endpoints whose payload has an ``"inputs"`` key are
+actually intercepted (see ``TracedClient`` for the one exception), everything
+else delegates to the real ``LocalClient``.
 Feeding this into ``Jaxeract`` and lowering the resulting dispatch closure
 with ``jax.interpreters.mlir.lower_fun`` instead of
 ``mlir.emit_python_callback`` gets ``apply_tesseract(..., traceable=True)``
@@ -46,13 +47,10 @@ from tesseract_core import Tesseract
 from tesseract_jax.tree_util import to_shape_dtype_pytree
 
 
-def _extract_api_module(
-    tesseract_client: Tesseract, endpoint: str = "apply"
+def _extract_api_module_from_local_client(
+    local_client: Any, endpoint: str = "apply"
 ) -> ModuleType | None:
-    """The real ``tesseract_api`` module backing an in-process Tesseract, or ``None``.
-
-    Only a ``LocalClient`` (``Tesseract.from_tesseract_api``) has one: a
-    served (``HTTPClient``) Tesseract runs in another process.
+    """The real ``tesseract_api`` module backing a ``LocalClient``, or ``None``.
 
     Tries the public ``LocalClient.api_module`` first (added in
     pasteurlabs/tesseract-core#784). Falls back to recovering it from a
@@ -62,8 +60,6 @@ def _extract_api_module(
     named ``api_module`` -- for tesseract-core versions before that PR.
     TODO: delete the fallback once the floor is bumped past it.
     """
-    local_client = getattr(tesseract_client, "_client", None)
-
     api_module = getattr(local_client, "api_module", None)
     if isinstance(api_module, ModuleType):
         return api_module
@@ -80,6 +76,19 @@ def _extract_api_module(
     if not isinstance(api_module, ModuleType):
         return None
     return api_module
+
+
+def _extract_api_module(
+    tesseract_client: Tesseract, endpoint: str = "apply"
+) -> ModuleType | None:
+    """The real ``tesseract_api`` module backing an in-process Tesseract, or ``None``.
+
+    Only a ``LocalClient`` (``Tesseract.from_tesseract_api``) has one: a
+    served (``HTTPClient``) Tesseract runs in another process.
+    """
+    return _extract_api_module_from_local_client(
+        getattr(tesseract_client, "_client", None), endpoint
+    )
 
 
 def is_traceable(tesseract_client: Tesseract, endpoint: str = "apply") -> bool:
@@ -143,9 +152,9 @@ def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
     return schema_node
 
 
-def _abstract_inputs_schema_for(tesseract_client: Tesseract, endpoint: str) -> tuple:
+def _abstract_inputs_schema_for_local_client(local_client: Any, endpoint: str) -> tuple:
     """The real ``api_module`` and its cached ``AbstractEval_`` input schema."""
-    api_module = _extract_api_module(tesseract_client, endpoint)
+    api_module = _extract_api_module_from_local_client(local_client, endpoint)
     if api_module is None:
         raise ValueError(
             f"traceable=True requires an in-process Tesseract built via "
@@ -156,6 +165,13 @@ def _abstract_inputs_schema_for(tesseract_client: Tesseract, endpoint: str) -> t
         api_module.InputSchema, api_module.OutputSchema
     )
     return api_module, AbstractInputSchema
+
+
+def _abstract_inputs_schema_for(tesseract_client: Tesseract, endpoint: str) -> tuple:
+    """The real ``api_module`` and its cached ``AbstractEval_`` input schema."""
+    return _abstract_inputs_schema_for_local_client(
+        getattr(tesseract_client, "_client", None), endpoint
+    )
 
 
 def _patch_inputs(AbstractInputSchema: type[BaseModel], real_inputs: Any) -> Any:
@@ -187,32 +203,36 @@ def _call_with_patched_inputs(endpoint_fn: Any, **kwargs: Any) -> Any:
 
 
 class TracedClient:
-    """Stands in for a Tesseract's ``LocalClient``, tracing four of its endpoints.
+    """Stands in for a Tesseract's ``LocalClient``, tracing endpoints that take ``inputs``.
 
-    Traces ``apply``/``jacobian_vector_product``/``vector_jacobian_product``/
-    ``jacobian`` directly instead of dispatching them through the
-    schema-validated wrapper. Every other endpoint (``openapi_schema``,
-    ``abstract_eval``, ``health``, ``test``) is delegated to the real
-    ``LocalClient`` unchanged -- there is nothing to trace there
-    (``abstract_eval`` in particular only ever deals in shapes/dtypes, never
-    a traced value, so the real, fully-validated path is strictly better,
-    not just adequate).
+    Traces any endpoint whose payload has an ``"inputs"`` key -- today that's
+    ``apply``/``jacobian_vector_product``/``vector_jacobian_product``/
+    ``jacobian``, and a new differentiable-dispatch endpoint (e.g. a future
+    ``hessian_vector_product``) would need no change here to also trace,
+    since ``getattr(api_module, endpoint)`` and the patch/call machinery
+    below are already endpoint-name-agnostic.
+
+    ``abstract_eval`` is the one endpoint this can't tell apart from a
+    traceable call by payload shape alone -- its payload is also just
+    ``{"inputs": ...}`` -- so it's excluded by name. Everything else without
+    an ``"inputs"`` key (``openapi_schema``, ``health``, ``test``) is
+    excluded by that shape check alone, needing no explicit list. All
+    excluded endpoints delegate to the real ``LocalClient`` unchanged --
+    there's nothing to trace there (``abstract_eval`` in particular only
+    ever deals in shapes/dtypes, never a traced value, so the real,
+    fully-validated path is strictly better, not just adequate).
     """
 
-    _TRACED_ENDPOINTS = frozenset(
-        {"apply", "jacobian_vector_product", "vector_jacobian_product", "jacobian"}
-    )
-
-    def __init__(self, tesseract_client: Tesseract) -> None:
-        self._tesseract_client = tesseract_client
+    def __init__(self, local_client: Any) -> None:
+        self._local_client = local_client
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TracedClient):
             return NotImplemented
-        return self._tesseract_client == other._tesseract_client
+        return self._local_client == other._local_client
 
     def __hash__(self) -> int:
-        return hash((TracedClient, self._tesseract_client))
+        return hash((TracedClient, self._local_client))
 
     def run_tesseract(
         self,
@@ -221,13 +241,13 @@ class TracedClient:
         run_id: str | None = None,
         stream_logs: Any = False,
     ) -> dict:
-        """Dispatch ``endpoint``, tracing it directly if it's one of the four traced ones."""
-        if endpoint not in self._TRACED_ENDPOINTS:
-            return self._tesseract_client._client.run_tesseract(
+        """Dispatch ``endpoint``, tracing it directly unless excluded (see class docstring)."""
+        if endpoint == "abstract_eval" or not payload or "inputs" not in payload:
+            return self._local_client.run_tesseract(
                 endpoint, payload, run_id, stream_logs
             )
-        api_module, schema = _abstract_inputs_schema_for(
-            self._tesseract_client, endpoint
+        api_module, schema = _abstract_inputs_schema_for_local_client(
+            self._local_client, endpoint
         )
         payload = dict(payload)
         patched_inputs = _patch_inputs(schema, payload.pop("inputs"))
@@ -241,9 +261,12 @@ def traced_tesseract(tesseract_client: Tesseract) -> Tesseract:
     """A copy of ``tesseract_client`` that traces its dispatch endpoints directly.
 
     A shallow copy with ``_client`` replaced by a ``TracedClient`` wrapping
-    the original -- everything else (``._stream_logs``, etc.) is shared with
-    the original unchanged.
+    the *original* ``_client`` (the real ``LocalClient``) directly -- not the
+    outer ``Tesseract`` -- so this is a flat ``Tesseract -> TracedClient ->
+    LocalClient`` chain, the same shape as an ordinary Tesseract, rather than
+    nesting a whole second ``Tesseract`` inside the first. Everything else on
+    the copy (``._stream_logs``, etc.) is shared with the original unchanged.
     """
     shim = copy.copy(tesseract_client)
-    shim._client = TracedClient(tesseract_client)
+    shim._client = TracedClient(tesseract_client._client)
     return shim
