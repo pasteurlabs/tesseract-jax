@@ -448,6 +448,113 @@ def test_jacrev_partial_output_restricts_jac_outputs(
     )
 
 
+@pytest.mark.parametrize("use_jit", [False, True])
+def test_grad_restricts_vjp_inputs(
+    pytree_tess, pytree_tess_inputs, use_jit, monkeypatch
+):
+    """``grad`` wrt one of several diff inputs requests only that input's cotangent.
+
+    Input restriction on the reverse path is trace-time (``has_tangent`` filtering,
+    not DCE), so the ``vector_jacobian_product`` request drops the undifferentiated
+    columns jitted and un-jitted alike. Uses the sequential VJP path so the endpoint
+    called is ``vector_jacobian_product`` rather than the batched ``jacobian``
+    shortcut.
+    """
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    x = inp["alpha"]["x"]
+
+    def f(x):
+        full = {**inp, "alpha": {**inp["alpha"], "x": x}}
+        # `alpha.y`, `beta.*`, `delta[*]` are all schema-differentiable but only
+        # `alpha.x` carries a tangent, so only its cotangent should be requested.
+        return apply_tesseract(
+            pytree_tess, full, materialize_jacobian=False, vmap_method="sequential"
+        )["result"].sum()
+
+    # Reference computed before the spy is installed, so only the spied call below
+    # is captured. The narrowing is internal to tesseract-jax either way, so this
+    # is a self-consistency check on the returned gradient.
+    expected = jax.grad(f)(x)
+
+    captured: dict[str, Any] = {}
+    orig = pytree_tess.vector_jacobian_product
+
+    def spy(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
+        captured["vjp_inputs"] = sorted(vjp_inputs)
+        return orig(
+            inputs=inputs,
+            vjp_inputs=vjp_inputs,
+            vjp_outputs=vjp_outputs,
+            cotangent_vector=cotangent_vector,
+        )
+
+    monkeypatch.setattr(pytree_tess, "vector_jacobian_product", spy)
+    grad_fn = jax.jit(jax.grad(f)) if use_jit else jax.grad(f)
+    g = grad_fn(x)
+
+    np.testing.assert_allclose(g, expected, rtol=1e-5)
+    assert captured["vjp_inputs"] == ["alpha.{x}"], (
+        f"expected only 'alpha.{{x}}' to be requested, got {captured['vjp_inputs']}"
+    )
+
+
+def test_jitted_jvp_endpoint_restricts_jvp_outputs(
+    pytree_tess, pytree_tess_inputs, monkeypatch
+):
+    """Under ``jit``, a direct ``jvp`` (no jacobian shortcut) prunes dead outputs.
+
+    Forward-mode over a single tangent goes through the ``jacobian_vector_product``
+    endpoint directly (not the batched ``jacobian`` shortcut). DCE — which only
+    runs under ``jit`` — narrows the requested output tangents to the ones consumed
+    downstream via ``live_output_paths``.
+    """
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    x = inp["alpha"]["x"]
+    tangent = jnp.ones_like(x)
+
+    def f(x):
+        full = {**inp, "alpha": {**inp["alpha"], "x": x}}
+        # The jvp is taken of the whole Tesseract output; only `result`'s tangent
+        # is consumed, so DCE should drop the other outputs' tangents from the bind.
+        out_tan = jax.jvp(
+            lambda xx: apply_tesseract(
+                pytree_tess,
+                {**full, "alpha": {**full["alpha"], "x": xx}},
+                materialize_jacobian=False,
+                vmap_method="sequential",
+            ),
+            (x,),
+            (tangent,),
+        )[1]
+        return out_tan["result"]
+
+    ref = f(x)  # un-jitted reference (DCE off, but the `result` block is identical)
+
+    captured: dict[str, Any] = {}
+    orig = pytree_tess.jacobian_vector_product
+
+    def spy(*, inputs, jvp_inputs, jvp_outputs, tangent_vector):
+        captured["jvp_inputs"] = sorted(jvp_inputs)
+        captured["jvp_outputs"] = sorted(jvp_outputs)
+        return orig(
+            inputs=inputs,
+            jvp_inputs=jvp_inputs,
+            jvp_outputs=jvp_outputs,
+            tangent_vector=tangent_vector,
+        )
+
+    monkeypatch.setattr(pytree_tess, "jacobian_vector_product", spy)
+    out = jax.jit(f)(x)
+
+    np.testing.assert_allclose(out, ref, rtol=1e-5)
+    assert captured["jvp_outputs"] == ["result"], (
+        f"expected only 'result' output tangents, got {captured['jvp_outputs']}"
+    )
+    assert captured["jvp_inputs"] == ["alpha.{x}"], (
+        f"expected only 'alpha.{{x}}' tangent, got {captured['jvp_inputs']}"
+    )
+
+
 def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
     """``jacfwd`` of a linearized function wrt one argument narrows the request too.
 

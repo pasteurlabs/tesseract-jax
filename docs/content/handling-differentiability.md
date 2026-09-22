@@ -209,3 +209,24 @@ Differentiating with respect to a tangent / cotangent works, because a derivativ
 v = jnp.ones_like(x)
 jax.grad(lambda v: jax.jvp(f, (x,), (v,))[1])(v)  # ✅
 ```
+
+## Partial differentiation
+
+When you differentiate with respect to only some of a Tesseract's differentiable inputs, or use only some of its differentiable outputs, `tesseract-jax` narrows the derivative request so the Tesseract computes only the sub-block that is actually needed. The `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints are asked for the minimal set of input columns and output rows.
+
+Two mechanisms drive this, and they behave differently:
+
+- **Input restriction is always applied.** If a tangent is a symbolic zero — because you differentiate with respect to a subset of arguments, or wrap an input in `jax.lax.stop_gradient` — the corresponding column is dropped at trace time. This holds whether or not the call is under `jax.jit`.
+- **Output restriction relies on JAX's dead-code elimination (DCE).** JAX only reports which outputs survive downstream when it runs DCE, which happens under `jax.jit` (any mode) and for un-jitted reverse-mode (`jax.grad` / `jax.jacrev`). It does **not** run for un-jitted forward mode: an eager `jax.jacfwd` (or `jax.jvp`) that uses only some outputs will still request every differentiable output row.
+
+```python
+def f(x):
+    # `tess` returns {"a": ..., "b": ...}, both differentiable; only "a" is used.
+    return apply_tesseract(tess, {"x": x, "y": y})["a"]
+
+jax.jit(jax.jacfwd(f))(x)  # requests only the "a" rows
+jax.jacrev(f)(x)           # requests only the "a" rows (reverse mode runs DCE)
+jax.jacfwd(f)(x)           # ⚠️ requests "a" and "b" rows, then discards "b"
+```
+
+Wrapping the outer call in `jax.jit` recovers the pruning in the last case. This only affects how much the Tesseract computes, never the returned value.
