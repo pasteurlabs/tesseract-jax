@@ -88,7 +88,7 @@ def tesseract_dispatch_abstract_eval(
     if params.eval_func == "vector_jacobian_product":
         # A VJP output has the same shape as the primal it differentiates, so we
         # can read the shapes off the primals without a forward evaluation. Only
-        # differentiated primals (has_tangent) carry a cotangent back; a
+        # differentiated primals (has_tangent) carry a cotangent back. A
         # non-differentiated input's slot is never consumed by JAX's transpose,
         # so we omit it entirely rather than return a placeholder for it.
         return tuple(
@@ -352,13 +352,12 @@ def tesseract_dispatch_transpose_rule(
                 )
 
     if params.eval_func == "vector_jacobian_product":
-        # Transposing a `vector_jacobian_product` back into a
-        # `jacobian_vector_product`, the two being each other's transpose. The
-        # forward VJP bind takes only the real cotangents (``has_cotangent``) as
-        # linear operands and returns one output per differentiated primal
-        # (``has_tangent``), so both masks must be threaded through the reverse
-        # bind here; the non-differentiable-input check above is specific to the
-        # forward direction and does not apply.
+        # Transpose a `vector_jacobian_product` back into a
+        # `jacobian_vector_product`. The forward VJP bind takes only the real
+        # cotangents (``has_cotangent``) as linear operands and returns one output
+        # per differentiated primal (``has_tangent``), so both masks are threaded
+        # through the reverse bind here. The non-differentiable-input check above
+        # is specific to the forward direction and does not apply.
         has_tangent = params.has_tangent
 
         # ``cotangent`` aligns with the forward VJP's outputs, i.e. the
@@ -379,7 +378,7 @@ def tesseract_dispatch_transpose_rule(
             *tangents,
             params=params.replace(eval_func="jacobian_vector_product"),
         )
-        # The JVP bind returns one output per Tesseract output; the forward VJP's
+        # The JVP bind returns one output per Tesseract output. The forward VJP's
         # linear operands were only the real cotangents, so return those slots.
         has_cotangent = params.has_cotangent or (True,) * len(jvp)
         jvp_iter = iter(jvp)
@@ -422,7 +421,7 @@ def tesseract_dispatch_transpose_rule(
 
     # Pass only the real cotangents to the bind. The symbolic-zero ones would be
     # instantiated to dense zeros the endpoint never reads, so drop them from the
-    # operands entirely; the endpoint call scatters the survivors back to full
+    # operands entirely. The endpoint call scatters the survivors back to full
     # output width via ``has_cotangent`` (see ``Jaxeract.vector_jacobian_product``).
     cotan_args_ = tuple(c for c, h in zip(cotangent, has_cotangent, strict=True) if h)
 
@@ -436,7 +435,7 @@ def tesseract_dispatch_transpose_rule(
 
     # The bind returns a cotangent only for each differentiated primal
     # (has_tangent). Scatter them back into full primal order, leaving None where
-    # no cotangent flows -- JAX reads None as a symbolic zero for that operand.
+    # no cotangent flows. JAX reads None as a symbolic zero for that operand.
     vjp_iter = iter(vjp)
     input_cotangents = [next(vjp_iter) if h else None for h in params.has_tangent]
     return tuple([None] * len(primal_args) + input_cotangents)
@@ -792,11 +791,10 @@ def _batched_via_jacobian(
         )
         return outs, (0,) * len(outs)
 
-    # VJP: transpose the outer/inner list structure to iterate
-    # by column (one per diff input). ``tans`` is already the reduced cotangent
-    # tuple (only ``has_cotangent``-True outputs, symbolic zeros dropped at the
-    # bind), in the same order as the surviving rows of ``diff_output_path_to_pos``,
-    # so take them straight through.
+    # VJP: transpose the outer/inner list structure to iterate by column (one per
+    # diff input). ``tans`` already holds only the ``has_cotangent``-True outputs
+    # (symbolic zeros dropped at the bind), in the same order as the surviving rows
+    # of ``diff_output_path_to_pos``, so take them straight through.
     jac_cols = [list(col) for col in zip(*jac_blocks, strict=True)]
     diff_primals = [primals[pos] for pos in diff_input_path_to_pos.values()]
     diff_grads = jax.tree.map(
@@ -806,11 +804,10 @@ def _batched_via_jacobian(
         diff_primals,
         jac_cols,
     )
-    # A VJP bind returns a gradient only for each differentiated primal; the
-    # abstract_eval declares that shorter arity. ``diff_input_path_to_pos`` is
-    # built in primal positional order, so ``diff_grads`` is already emitted in
-    # that order, with the non-diff slots that JAX's transpose never consumes
-    # omitted.
+    # A VJP bind returns a gradient only for each differentiated primal, the
+    # shorter arity abstract_eval declares. ``diff_input_path_to_pos`` is built in
+    # primal positional order, so ``diff_grads`` is already in that order with the
+    # non-diff slots omitted.
     grads = tuple(diff_grads)
     return grads, (0,) * len(grads)
 

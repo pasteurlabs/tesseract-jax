@@ -411,7 +411,7 @@ def test_jacrev_partial_output_restricts_jac_outputs(
 
     def f(x):
         i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
-        # Only `result` enters; result_dict / result_list stay unused, so JAX
+        # Only `result` enters. result_dict / result_list stay unused, so JAX
         # hands their cotangents in as symbolic zeros.
         return apply_tesseract(pytree_tess, i)["result"]
 

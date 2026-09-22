@@ -523,7 +523,6 @@ class Jaxeract:
         # Scatter cotangents back to full non-static-output width, inserting
         # ``None`` where the cotangent was a symbolic zero.
         if params.has_cotangent:
-            # Guard against misalignment
             assert len(cotangents) == sum(params.has_cotangent)
             cotan_iter = iter(cotangents)
             cotangents = tuple(
