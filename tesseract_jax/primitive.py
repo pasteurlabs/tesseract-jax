@@ -413,18 +413,11 @@ def _build_dispatch_closure(params: DispatchParams) -> Callable[..., tuple]:
     """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
 
     Returns ``dispatch(*args) -> tuple`` calling ``getattr(params.client,
-    params.eval_func)(args, params)``. This is transport-agnostic: the CPU
-    lowering runs it via a host callback; the GPU lowering runs it via the native
-    FFI handler with the client in ``cuda_ipc`` mode. Because it dispatches by
-    ``eval_func``, *every* endpoint (apply / jvp / vjp / jacobian) is generic
-    across both transports.
+    params.eval_func)(args, params)``. The CPU lowering runs it via a host
+    callback; the GPU lowering runs it via the native FFI handler. Dispatching by
+    ``eval_func`` keeps every endpoint transport-agnostic.
     """
 
-    # ``args`` is transport-dependent: the CPU host-callback lowering passes real
-    # NumPy arrays, while the GPU FFI lowering passes bare
-    # ``__cuda_array_interface__`` device views. ``TransportArray`` is the
-    # structural type both satisfy (shape + dtype), so the shared closure accepts
-    # either without a runtime type-check rejecting the duck-typed GPU views.
     def dispatch(*args: TransportArray) -> tuple:
         out = getattr(params.client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
@@ -476,11 +469,10 @@ def tesseract_dispatch_gpu_lowering(
 
     Falls back to the host-callback lowering when the caller did not select a
     device transport (``client._device_transport``), so a host-transport call
-    behaves exactly as on CPU. When the caller *did* select one but the native
-    shim is unavailable (e.g. a CPU-only install where it wasn't compiled) this
-    raises rather than silently falling back: ``device_transport=...`` is an
-    explicit request for the GPU-direct path, so honouring it as a slow host
-    round-trip with no signal would hide the very thing the caller asked for.
+    behaves exactly as on CPU. When the caller did select one but the native shim
+    is unavailable (e.g. a CPU-only install where it wasn't compiled), this raises
+    rather than silently falling back, since ``device_transport`` is an explicit
+    opt-in to the GPU-direct path.
     """
     from tesseract_jax import gpu_ffi
 
@@ -667,8 +659,8 @@ def _batched_via_jacobian(
     # the corresponding ``tans`` / ``output_avals`` positions. ``output_flat``
     # is over non-static outputs in leaf order, so the enumerate index lines up
     # with ``has_cotangent``. On the VJP path an output whose cotangent is a
-    # symbolic zero adds nothing to the input gradients, so drop it here --
-    # mirroring the transpose rule -- and never request its Jacobian rows.
+    # symbolic zero adds nothing to the input gradients, so drop it here and never
+    # request its Jacobian rows.
     is_vjp = params.eval_func == "vector_jacobian_product"
     diff_output_path_to_pos: dict[str, int] = {
         p: i

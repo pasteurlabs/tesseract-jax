@@ -47,13 +47,12 @@ def _on_device(values: "list | tuple") -> bool:
 def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype`` without leaving the device.
 
-    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
-
-    On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer, so casting here would
-    force a device->host round-trip; it is returned untouched. That is not a
+    On the host path ``value`` is a NumPy array, cast to ``dtype`` here. On the
+    cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the FFI
+    handler copies straight into XLA's output buffer, so casting here would force
+    a device->host round-trip; it is returned untouched. Since that does not
     guarantee the device array already has ``dtype`` (tesseract-core does not pin
-    a jacobian endpoint's output dtype), so the native shim compares each result's
+    a jacobian endpoint's output dtype), the native shim checks each result's
     dtype and shape against the XLA output buffer and raises on a mismatch rather
     than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
