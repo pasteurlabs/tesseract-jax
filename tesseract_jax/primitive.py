@@ -86,9 +86,16 @@ def tesseract_dispatch_abstract_eval(
     n_primals = params.n_primals
 
     if params.eval_func == "vector_jacobian_product":
-        # We mustn't run forward evaluation of shapes, as out
-        # of vjp has the same shapes as the primals; thus we can return early
-        return tuple(array_args[:n_primals])
+        # A VJP output has the same shape as the primal it differentiates, so we
+        # can read the shapes off the primals without a forward evaluation. Only
+        # differentiated primals (has_tangent) carry a cotangent back. A
+        # non-differentiated input's slot is never consumed by JAX's transpose,
+        # so we omit it entirely rather than return a placeholder for it.
+        return tuple(
+            aval
+            for aval, h in zip(array_args[:n_primals], params.has_tangent, strict=True)
+            if h
+        )
 
     if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
@@ -99,7 +106,7 @@ def tesseract_dispatch_abstract_eval(
             primal_avals,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
         )
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=params.client.differentiable_input_paths
@@ -195,7 +202,7 @@ def tesseract_dispatch_jvp_rule(
             _tangents_for_check,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
             remove_static_args=True,
         )
         _flat_tangents = _pytree_to_tesseract_flat(
@@ -344,21 +351,94 @@ def tesseract_dispatch_transpose_rule(
                     f"or wrap it with jax.lax.stop_gradient to produce a symbolic zero."
                 )
 
-    # May need to change after #263 when transposing vjp
-    linear_args_ = _instantiate_zeros(cotangent)
+    if params.eval_func == "vector_jacobian_product":
+        # Transpose a `vector_jacobian_product` back into a
+        # `jacobian_vector_product`. The forward VJP bind takes only the real
+        # cotangents (``has_cotangent``) as linear operands and returns one output
+        # per differentiated primal (``has_tangent``), so both masks are threaded
+        # through the reverse bind here. The non-differentiable-input check above
+        # is specific to the forward direction and does not apply.
+        has_tangent = params.has_tangent
 
-    transposed_eval_func = (
-        "vector_jacobian_product"
-        if params.eval_func == "jacobian_vector_product"
-        else "jacobian_vector_product"
+        # ``cotangent`` aligns with the forward VJP's outputs, i.e. the
+        # differentiated primals. Scatter it into a full tangent per primal so the
+        # JVP bind sees the one-slot-per-primal layout its dispatch expects. A
+        # non-differentiated primal's slot is filtered out before the endpoint
+        # call, but still has to be a concrete array for the bind, so fill it with
+        # a dense zero shaped like that primal.
+        # ``primal_args`` are all concrete here (UndefinedPrimals were rejected
+        # above), so each doubles as a shape/dtype template for its zero tangent.
+        cotan_iter = iter(_instantiate_zeros(cotangent))
+        tangents = tuple(
+            next(cotan_iter) if h else jnp.zeros_like(p)
+            for p, h in zip(primal_args, has_tangent, strict=True)
+        )
+        jvp = tesseract_dispatch_p.bind(
+            *primal_args,
+            *tangents,
+            params=params.replace(eval_func="jacobian_vector_product"),
+        )
+        # The JVP bind returns one output per Tesseract output. The forward VJP's
+        # linear operands were only the real cotangents, so return those slots.
+        has_cotangent = params.has_cotangent or (True,) * len(jvp)
+        jvp_iter = iter(jvp)
+        cotan_out = [next(jvp_iter) for h in has_cotangent if h]
+        return tuple([None] * len(primal_args) + cotan_out)
+
+    # Raise if a gradient is requested for a non-differentiable input.
+    _primal_inputs = unflatten_args(
+        primal_args,
+        params.static_args,
+        params.input_pytreedef,
+        params.static_input_mask,
     )
-    result = tesseract_dispatch_p.bind(
+    _flat_inputs = _pytree_to_tesseract_flat(
+        _primal_inputs, schema_paths=params.client.differentiable_input_paths
+    )
+    _non_static_paths = [
+        p for p, m in zip(_flat_inputs, params.static_input_mask, strict=True) if not m
+    ]
+    _vjp_inputs_with_tangent = [
+        p for p, h in zip(_non_static_paths, params.has_tangent, strict=True) if h
+    ]
+    for path in _vjp_inputs_with_tangent:
+        if _flat_inputs[path] is None:
+            raise ValueError(
+                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
+                f"If this input should be differentiable, mark it as "
+                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
+                f"exclude it from the differentiated function's argument list "
+                f"(using a closure or the `argnums` parameter), or apply "
+                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
+            )
+
+    # An output whose cotangent is a symbolic zero adds nothing to the input
+    # gradients, so record which outputs carry a real cotangent and skip the rest
+    # when calling the endpoint. This also stops a NaN in an unused output's
+    # gradient from poisoning the result. ``cotangent`` is already the non-static
+    # outputs.
+    has_cotangent = tuple(not isinstance(c, jax._src.ad_util.Zero) for c in cotangent)
+
+    # Pass only the real cotangents to the bind. The symbolic-zero ones would be
+    # instantiated to dense zeros the endpoint never reads, so drop them from the
+    # operands entirely. The endpoint call scatters the survivors back to full
+    # output width via ``has_cotangent`` (see ``Jaxeract.vector_jacobian_product``).
+    cotan_args_ = tuple(c for c, h in zip(cotangent, has_cotangent, strict=True) if h)
+
+    vjp = tesseract_dispatch_p.bind(
         *primal_args,
-        *linear_args_,
-        params=params.replace(eval_func=transposed_eval_func),
+        *cotan_args_,
+        params=params.replace(
+            eval_func="vector_jacobian_product", has_cotangent=has_cotangent
+        ),
     )
 
-    return tuple([None] * len(primal_args) + list(result))
+    # The bind returns a cotangent only for each differentiated primal
+    # (has_tangent). Scatter them back into full primal order, leaving None where
+    # no cotangent flows. JAX reads None as a symbolic zero for that operand.
+    vjp_iter = iter(vjp)
+    input_cotangents = [next(vjp_iter) if h else None for h in params.has_tangent]
+    return tuple([None] * len(primal_args) + input_cotangents)
 
 
 ad.primitive_transposes[tesseract_dispatch_p] = tesseract_dispatch_transpose_rule
@@ -385,18 +465,11 @@ def _build_dispatch_closure(params: DispatchParams) -> Callable[..., tuple]:
     """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
 
     Returns ``dispatch(*args) -> tuple`` calling ``getattr(params.client,
-    params.eval_func)(args, params)``. This is transport-agnostic: the CPU
-    lowering runs it via a host callback; the GPU lowering runs it via the native
-    FFI handler with the client in ``cuda_ipc`` mode. Because it dispatches by
-    ``eval_func``, *every* endpoint (apply / jvp / vjp / jacobian) is generic
-    across both transports.
+    params.eval_func)(args, params)``. The CPU lowering runs it via a host
+    callback; the GPU lowering runs it via the native FFI handler. Dispatching by
+    ``eval_func`` keeps every endpoint transport-agnostic.
     """
 
-    # ``args`` is transport-dependent: the CPU host-callback lowering passes real
-    # NumPy arrays, while the GPU FFI lowering passes bare
-    # ``__cuda_array_interface__`` device views. ``TransportArray`` is the
-    # structural type both satisfy (shape + dtype), so the shared closure accepts
-    # either without a runtime type-check rejecting the duck-typed GPU views.
     def dispatch(*args: TransportArray) -> tuple:
         out = getattr(params.client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
@@ -448,11 +521,10 @@ def tesseract_dispatch_gpu_lowering(
 
     Falls back to the host-callback lowering when the caller did not select a
     device transport (``client._device_transport``), so a host-transport call
-    behaves exactly as on CPU. When the caller *did* select one but the native
-    shim is unavailable (e.g. a CPU-only install where it wasn't compiled) this
-    raises rather than silently falling back: ``device_transport=...`` is an
-    explicit request for the GPU-direct path, so honouring it as a slow host
-    round-trip with no signal would hide the very thing the caller asked for.
+    behaves exactly as on CPU. When the caller did select one but the native shim
+    is unavailable (e.g. a CPU-only install where it wasn't compiled), this raises
+    rather than silently falling back, since ``device_transport`` is an explicit
+    opt-in to the GPU-direct path.
     """
     from tesseract_jax import gpu_ffi
 
@@ -605,7 +677,7 @@ def _batched_via_jacobian(
     tans = jax.tree.map(_to_batched, raw_tans, tan_axes)
 
     primal_inputs = unflatten_args(
-        primals, params.static_args, params.input_pytreedef, params.is_static_mask
+        primals, params.static_args, params.input_pytreedef, params.static_input_mask
     )
     flat_inputs = _pytree_to_tesseract_flat(
         primal_inputs, schema_paths=params.client.differentiable_input_paths
@@ -626,7 +698,7 @@ def _batched_via_jacobian(
     diff_input_path_to_pos: dict[str, int] = {}
     non_static_idx = 0
     for (p, v), is_static in zip(
-        flat_inputs.items(), params.is_static_mask, strict=True
+        flat_inputs.items(), params.static_input_mask, strict=True
     ):
         if is_static:
             continue
@@ -636,9 +708,13 @@ def _batched_via_jacobian(
 
     # Map each diff output path to its leaf index in the output pytree.
     # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions.
+    # the corresponding ``tans`` / ``output_avals`` positions, dropping unrequested
+    # outputs on the reverse-mode path (signalled by ``has_cotangent``).
+    is_jvp = params.eval_func == "jacobian_vector_product"
     diff_output_path_to_pos: dict[str, int] = {
-        p: i for i, (p, v) in enumerate(output_flat.items()) if v is not None
+        p: i
+        for i, (p, v) in enumerate(output_flat.items())
+        if v is not None and (is_jvp or params.has_cotangent[i])
     }
 
     jac_arrays = tesseract_dispatch_p.bind(
@@ -677,7 +753,8 @@ def _batched_via_jacobian(
     ) -> tuple:
         """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
 
-        NaN consistency with historical sequential jvp/vjp approach.
+        Non-diff output tangents are NaN so the batched JVP matches the
+        sequential one (see ``_discarded_slot``).
         """
         out, k = [], 0
         for item, diff in zip(full_order, is_diff, strict=True):
@@ -714,24 +791,24 @@ def _batched_via_jacobian(
         )
         return outs, (0,) * len(outs)
 
-    # VJP: transpose the outer/inner list structure to iterate
-    # by column (one per diff input).
-    filtered_cots = [tans[pos] for pos in diff_output_path_to_pos.values()]
+    # VJP: transpose the outer/inner list structure to iterate by column (one per
+    # diff input). ``tans`` already holds only the ``has_cotangent``-True outputs
+    # (symbolic zeros dropped at the bind), in the same order as the surviving rows
+    # of ``diff_output_path_to_pos``, so take them straight through.
     jac_cols = [list(col) for col in zip(*jac_blocks, strict=True)]
     diff_primals = [primals[pos] for pos in diff_input_path_to_pos.values()]
     diff_grads = jax.tree.map(
         lambda slot, jac_col: _tree_sum(
-            jax.tree.map(_rmatmul, jac_col, filtered_cots), slot
+            jax.tree.map(_rmatmul, jac_col, list(tans)), slot
         ),
         diff_primals,
         jac_cols,
     )
-    diff_pos_set = set(diff_input_path_to_pos.values())
-    grads = _pad_nans(
-        diff_grads,
-        primals,
-        [i in diff_pos_set for i in range(len(primals))],
-    )
+    # A VJP bind returns a gradient only for each differentiated primal, the
+    # shorter arity abstract_eval declares. ``diff_input_path_to_pos`` is built in
+    # primal positional order, so ``diff_grads`` is already in that order with the
+    # non-diff slots omitted.
+    grads = tuple(diff_grads)
     return grads, (0,) * len(grads)
 
 
@@ -1033,10 +1110,10 @@ def apply_tesseract(
     # non-array leaves (a str, an int, a bool) are static. Treating a concrete
     # array as static would close it over as a bind parameter, diverging from the
     # traced path and forcing a recompile whenever its value changes.
-    is_static_mask = tuple(
+    static_input_mask = tuple(
         not isinstance(arg, (jax.Array, np.ndarray)) for arg in flat_args
     )
-    array_args, static_args = split_args(flat_args, is_static_mask)
+    array_args, static_args = split_args(flat_args, static_input_mask)
     has_tangent = (True,) * len(array_args)
 
     # abstract_eval's output structure tells us how to unflatten the arrays the
@@ -1083,7 +1160,7 @@ def apply_tesseract(
             static_output_mask=static_output_mask,
             static_output_values=static_output_values,
             check_static_outputs=check_static_outputs,
-            is_static_mask=is_static_mask,
+            static_input_mask=static_input_mask,
             has_tangent=has_tangent,
             client=client,
             eval_func="apply",
