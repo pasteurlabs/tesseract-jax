@@ -520,27 +520,27 @@ def tesseract_dispatch_gpu_lowering(
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
     Falls back to the host-callback lowering when the caller did not select a
-    device transport (``client._device_transport``), so a host-transport call
+    device transport (``client._gpu_transport``), so a host-transport call
     behaves exactly as on CPU. When the caller did select one but the native shim
     is unavailable (e.g. a CPU-only install where it wasn't compiled), this raises
-    rather than silently falling back, since ``device_transport`` is an explicit
+    rather than silently falling back, since ``gpu_transport`` is an explicit
     opt-in to the GPU-direct path.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
 
-    if client._device_transport is None:
+    if client._gpu_transport is None:
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
-            f"device_transport={client._device_transport!r} was requested but "
+            f"gpu_transport={client._gpu_transport!r} was requested but "
             "the native GPU FFI shim is unavailable (not compiled or failed to "
             "import), so GPU-direct dispatch cannot run. Reinstall tesseract-jax "
             "with the shim built (a source install compiles it via the hatch "
             "build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure "
-            "fatal), or drop device_transport to use the host-callback transport."
+            "fatal), or drop gpu_transport to use the host-callback transport."
         )
 
     # Every supported device transport is CUDA-based, so this lowering cannot run
@@ -551,9 +551,9 @@ def tesseract_dispatch_gpu_lowering(
         jax.devices("cuda")
     except RuntimeError as exc:
         raise RuntimeError(
-            f"device_transport={client._device_transport!r} was requested but "
+            f"gpu_transport={client._gpu_transport!r} was requested but "
             "JAX sees no CUDA device. Install a CUDA-enabled jaxlib and run on a "
-            "GPU host, or drop device_transport to use the host-callback transport."
+            "GPU host, or drop gpu_transport to use the host-callback transport."
         ) from exc
 
     _raise_if_unimplemented(params.eval_func, client)
@@ -563,7 +563,7 @@ def tesseract_dispatch_gpu_lowering(
     # Run the dispatch with the client in device-transport mode, so GPU inputs
     # are exported by reference and outputs come back on-device.
     def gpu_dispatch(args: tuple) -> tuple:
-        with client.device_transport_encoding():
+        with client.gpu_transport_encoding():
             return inner(*args)
 
     target = gpu_ffi.ensure_registered()
@@ -943,7 +943,7 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    device_transport: str | None = None,
+    gpu_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
@@ -1053,7 +1053,7 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
-        device_transport: Name of the on-device transport used to exchange GPU
+        gpu_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
             ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
             with the matching ``gpu_transport`` in its ``runtime_config`` and a
@@ -1103,7 +1103,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(tesseract_client, device_transport=device_transport)
+    client = Jaxeract(tesseract_client, gpu_transport=gpu_transport)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
