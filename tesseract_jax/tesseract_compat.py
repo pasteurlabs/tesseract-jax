@@ -9,13 +9,13 @@ import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
 
+from tesseract_jax.dce import live_jvp_output_positions
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
     _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
-    live_jvp_output_positions,
     split_args,
     unflatten_args,
     warn_on_static_output_drift,
@@ -363,7 +363,7 @@ class Jaxeract:
         to the output tangents that survive dead-code elimination. ``None``
         requests all differentiable outputs (the un-pruned default). The returned
         tuple is aligned to the live output leaves in ``output_avals`` order — see
-        :func:`tesseract_jax.tree_util.live_jvp_output_positions`.
+        :func:`tesseract_jax.dce.live_jvp_output_positions`.
         """
         has_tangent = params.has_tangent
         n_primals = params.n_primals

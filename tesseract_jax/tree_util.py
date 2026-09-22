@@ -169,41 +169,6 @@ def _merge_path(
     return ".".join(explicit_parts), None
 
 
-def live_jvp_output_positions(
-    output_pytreedef: PyTreeDef,
-    n_outputs: int,
-    diff_output_paths: dict[str, Any],
-    live_output_paths: tuple[str, ...] | None,
-    static_output_mask: Sequence[bool] = (),
-) -> list[int]:
-    """Output-leaf positions a ``jacobian_vector_product`` bind should emit.
-
-    Positions are returned in ``output_avals`` order so that abstract_eval, the
-    endpoint wrapper and the DCE rule all agree on the layout. A leaf is kept
-    when it is non-differentiable (its tangent is a cheap NaN and cannot be named
-    by a path) or when its differentiable path is in ``live_output_paths``.
-    ``live_output_paths is None`` means "keep everything" (the un-pruned default,
-    e.g. when DCE never ran).
-
-    Static (non-array) output leaves never enter the bind, so ``static_output_mask``
-    drops them from the layout via :func:`dummy_output_tree`; the positions returned
-    then index ``output_avals``, which holds arrays only.
-
-    This is the single source of truth shared by ``abstract_eval`` (which sizes
-    the primitive's outputs) and ``Jaxeract.jacobian_vector_product`` (which
-    assembles them); keeping them in lock-step is what makes pruning safe.
-    """
-    output_flat = _pytree_to_tesseract_flat(
-        dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
-        schema_paths=diff_output_paths,
-    )
-    positions = []
-    for pos, (path, is_diff) in enumerate(output_flat.items()):
-        if is_diff is None or live_output_paths is None or path in live_output_paths:
-            positions.append(pos)
-    return positions
-
-
 def _pytree_to_tesseract_flat(
     pytree: PyTree, schema_paths: dict[str, Any] | None = None
 ) -> dict[str, Any]:

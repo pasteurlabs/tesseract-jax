@@ -17,22 +17,60 @@ it operates purely on the ``JaxprEqn`` and never imports ``tesseract_dispatch_p`
 the rule is registered against the primitive in :mod:`tesseract_jax.primitive`.
 """
 
+from collections.abc import Sequence
+from typing import Any
+
 from jax._src.interpreters import partial_eval as pe
+from jax.tree_util import PyTreeDef
 
 try:
-    # Preferred location (jax >= ~0.4.34, required on 0.10 to avoid a deprecation
-    # warning). Falls back to ``jax.core`` on our 0.7.0 lower bound, where
-    # ``jax.extend.core.DropVar`` does not yet exist.
+    # ``DropVar`` lives in ``jax.core`` on our 0.7.0 lower bound and only moves to
+    # ``jax.extend.core`` in later releases (importing it from ``jax.core`` warns
+    # on 0.10+). ``JaxprEqn`` is in ``jax.extend.core`` across the whole range.
     from jax.extend.core import DropVar, JaxprEqn
-except ImportError:  # pragma: no cover - exercised only on older JAX
+except ImportError:  # pragma: no cover - exercised only on JAX 0.7.x
     from jax.core import DropVar
     from jax.extend.core import JaxprEqn
 
 from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
     dummy_output_tree,
-    live_jvp_output_positions,
 )
+
+
+def live_jvp_output_positions(
+    output_pytreedef: PyTreeDef,
+    n_outputs: int,
+    diff_output_paths: dict[str, Any],
+    live_output_paths: tuple[str, ...] | None,
+    static_output_mask: Sequence[bool] = (),
+) -> list[int]:
+    """Output-leaf positions a ``jacobian_vector_product`` bind should emit.
+
+    Positions are returned in ``output_avals`` order so that abstract_eval, the
+    endpoint wrapper and the DCE rule all agree on the layout. A leaf is kept
+    when it is non-differentiable (its tangent is a cheap NaN and cannot be named
+    by a path) or when its differentiable path is in ``live_output_paths``.
+    ``live_output_paths is None`` means "keep everything" (the un-pruned default,
+    e.g. when DCE never ran).
+
+    Static (non-array) output leaves never enter the bind, so ``static_output_mask``
+    drops them from the layout via :func:`dummy_output_tree`; the positions returned
+    then index ``output_avals``, which holds arrays only.
+
+    This is the single source of truth shared by ``abstract_eval`` (which sizes
+    the primitive's outputs) and ``Jaxeract.jacobian_vector_product`` (which
+    assembles them); keeping them in lock-step is what makes pruning safe.
+    """
+    output_flat = _pytree_to_tesseract_flat(
+        dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
+        schema_paths=diff_output_paths,
+    )
+    positions = []
+    for pos, (path, is_diff) in enumerate(output_flat.items()):
+        if is_diff is None or live_output_paths is None or path in live_output_paths:
+            positions.append(pos)
+    return positions
 
 
 def tesseract_dispatch_dce_rule(

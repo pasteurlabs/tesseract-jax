@@ -21,7 +21,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
-from tesseract_jax.dce import tesseract_dispatch_dce_rule
+from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -29,7 +29,6 @@ from tesseract_jax.tree_util import (
     _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
-    live_jvp_output_positions,
     split_args,
     unflatten_args,
 )
@@ -334,14 +333,9 @@ def tesseract_dispatch_transpose_rule(
             "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
         )
 
-    # The forward-mode DCE rule may have pruned this jvp equation's outputs down
-    # to ``live_output_paths``, in which case ``cotangent`` only carries the live
-    # leaves. Scatter them back to the full output layout (symbolic zeros for the
-    # pruned leaves) so the logic below — and the VJP it dispatches — sees the
-    # un-pruned structure. ``live_output_paths is None`` ⇒ nothing was pruned.
-    # ``live_output_paths`` is a jvp-only concept; a pruned
-    # ``vector_jacobian_product`` narrows its own ``has_tangent`` instead (scattered
-    # below), so this branch never fires on the VJP-transpose path.
+    # If forward-mode DCE pruned this jvp equation, ``cotangent`` only carries the
+    # live leaves; scatter them back to the full layout (symbolic zeros elsewhere)
+    # so the VJP dispatched below sees the un-pruned structure.
     if params.live_output_paths is not None:
         live_positions = live_jvp_output_positions(
             params.output_pytreedef,
@@ -745,14 +739,9 @@ def _batched_via_jacobian(
             diff_input_path_to_pos[p] = non_static_idx
         non_static_idx += 1
 
-    # Map each diff output path to its leaf index in the output pytree.
-    # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions. On the forward-mode
-    # (JVP) path, rows DCE has already declared dead are left out of the request
-    # entirely via ``live_output_paths``; on the reverse-mode (VJP) path, outputs
-    # whose cotangent is a symbolic zero are dropped via ``has_cotangent``.
-    # ``live_output_paths`` is only ever set on a ``jacobian_vector_product``
-    # equation; a pruned ``vector_jacobian_product`` narrows ``has_tangent`` instead.
+    # Map each live diff output path to its leaf index in the output pytree (the
+    # Jacobian's row order). Dead rows are dropped: via ``live_output_paths`` on
+    # the JVP path, via ``has_cotangent`` on the VJP path.
     is_jvp = params.eval_func == "jacobian_vector_product"
     diff_output_path_to_pos: dict[str, int] = {
         p: i
