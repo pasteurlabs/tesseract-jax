@@ -339,9 +339,9 @@ def tesseract_dispatch_transpose_rule(
     # leaves. Scatter them back to the full output layout (symbolic zeros for the
     # pruned leaves) so the logic below — and the VJP it dispatches — sees the
     # un-pruned structure. ``live_output_paths is None`` ⇒ nothing was pruned.
-    # Only a ``jacobian_vector_product`` equation is ever pruned (the DCE rule
-    # defers ``vector_jacobian_product`` to JAX's default), so this scatter is a
-    # no-op on the VJP-transpose path.
+    # ``live_output_paths`` is a jvp-only concept; a pruned
+    # ``vector_jacobian_product`` narrows its own ``has_tangent`` instead (scattered
+    # below), so this branch never fires on the VJP-transpose path.
     if params.live_output_paths is not None:
         live_positions = live_jvp_output_positions(
             params.output_pytreedef,
@@ -752,7 +752,7 @@ def _batched_via_jacobian(
     # entirely via ``live_output_paths``; on the reverse-mode (VJP) path, outputs
     # whose cotangent is a symbolic zero are dropped via ``has_cotangent``.
     # ``live_output_paths`` is only ever set on a ``jacobian_vector_product``
-    # equation (the DCE rule defers ``vector_jacobian_product`` to JAX's default).
+    # equation; a pruned ``vector_jacobian_product`` narrows ``has_tangent`` instead.
     is_jvp = params.eval_func == "jacobian_vector_product"
     diff_output_path_to_pos: dict[str, int] = {
         p: i

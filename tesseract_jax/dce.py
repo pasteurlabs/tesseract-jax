@@ -3,12 +3,14 @@
 
 """Dead-code-elimination rule for the ``tesseract_dispatch`` primitive.
 
-Forward-mode AD requests the derivative of *every* differentiable output even
-when only a few survive downstream (e.g. ``jacfwd`` of a function that returns
-one leaf of a multi-output Tesseract). JAX exposes the survivors to a primitive's
-DCE rule, letting us narrow the requested sub-block (the ``jac_*_paths`` for a
-``jacobian``, ``live_output_paths`` for a ``jacobian_vector_product``) and drop
-the dead outvars so the Tesseract computes only what is used.
+AD requests the derivative of *every* differentiable leaf even when only a few
+survive downstream (e.g. ``jacfwd`` of a function that returns one leaf of a
+multi-output Tesseract, or ``jax.grad(...)[...]`` that keeps one input gradient).
+JAX exposes the survivors to a primitive's DCE rule, letting us narrow the
+requested sub-block (the ``jac_*_paths`` for a ``jacobian``, ``live_output_paths``
+for a ``jacobian_vector_product``, ``has_tangent`` for a
+``vector_jacobian_product``) and drop the dead outvars so the Tesseract computes
+only what is used.
 
 Like :mod:`tesseract_jax.batching`, this module holds primitive-agnostic logic —
 it operates purely on the ``JaxprEqn`` and never imports ``tesseract_dispatch_p``;
@@ -40,17 +42,18 @@ def tesseract_dispatch_dce_rule(
 
     JAX surfaces which outputs survive downstream as ``used_outputs``; we narrow
     the requested sub-block (the ``jac_*_paths`` for a ``jacobian``,
-    ``live_output_paths`` for a ``jacobian_vector_product``) and drop the dead
-    outvars so the Tesseract computes only what is used.
+    ``live_output_paths`` for a ``jacobian_vector_product``, ``has_tangent`` for a
+    ``vector_jacobian_product``) and drop the dead outvars so the Tesseract
+    computes only what is used.
 
-    Only ``jacobian`` and ``jacobian_vector_product`` carry prunable output
-    structure; ``apply`` and ``vector_jacobian_product`` defer to JAX's default
+    ``apply`` carries no prunable output structure and defers to JAX's default
     rule. This optimization only kicks in when JAX runs DCE — i.e. under ``jit``
     (any mode) and un-jitted reverse mode; un-jitted ``jacfwd`` is unaffected.
 
-    Inputs are always kept: the endpoints evaluate the full primal regardless of
-    which input columns are differentiated, so pruning ``used_inputs`` would be
-    incorrect.
+    Equation invars are always kept: the endpoints evaluate the full primal
+    regardless of which columns are differentiated, so pruning ``used_inputs``
+    would be incorrect. A ``vector_jacobian_product`` prunes its outvars (one
+    input-gradient per differentiated primal), never its invars.
     """
     # Effects-aware whole-equation drop (matches the un-pruned default exactly).
     if not any(used_outputs):
@@ -61,6 +64,8 @@ def tesseract_dispatch_dce_rule(
         return _dce_jacobian(used_outputs, eqn)
     if eval_func == "jacobian_vector_product":
         return _dce_jacobian_vector_product(used_outputs, eqn)
+    if eval_func == "vector_jacobian_product":
+        return _dce_vector_jacobian_product(used_outputs, eqn)
     return pe._default_dce_rule(used_outputs, eqn)
 
 
@@ -143,5 +148,35 @@ def _dce_jacobian_vector_product(
 
     new_params = dict(
         eqn.params, params=dispatch_params.replace(live_output_paths=tuple(live_paths))
+    )
+    return [True] * len(eqn.invars), eqn.replace(outvars=new_outvars, params=new_params)
+
+
+def _dce_vector_jacobian_product(
+    used_outputs: list[bool], eqn: JaxprEqn
+) -> tuple[list[bool], JaxprEqn | None]:
+    """Prune a ``vector_jacobian_product`` equation's dead input gradients.
+
+    A VJP bind returns one array per differentiated primal (the ``has_tangent``-True
+    slots, in primal order; see the reverse branch of
+    ``tesseract_dispatch_abstract_eval``), so ``used_outputs`` lines up 1:1 with
+    those slots. A dead output means that primal's gradient is never consumed
+    downstream, e.g. ``jax.grad(f)(inputs)["a"]`` keeps only ``a``'s gradient.
+
+    We AND ``used_outputs`` back into ``has_tangent`` and drop the dead outvars;
+    ``abstract_eval`` then recomputes the shorter output arity and the endpoint
+    scatters the survivors back into full primal order.
+    """
+    dispatch_params = eqn.params["params"]
+    old_has_tangent = dispatch_params.has_tangent
+
+    # Consume one ``used_outputs`` flag per live (True) slot; a live slot now dead
+    # flips to False.
+    used_iter = iter(used_outputs)
+    new_has_tangent = tuple(h and next(used_iter) for h in old_has_tangent)
+
+    new_outvars = [ov for ov, u in zip(eqn.outvars, used_outputs, strict=True) if u]
+    new_params = dict(
+        eqn.params, params=dispatch_params.replace(has_tangent=new_has_tangent)
     )
     return [True] * len(eqn.invars), eqn.replace(outvars=new_outvars, params=new_params)

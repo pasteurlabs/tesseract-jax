@@ -214,19 +214,28 @@ jax.grad(lambda v: jax.jvp(f, (x,), (v,))[1])(v)  # ✅
 
 When you differentiate with respect to only some of a Tesseract's differentiable inputs, or use only some of its differentiable outputs, `tesseract-jax` narrows the derivative request so the Tesseract computes only the sub-block it needs. The `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints are asked for the minimal set of input columns and output rows.
 
-Two mechanisms drive this, and they behave differently:
+Two mechanisms drive this:
 
-- **Input restriction is always applied.** If a tangent is a symbolic zero — because you differentiate with respect to a subset of arguments, or wrap an input in `jax.lax.stop_gradient` — the corresponding column is dropped at trace time. This holds whether or not the call is under `jax.jit`.
-- **Output restriction relies on JAX's dead-code elimination (DCE).** JAX only reports which outputs survive downstream when it runs DCE, which happens under `jax.jit` (any mode) and for un-jitted reverse-mode (`jax.grad` / `jax.jacrev`). It does **not** run for un-jitted forward mode: an eager `jax.jacfwd` (or `jax.jvp`) that uses only some outputs will still request every differentiable output row.
+- **Trace-time restriction is always applied.** If a tangent is a symbolic zero — because you differentiate with respect to a subset of arguments, or wrap an input in `jax.lax.stop_gradient` — the corresponding column is dropped at trace time. This holds whether or not the call is under `jax.jit`.
+- **Dead-code elimination (DCE) prunes what survives downstream.** When a differentiated input or output _carries_ a tangent but its result is discarded afterwards (e.g. subscripting the output of `jax.grad` or `jax.jacfwd`), the request is narrowed only if JAX runs DCE. DCE runs under `jax.jit` (any mode) and for un-jitted reverse mode (`jax.grad` / `jax.jacrev`). It does **not** run for un-jitted forward mode: an eager `jax.jacfwd` (or `jax.jvp`) that uses only some outputs will still request every differentiable output row.
+
+Output rows and input-gradient columns are both pruned this way:
 
 ```python
-def f(x):
+def f(x, y):
     # `tess` returns {"a": ..., "b": ...}, both differentiable; only "a" is used.
     return apply_tesseract(tess, {"x": x, "y": y})["a"]
 
-jax.jit(jax.jacfwd(f))(x)  # requests only the "a" rows
-jax.jacrev(f)(x)           # requests only the "a" rows (reverse mode runs DCE)
-jax.jacfwd(f)(x)           # ⚠️ requests "a" and "b" rows, then discards "b"
+jax.jit(jax.jacfwd(f))(x, y)  # requests only the "a" rows
+jax.jacrev(f)(x, y)           # requests only the "a" rows (reverse mode runs DCE)
+jax.jacfwd(f)(x, y)           # ⚠️ requests "a" and "b" rows, then discards "b"
+
+# Discarding an input gradient downstream prunes its column the same way:
+g = lambda x, y: jax.grad(lambda i: apply_tesseract(tess, i)["a"].sum())(
+    {"x": x, "y": y}
+)["x"]
+jax.jit(g)(x, y)  # requests only the gradient w.r.t. "x"
+g(x, y)           # ⚠️ requests both, then discards "y" (no DCE eagerly)
 ```
 
-Wrapping the outer call in `jax.jit` recovers the pruning in the last case. This only affects how much the Tesseract computes, never the returned value.
+Wrapping the outer call in `jax.jit` recovers the pruning in the last case of each block. This only affects how much the Tesseract computes, never the returned value.

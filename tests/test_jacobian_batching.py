@@ -498,6 +498,69 @@ def test_grad_restricts_vjp_inputs(
     )
 
 
+@pytest.mark.parametrize("use_jit", [False, True])
+def test_grad_discarding_input_prunes_vjp_via_dce(
+    pytree_tess, pytree_tess_inputs, use_jit, monkeypatch
+):
+    """Discarding a gradient downstream drops its VJP column, but only via DCE.
+
+    Here both differentiable inputs carry a tangent (both are traced grad
+    arguments), so trace-time ``has_tangent`` filtering keeps both columns.
+    Returning only ``alpha.x``'s gradient and discarding ``beta.z``'s leaves the
+    latter a dead outvar of the ``vector_jacobian_product`` equation, which the DCE
+    rule prunes. Like all DCE it fires only under ``jit``; un-jitted, the discard
+    happens in Python after ``grad`` returns and the full request stands.
+    """
+    inp = jax.tree.map(jnp.asarray, pytree_tess_inputs)
+    x = inp["alpha"]["x"]
+    z = inp["beta"]["z"]
+
+    def g(x, z):
+        full = {
+            **inp,
+            "alpha": {**inp["alpha"], "x": x},
+            "beta": {**inp["beta"], "z": z},
+        }
+        return apply_tesseract(
+            pytree_tess, full, materialize_jacobian=False, vmap_method="sequential"
+        )["result"].sum()
+
+    def f(x, z):
+        # grad wrt both, but only alpha.x's gradient is returned. beta.z's is dead.
+        gx, _gz = jax.grad(g, argnums=(0, 1))(x, z)
+        return gx
+
+    expected = f(x, z)  # before the spy, so it is not captured
+
+    captured: dict[str, Any] = {}
+    orig = pytree_tess.vector_jacobian_product
+
+    def spy(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
+        captured["vjp_inputs"] = sorted(vjp_inputs)
+        return orig(
+            inputs=inputs,
+            vjp_inputs=vjp_inputs,
+            vjp_outputs=vjp_outputs,
+            cotangent_vector=cotangent_vector,
+        )
+
+    monkeypatch.setattr(pytree_tess, "vector_jacobian_product", spy)
+    fn = jax.jit(f) if use_jit else f
+    got = fn(x, z)
+
+    np.testing.assert_allclose(got, expected, rtol=1e-5)
+    if use_jit:
+        # DCE drops beta.z's dead gradient column from the request.
+        assert captured["vjp_inputs"] == ["alpha.{x}"], (
+            f"expected only 'alpha.{{x}}' to be requested, got {captured['vjp_inputs']}"
+        )
+    else:
+        # No DCE eagerly: both columns are still requested, the discard is in Python.
+        assert captured["vjp_inputs"] == ["alpha.{x}", "beta.z"], (
+            f"expected both columns un-jitted, got {captured['vjp_inputs']}"
+        )
+
+
 def test_jitted_jvp_endpoint_restricts_jvp_outputs(
     pytree_tess, pytree_tess_inputs, monkeypatch
 ):
