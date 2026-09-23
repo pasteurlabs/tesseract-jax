@@ -35,28 +35,28 @@ def _fake_client() -> MagicMock:
     return c
 
 
-def test_device_transport_name_selects_transport():
-    j = Jaxeract(_fake_client(), device_transport="cuda_ipc")
-    assert j._device_transport == "cuda_ipc"
+def test_gpu_transport_name_selects_transport():
+    j = Jaxeract(_fake_client(), gpu_transport="cuda_ipc")
+    assert j._gpu_transport == "cuda_ipc"
 
 
 def test_default_is_host_roundtrip():
     j = Jaxeract(_fake_client())
-    assert j._device_transport is None
+    assert j._gpu_transport is None
 
 
 def test_unsupported_transport_is_rejected():
     # An unsupported name must not be silently accepted: it would route into the
     # cuda_ipc-specific GPU lowering and send an Accept the server has no backend
     # for.
-    with pytest.raises(ValueError, match="Unsupported device_transport"):
-        Jaxeract(_fake_client(), device_transport="nixl")
+    with pytest.raises(ValueError, match="Unsupported gpu_transport"):
+        Jaxeract(_fake_client(), gpu_transport="nixl")
 
 
 def test_equality_and_hash_key_on_transport():
     c = _fake_client()
-    a = Jaxeract(c, device_transport="cuda_ipc")
-    b = Jaxeract(c, device_transport="cuda_ipc")
+    a = Jaxeract(c, gpu_transport="cuda_ipc")
+    b = Jaxeract(c, gpu_transport="cuda_ipc")
     host = Jaxeract(c)
     # Same client + same transport -> interchangeable (so XLA may common them up);
     # different transport -> must not compare equal.
@@ -84,16 +84,16 @@ def _client_with_http() -> MagicMock:
     return c
 
 
-def test_device_transport_encoding_drives_gpu_transport_and_accept():
+def test_gpu_transport_encoding_drives_gpu_transport_and_accept():
     # tesseract-core keeps CPU encoding (``_output_format``) and GPU transport
     # (``_gpu_transport``) on separate axes: selecting a device transport must set
     # ``_gpu_transport`` and negotiate the server's GPU output transport via an
     # Accept media-type parameter, without disturbing ``_output_format``.
     c = _client_with_http()
-    j = Jaxeract(c, device_transport="cuda_ipc")
+    j = Jaxeract(c, gpu_transport="cuda_ipc")
     http = c._client
 
-    with j.device_transport_encoding():
+    with j.gpu_transport_encoding():
         assert http._gpu_transport == "cuda_ipc"
         assert http._output_format == "json+base64"
         assert (

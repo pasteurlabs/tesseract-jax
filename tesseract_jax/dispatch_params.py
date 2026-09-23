@@ -32,12 +32,16 @@ class DispatchParams:
         input_pytreedef: Treedef to reassemble the flat operands into inputs.
         output_pytreedef: Treedef for the outputs, taken from ``abstract_eval``.
         output_avals: Shape/dtype of each flat output, taken from ``abstract_eval``.
-        is_static_mask: One flag per input leaf, ``True`` where the leaf is a
+        static_input_mask: One flag per input leaf, ``True`` where the leaf is a
             non-array (static) value; arrays, concrete or traced, are ``False``.
-        has_tangent: One flag per non-static input, ``True`` where a (co)tangent
-            is carried for it.
+        has_tangent: One flag per non-static input, ``True`` where it carries a
+            nonzero tangent (apply/JVP) or receives a nonzero cotangent (VJP).
         static_output_mask: One flag per output leaf, ``True`` where the leaf is a
             non-array (static) value that never enters the bind.
+        has_cotangent: One flag per non-static output, ``True`` where a non-zero
+            cotangent is carried for it. A ``vector_jacobian_product`` skips the
+            outputs whose cotangent is a symbolic zero, since they add nothing to
+            the input gradients. Empty outside a ``vector_jacobian_product``.
         static_output_values: The value of each static output leaf, as reported by
             ``abstract_eval``. ``apply`` compares these against what the endpoint
             returns; the other endpoints leave it empty.
@@ -48,32 +52,37 @@ class DispatchParams:
             ``vector_jacobian_product`` or ``jacobian``).
         vmap_method: Strategy for ``jax.vmap`` batching; see ``batching.py``.
         materialize_jacobian: Strategy for batching (co)tangents at a single primal.
-        jac_input_paths: When set, restrict a ``jacobian`` call to these input columns.
-        jac_output_paths: When set, restrict a ``jacobian`` call to these output rows.
+        live_input_paths: When set, restrict a ``jacobian`` call to these live
+            input columns.
         jac_mode: Dtype convention for a ``jacobian`` call (``"bwd"`` / ``"fwd"``).
+        live_output_paths: When set, restrict the request to these live output
+            paths — the ``jacobian`` rows or the ``jacobian_vector_product`` output
+            tangents that survive trace-time restriction and dead-code elimination.
+            ``None`` requests every differentiable output (the un-pruned default).
     """
 
     static_args: tuple[Any, ...]
     input_pytreedef: PyTreeDef
     output_pytreedef: PyTreeDef
     output_avals: tuple[ShapeDtypeStruct, ...]
-    is_static_mask: tuple[bool, ...]
+    static_input_mask: tuple[bool, ...]
     has_tangent: tuple[bool, ...]
     client: "Jaxeract"
     eval_func: str
     static_output_mask: tuple[bool, ...] = ()
+    has_cotangent: tuple[bool, ...] = ()
     static_output_values: tuple[Any, ...] = ()
     check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None
     materialize_jacobian: bool | None = None
-    jac_input_paths: tuple[str, ...] | None = None
-    jac_output_paths: tuple[str, ...] | None = None
+    live_input_paths: tuple[str, ...] | None = None
     jac_mode: Literal["fwd", "bwd"] = "bwd"
+    live_output_paths: tuple[str, ...] | None = None
 
     @property
     def n_primals(self) -> int:
         """Number of non-static input leaves."""
-        return len(self.is_static_mask) - sum(self.is_static_mask)
+        return len(self.static_input_mask) - sum(self.static_input_mask)
 
     def replace(self, **changes: Any) -> "DispatchParams":
         """Return a copy with the given fields overridden."""

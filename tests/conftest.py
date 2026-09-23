@@ -209,8 +209,8 @@ def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
 # modes and yields the client together with the ``apply_tesseract`` kwargs that
 # select the transport, so a single test body runs on both:
 #
-#   * "host"     -> numpy compute, no device_transport (device->host->device)
-#   * "cuda_ipc" -> cupy compute + cuda_ipc opt-in, device_transport="cuda_ipc"
+#   * "host"     -> numpy compute, no gpu_transport (device->host->device)
+#   * "cuda_ipc" -> cupy compute + cuda_ipc opt-in, gpu_transport="cuda_ipc"
 #
 # The cuda_ipc leg skips where a GPU / CuPy / GPU-backed JAX is unavailable, via
 # the same guards as the standalone GPU fixtures.
@@ -242,7 +242,7 @@ def transport(request, tmp_path_factory):
             "TESSERACT_OUTPUT_FORMAT": "json+base64",
             "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
         }
-        apply_kwargs = {"device_transport": "cuda_ipc"}
+        apply_kwargs = {"gpu_transport": "cuda_ipc"}
     else:
         extra_env = {"TESSERACT_JAX_TEST_XP": "numpy"}
         apply_kwargs = {}
@@ -399,6 +399,12 @@ def non_abstract_tess() -> Tesseract:
 def drifting_static_tess() -> Tesseract:
     """Its apply reports a static output that abstract_eval did not predict."""
     return _load_tesseract("drifting_static_tesseract")
+
+
+@pytest.fixture
+def zero_cotangent_tess() -> Tesseract:
+    """Two differentiable outputs, one with a NaN gradient at x = 0."""
+    return _load_tesseract("zero_cotangent_tesseract")
 
 
 # ---------------------------------------------------------------------------

@@ -9,12 +9,13 @@ import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
 
+from tesseract_jax.dce import live_jvp_output_positions
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
-    _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
+    pytree_to_path_dict,
     split_args,
     unflatten_args,
     warn_on_static_output_drift,
@@ -47,13 +48,12 @@ def _on_device(values: "list | tuple") -> bool:
 def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype`` without leaving the device.
 
-    On the host path ``value`` is a NumPy array and we cast it to ``dtype`` here.
-
-    On the cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the
-    FFI handler copies straight into XLA's output buffer, so casting here would
-    force a device->host round-trip; it is returned untouched. That is not a
+    On the host path ``value`` is a NumPy array, cast to ``dtype`` here. On the
+    cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the FFI
+    handler copies straight into XLA's output buffer, so casting here would force
+    a device->host round-trip; it is returned untouched. Since that does not
     guarantee the device array already has ``dtype`` (tesseract-core does not pin
-    a jacobian endpoint's output dtype), so the native shim compares each result's
+    a jacobian endpoint's output dtype), the native shim checks each result's
     dtype and shape against the XLA output buffer and raises on a mismatch rather
     than reinterpreting bytes (see ``_cuda_shim.cc``).
     """
@@ -158,32 +158,29 @@ class Jaxeract:
         self,
         tesseract_client: Tesseract,
         *,
-        device_transport: str | None = None,
+        gpu_transport: str | None = None,
     ) -> None:
         """Initialize the Tesseract client.
 
-        ``device_transport`` names the on-device transport used to exchange GPU
+        ``gpu_transport`` names the on-device transport used to exchange GPU
         arrays with a served Tesseract instead of a host round-trip (e.g.
         ``"cuda_ipc"``), selecting one of the runtime's registered device
         transports. It gates both the GPU FFI lowering and the
-        :meth:`device_transport_encoding` context below.
+        :meth:`gpu_transport_encoding` context below.
         """
         # Only transports the GPU (FFI) lowering actually implements end-to-end
         # are accepted. The lowering is currently cuda_ipc-specific, so an
         # unsupported name would otherwise route silently into that path and send
         # an Accept the server has no backend for.
-        if (
-            device_transport is not None
-            and device_transport not in _SUPPORTED_TRANSPORTS
-        ):
+        if gpu_transport is not None and gpu_transport not in _SUPPORTED_TRANSPORTS:
             raise ValueError(
-                f"Unsupported device_transport {device_transport!r}; "
+                f"Unsupported gpu_transport {gpu_transport!r}; "
                 f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
             )
 
         self.client = tesseract_client
         # The transport name, or ``None`` for a host round-trip.
-        self._device_transport = device_transport
+        self._gpu_transport = gpu_transport
 
         self.tesseract_input_args = tuple(
             arg
@@ -223,7 +220,7 @@ class Jaxeract:
     def __eq__(self, other: object) -> bool:
         """Whether ``other`` wraps the same Tesseract in the same transport mode.
 
-        ``_device_transport`` participates: calls using different transports (or a
+        ``_gpu_transport`` participates: calls using different transports (or a
         transport vs. the host round-trip) to the same Tesseract lower to
         different custom calls, so they must not compare equal or XLA would common
         them up.
@@ -231,16 +228,15 @@ class Jaxeract:
         if not isinstance(other, Jaxeract):
             return NotImplemented
         return (
-            self.client == other.client
-            and self._device_transport == other._device_transport
+            self.client == other.client and self._gpu_transport == other._gpu_transport
         )
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client, self._device_transport))
+        return hash((Jaxeract, self.client, self._gpu_transport))
 
     @contextlib.contextmanager
-    def device_transport_encoding(self) -> Generator[None]:
+    def gpu_transport_encoding(self) -> Generator[None]:
         """Temporarily make the HTTP client use this call's device transport.
 
         Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
@@ -266,7 +262,7 @@ class Jaxeract:
         """
         client = getattr(self.client, "_client", None)
         if (
-            self._device_transport is None
+            self._gpu_transport is None
             or client is None
             or not hasattr(client, "_gpu_transport")
         ):
@@ -281,10 +277,10 @@ class Jaxeract:
         # carry the GPU transport as a media-type parameter on the same header.
         output_format = getattr(client, "_output_format", "json+base64")
 
-        client._gpu_transport = self._device_transport
+        client._gpu_transport = self._gpu_transport
         if session is not None:
             session.headers["Accept"] = (
-                f"application/{output_format}; gpu_transport={self._device_transport}"
+                f"application/{output_format}; gpu_transport={self._gpu_transport}"
             )
         try:
             yield
@@ -328,7 +324,7 @@ class Jaxeract:
             array_args,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
         )
 
         out_data = self.client.apply(inputs)
@@ -361,7 +357,14 @@ class Jaxeract:
         array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
-        """Call the Tesseract's jvp endpoint with the given arguments."""
+        """Call the Tesseract's jvp endpoint with the given arguments.
+
+        ``params.live_output_paths`` (set by the DCE rule) restricts the request
+        to the output tangents that survive dead-code elimination. ``None``
+        requests all differentiable outputs (the un-pruned default). The returned
+        tuple is aligned to the live output leaves in ``output_avals`` order — see
+        :func:`tesseract_jax.dce.live_jvp_output_positions`.
+        """
         has_tangent = params.has_tangent
         n_primals = params.n_primals
         primals = array_args[:n_primals]
@@ -377,22 +380,25 @@ class Jaxeract:
         full_tangents = combine_args([None] * n_zeros, tangents, has_tangent)
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
         tangent_inputs = unflatten_args(
             full_tangents,
             params.static_args,
             params.input_pytreedef,
-            params.is_static_mask,
+            params.static_input_mask,
             remove_static_args=True,
         )
 
-        flat_tangents = _pytree_to_tesseract_flat(
+        flat_tangents = pytree_to_path_dict(
             tangent_inputs, schema_paths=self.differentiable_input_paths
         )
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -401,7 +407,26 @@ class Jaxeract:
             schema_paths=self.differentiable_output_paths,
         )
 
-        jvp_outputs = [p for p, v in output_flat.items() if v is not None]
+        # Emit only the output tangents that survived DCE (``live_output_paths``).
+        # ``live_jvp_output_positions`` is the single source of truth for which
+        # leaves we return and in what order; abstract_eval sizes its result the
+        # same way.
+        live_positions = live_jvp_output_positions(
+            params.output_pytreedef,
+            len(params.output_avals),
+            self.differentiable_output_paths,
+            params.live_output_paths,
+            params.static_output_mask,
+        )
+        flat_items = list(output_flat.items())
+
+        # Only differentiable live leaves are requested from the Tesseract;
+        # non-differentiable leaves (if any) are NaN-padded below.
+        jvp_outputs = [
+            flat_items[pos][0]
+            for pos in live_positions
+            if flat_items[pos][1] is not None
+        ]
 
         out_data = self.client.jacobian_vector_product(
             inputs=primal_inputs,
@@ -410,12 +435,17 @@ class Jaxeract:
             tangent_vector=flat_tangents,
         )
 
+        # Emit exactly the live leaves, in ``live_positions`` order, so the tuple
+        # lines up with what abstract_eval declared. A non-differentiable live leaf
+        # (never requested from the Tesseract) gets a placeholder.
         on_device = _on_device(array_args)
         out = []
-        for path, aval in zip(output_flat, params.output_avals, strict=False):
+        for pos in live_positions:
+            path = flat_items[pos][0]
             if path in out_data:
                 out.append(out_data[path])
             else:
+                aval = params.output_avals[pos]
                 out.append(_placeholder(aval.shape, aval.dtype, on_device=on_device))
 
         return tuple(out)
@@ -437,18 +467,21 @@ class Jaxeract:
         primals = array_args[:n_primals]
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if params.jac_input_paths is None:
+        if params.live_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(params.jac_input_paths)
+            jac_inputs = list(params.live_input_paths)
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -456,10 +489,10 @@ class Jaxeract:
             ),
             schema_paths=self.differentiable_output_paths,
         )
-        if params.jac_output_paths is None:
+        if params.live_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(params.jac_output_paths)
+            jac_outputs = list(params.live_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,
@@ -496,19 +529,33 @@ class Jaxeract:
         cotangents = array_args[n_primals:]
 
         primal_inputs = unflatten_args(
-            primals, params.static_args, params.input_pytreedef, params.is_static_mask
+            primals,
+            params.static_args,
+            params.input_pytreedef,
+            params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
 
         vjp_inputs = [
-            p for p, m in zip(flat_inputs, params.is_static_mask, strict=True) if not m
+            p
+            for p, m in zip(flat_inputs, params.static_input_mask, strict=True)
+            if not m
         ]
 
         # now we filter for tangents
         vjp_inputs = [p for p, h in zip(vjp_inputs, has_tangent, strict=True) if h]
+
+        # Scatter cotangents back to full non-static-output width, inserting
+        # ``None`` where the cotangent was a symbolic zero.
+        if params.has_cotangent:
+            assert len(cotangents) == sum(params.has_cotangent)
+            cotan_iter = iter(cotangents)
+            cotangents = tuple(
+                next(cotan_iter) if h else None for h in params.has_cotangent
+            )
 
         # A static output leaf carries no cotangent, so fill its slot with None.
         # None is an empty pytree node and drops back out when the tree is
@@ -520,7 +567,7 @@ class Jaxeract:
                 params.static_output_mask,
             )
         cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
-        flat_cotangents = _pytree_to_tesseract_flat(
+        flat_cotangents = pytree_to_path_dict(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
         )
 
@@ -533,34 +580,8 @@ class Jaxeract:
             cotangent_vector=cotangents_dict,
         )
 
-        # JAX expects gradients for all inputs, even non-differentiable ones.
-        # Reconstruct the full output tuple in the same order as flat_inputs.
-        out = []
-        # all_idx indexes into flat_inputs, none_mask, and is_static_mask
-        array_idx = 0  # Index into array_args (which excludes static inputs)
-        tan_idx = 0  # Index into tangents/cotangents (which excludes non-differentiable inputs)
-        for all_idx, path in enumerate(flat_inputs):
-            if path in out_data:
-                # Path has a gradient from the server
-                out.append(out_data[path])
-                tan_idx += 1
-            elif (
-                tan_idx < len(has_tangent)
-                and not params.is_static_mask[all_idx]
-                and not has_tangent[tan_idx]
-            ):
-                # Non-differentiable but non-static input: emit a placeholder of
-                # the same shape/dtype as the corresponding input array. The slot
-                # exists for the tuple-length contract; JAX's transpose machinery
-                # doesn't consume it for any user-requested derivative.
-                arg = array_args[array_idx]
-                out.append(
-                    _placeholder(arg.shape, arg.dtype, on_device=_on_device([arg]))
-                )
-                tan_idx += 1
-
-            # Increment array_idx only for non-static inputs (which appear in array_args)
-            if not params.is_static_mask[all_idx]:
-                array_idx += 1
-
-        return tuple(out)
+        # Only differentiated inputs carry a cotangent back. A non-differentiated
+        # input's slot is never consumed by JAX's transpose, so we omit it here;
+        # abstract_eval declares the matching (shorter) output arity and the
+        # transpose rule scatters these back into full primal order.
+        return tuple(out_data[path] for path in flat_inputs if path in out_data)

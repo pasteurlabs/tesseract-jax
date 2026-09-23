@@ -691,7 +691,7 @@ def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
     ``unflatten_args(..., remove_static_args=True)`` replaces non-differentiated
-    leaves with ``None``, and ``_pytree_to_tesseract_flat`` derives list paths
+    leaves with ``None``, and ``pytree_to_path_dict`` derives list paths
     positionally. Dropping the ``None`` entries therefore renumbered the
     survivors, so a tangent for ``w[1]`` was shipped to the Tesseract under the
     path ``w.[0]`` — a silently wrong forward-mode gradient.
@@ -701,7 +701,7 @@ def test_list_index_survives_static_pruning():
 
     See https://github.com/pasteurlabs/tesseract-jax/issues/235.
     """
-    from tesseract_jax.tree_util import _pytree_to_tesseract_flat, unflatten_args
+    from tesseract_jax.tree_util import pytree_to_path_dict, unflatten_args
 
     tree = {"w": [jnp.zeros(3), jnp.ones(3)]}
     leaves, treedef = jax.tree.flatten(tree)
@@ -711,12 +711,12 @@ def test_list_index_survives_static_pruning():
         array_args=(leaves[1],),
         static_args=(leaves[0],),
         input_pytreedef=treedef,
-        is_static_mask=(True, False),
+        static_input_mask=(True, False),
         remove_static_args=True,
     )
 
     # schema_paths mirrors the OpenAPI ``differentiable_arrays`` mapping.
-    flat = _pytree_to_tesseract_flat(result, {"w.[]": {}})
+    flat = pytree_to_path_dict(result, {"w.[]": {}})
     assert list(flat) == ["w.[1]"]
 
 
@@ -773,7 +773,7 @@ def test_gather_tesseract_integer_io(gather_tess):
         )
         return jnp.sum(out["gathered"])
 
-    # `indices` reaches the vjp slot only while traced, since is_static_mask
+    # `indices` reaches the vjp slot only while traced, since static_input_mask
     # keys off tracer-ness -- hence jit rather than eager grad.
     grad = jax.jit(jax.grad(loss, argnums=0))(weights, indices)
     np.testing.assert_allclose(grad, [1.0, 0.0, 2.0], rtol=1e-6)
@@ -833,6 +833,58 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     count = np.asarray(tangents["count"])
     assert count.dtype == np.int32
     np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_unused_output_cotangent_is_not_requested(
+    zero_cotangent_tess, use_jit, monkeypatch
+):
+    """An output with a symbolic-zero cotangent is skipped in the vjp (issue #4).
+
+    ``unsafe`` has a NaN gradient at x = 0. Differentiating a loss that uses only
+    ``safe`` leaves ``unsafe``'s cotangent a symbolic zero, so it must neither be
+    instantiated to dense zeros nor requested -- otherwise its NaN gradient
+    poisons the result.
+    """
+    x = jnp.zeros(3, dtype="float64")
+
+    captured: dict[str, list] = {}
+    orig = zero_cotangent_tess.vector_jacobian_product
+
+    def spy(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
+        captured["vjp_outputs"] = sorted(vjp_outputs)
+        return orig(
+            inputs=inputs,
+            vjp_inputs=vjp_inputs,
+            vjp_outputs=vjp_outputs,
+            cotangent_vector=cotangent_vector,
+        )
+
+    monkeypatch.setattr(zero_cotangent_tess, "vector_jacobian_product", spy)
+
+    def loss(x):
+        return apply_tesseract(zero_cotangent_tess, dict(x=x))["safe"].sum()
+
+    if use_jit:
+        loss = jax.jit(loss)
+
+    grad = np.asarray(jax.grad(loss)(x))
+    np.testing.assert_array_equal(grad, [2.0, 2.0, 2.0])
+    # `unsafe` carries a symbolic-zero cotangent, so it is dropped from the bind
+    # operands and never sent to the endpoint.
+    assert captured["vjp_outputs"] == ["safe"]
+
+
+def test_used_output_cotangent_is_still_requested(zero_cotangent_tess):
+    """Using ``unsafe`` too must still request it, so pruning is not over-eager."""
+    x = jnp.zeros(3, dtype="float64")
+
+    def loss(x):
+        out = apply_tesseract(zero_cotangent_tess, dict(x=x))
+        return out["safe"].sum() + out["unsafe"].sum()
+
+    grad = np.asarray(jax.grad(loss)(x))
+    assert np.isinf(grad).all()
 
 
 @pytest.mark.parametrize(
