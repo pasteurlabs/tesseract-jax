@@ -210,7 +210,7 @@ v = jnp.ones_like(x)
 jax.grad(lambda v: jax.jvp(f, (x,), (v,))[1])(v)  # ✅
 ```
 
-## (How) does tesseract-jax respect partial differentiation?
+## How Tesseract-JAX handles partial differentiation *(it's automatic under JIT!)*
 
 When you differentiate with respect to only some of a Tesseract's differentiable inputs, or use only some of its differentiable outputs, `tesseract-jax` narrows the derivative request so the Tesseract computes only the sub-block it needs. The `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints are asked for the minimal set of input columns and output rows.
 
