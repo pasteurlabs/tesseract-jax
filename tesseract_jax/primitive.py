@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import operator
 import os
 from collections.abc import Callable, Sequence
@@ -20,7 +21,7 @@ from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
-from tesseract_jax.direct_trace import is_traceable, traced_tesseract
+from tesseract_jax.direct_trace import TracedClient, is_traceable
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -418,9 +419,9 @@ def tesseract_dispatch_lowering(
     dispatch = _build_dispatch_closure(params)
 
     if params.traceable:
-        # params.client already wraps a traced_tesseract() shim (set up front
-        # by apply_tesseract). Same dispatch closure as below; only the
-        # lowering mechanism changes to mlir.lower_fun. See tesseract_jax.direct_trace.
+        # params.client already replaced LocalClient with TracedClient() shim
+        # in apply_tesseract). Same dispatch closure as below; only the
+        # lowering mechanism changes to mlir.lower_fun.
         return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
@@ -1057,13 +1058,11 @@ def apply_tesseract(
             "directly."
         )
 
-    # traced_tesseract() only swaps the client's dispatch endpoints; abstract_eval
-    # (called below) and everything else still delegate to the real LocalClient,
-    # so one Jaxeract serves both that call and the later bind.
-    client = Jaxeract(
-        traced_tesseract(tesseract_client) if traceable else tesseract_client,
-        device_transport=device_transport,
-    )
+    if traceable:
+        # TracedClient swaps dispatch endpoint but not abstract_eval
+        tesseract_client = copy.copy(tesseract_client)
+        tesseract_client._client = TracedClient(tesseract_client._client)
+    client = Jaxeract(tesseract_client, device_transport=device_transport)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine

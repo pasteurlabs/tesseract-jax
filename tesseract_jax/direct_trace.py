@@ -3,20 +3,8 @@
 
 """Trace a Tesseract's real dispatch endpoints instead of dispatching them.
 
-``traced_tesseract(client)`` shallow-copies a ``Tesseract``, swapping its
-``LocalClient`` for ``TracedClient``. ``Tesseract``'s own ``apply`` /
-``jacobian_vector_product`` / ``vector_jacobian_product`` / ``jacobian``
-methods all forward through ``self._client.run_tesseract(endpoint, payload,
-...)``, so swapping just ``_client`` makes every one of them -- and
-``openapi_schema`` / ``available_endpoints``, which route through
-``run_tesseract`` too -- traceable, with ``TracedClient`` doing the one
-genuinely new thing: validating and calling the real Python endpoint
-directly. Everything else is ``Jaxeract``'s existing dispatch code
-(``tesseract_compat.py``), unchanged.
-
-Lowering the resulting dispatch closure with ``jax.interpreters.mlir.lower_fun``
-(``mlir.emit_python_callback`` for the normal path) is what makes
-``apply_tesseract(..., traceable=True)`` inline the endpoint into the jaxpr.
+Provides ``TracedClient`` as a drop-in replacement for ``LocalCLient``,
+validating and calling the real Python endpoint directly.
 
 Inputs and outputs are exchanged as validation-light objects: shapes/dtypes
 are checked against the same ``AbstractEval_``-prefixed sibling schema
@@ -27,7 +15,6 @@ follow from the same fact -- pydantic's ``Array[...]`` validator calls
 ``np.asarray``, which rejects a Tracer -- for every endpoint, not just ``apply``.
 """
 
-import copy
 import functools
 import warnings
 from types import ModuleType
@@ -42,20 +29,12 @@ from tesseract_jax.tree_util import to_shape_dtype_pytree
 def _extract_api_module_from_local_client(
     local_client: Any, endpoint: str = "apply"
 ) -> ModuleType | None:
-    """The real ``tesseract_api`` module backing a ``LocalClient``, or ``None``.
-
-    Tries the public ``LocalClient.api_module`` first (added in
-    pasteurlabs/tesseract-core#784). Falls back to recovering it from a
-    closure cell of the schema-validating endpoint wrapper
-    ``tesseract_core.runtime.core.create_endpoints`` built -- a private
-    integration point, tied to that function closing over a free variable
-    named ``api_module`` -- for tesseract-core versions before that PR.
-    TODO: delete the fallback once the floor is bumped past it.
-    """
+    """The real ``tesseract_api`` module backing a ``LocalClient``, or ``None``."""
     api_module = getattr(local_client, "api_module", None)
     if isinstance(api_module, ModuleType):
         return api_module
 
+    # TODO: Remove the below when #684 lands and maybe inline this function
     endpoints = getattr(local_client, "_endpoints", None)
     if not endpoints or endpoint not in endpoints:
         return None
@@ -75,6 +54,8 @@ def is_traceable(tesseract_client: Tesseract, endpoint: str = "apply") -> bool:
 
     Only a ``LocalClient`` (``Tesseract.from_tesseract_api``) has one: a
     served (``HTTPClient``) Tesseract runs in another process.
+
+    TODO: This function is only called once it will also be inlined when #684 lands
     """
     local_client = getattr(tesseract_client, "_client", None)
     return _extract_api_module_from_local_client(local_client, endpoint) is not None
@@ -145,46 +126,6 @@ def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
     return schema_node
 
 
-def _abstract_inputs_schema_for_local_client(local_client: Any, endpoint: str) -> tuple:
-    """The real ``api_module`` and its cached ``AbstractEval_`` input schema."""
-    api_module = _extract_api_module_from_local_client(local_client, endpoint)
-    if api_module is None:
-        raise ValueError(
-            f"traceable=True requires an in-process Tesseract built via "
-            f"Tesseract.from_tesseract_api(...); this client has no importable "
-            f"{endpoint!r} function to trace directly."
-        )
-    AbstractInputSchema = _abstract_input_schema(
-        api_module.InputSchema, api_module.OutputSchema
-    )
-    return api_module, AbstractInputSchema
-
-
-def _patch_inputs(AbstractInputSchema: type[BaseModel], real_inputs: Any) -> Any:
-    """Validate ``real_inputs``'s shapes/dtypes, then patch real values back in.
-
-    ``real_inputs`` is the full (static + dynamic) input pytree; its dynamic
-    leaves may be tracers.
-    """
-    abstract_inputs = to_shape_dtype_pytree(real_inputs)
-    abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
-    return _patch_with_real_values(abstract_instance.inputs, real_inputs)
-
-
-def _call_with_patched_inputs(endpoint_fn: Any, **kwargs: Any) -> Any:
-    """Call ``endpoint_fn(**kwargs)``, suppressing the expected schema/value mismatch warning.
-
-    The patched instance's ``ShapeDType``-typed fields don't match its real
-    values, so any ``.model_dump()`` -- inside the endpoint, or on its return
-    value -- warns about the mismatch; suppressed because it's expected.
-    """
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore", message="Pydantic serializer warnings", category=UserWarning
-        )
-        return endpoint_fn(**kwargs)
-
-
 class TracedClient:
     """Stands in for a Tesseract's ``LocalClient``, tracing endpoints that take ``inputs``.
 
@@ -221,25 +162,31 @@ class TracedClient:
             return self._local_client.run_tesseract(
                 endpoint, payload, run_id, stream_logs
             )
-        api_module, schema = _abstract_inputs_schema_for_local_client(
-            self._local_client, endpoint
+
+        api_module = _extract_api_module_from_local_client(self._local_client, endpoint)
+        if api_module is None:
+            raise ValueError(
+                "traceable=True requires an in-process Tesseract built via "
+                "Tesseract.from_tesseract_api(...)."
+            )
+
+        schema = _abstract_input_schema(api_module.InputSchema, api_module.OutputSchema)
+
+        orig_inputs = payload.pop("inputs")
+        abstract_inputs = to_shape_dtype_pytree(orig_inputs)
+        abstract_instance = schema.model_validate({"inputs": abstract_inputs})
+        patched_instance = _patch_with_real_values(
+            abstract_instance.inputs, orig_inputs
         )
-        payload = dict(payload)
-        patched_inputs = _patch_inputs(schema, payload.pop("inputs"))
-        out = _call_with_patched_inputs(
-            getattr(api_module, endpoint), inputs=patched_inputs, **payload
-        )
+
+        # If endpoint calls ``inputs.model_dump``, pydantic would raise a warning because
+        # our patched inputs is still an ``AbstractInputSchema`` even though it doesn't
+        # conform to this specification due to the presence of concrete arrays. This is
+        # expected so we can safely suppress.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message="Pydantic serializer warnings", category=UserWarning
+            )
+            out = getattr(api_module, endpoint)(inputs=patched_instance, **payload)
+
         return out.model_dump() if isinstance(out, BaseModel) else out
-
-
-def traced_tesseract(tesseract_client: Tesseract) -> Tesseract:
-    """A copy of ``tesseract_client`` that traces its dispatch endpoints directly.
-
-    Wraps the original ``_client`` (the real ``LocalClient``) in a
-    ``TracedClient``, giving a flat ``Tesseract -> TracedClient ->
-    LocalClient`` chain. Everything else on the copy (``._stream_logs``,
-    etc.) is shared with the original.
-    """
-    shim = copy.copy(tesseract_client)
-    shim._client = TracedClient(tesseract_client._client)
-    return shim
