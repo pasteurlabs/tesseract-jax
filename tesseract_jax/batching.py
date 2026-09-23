@@ -15,8 +15,8 @@ from jax import ShapeDtypeStruct
 
 from tesseract_jax.tree_util import (
     _merge_path,
-    _pytree_to_tesseract_flat,
     combine_args,
+    pytree_to_path_dict,
     split_args,
 )
 
@@ -200,7 +200,7 @@ def auto_experimental(
     dummy_tree = jax.tree.unflatten(
         params.input_pytreedef, range(len(params.static_input_mask))
     )
-    flat_info = _pytree_to_tesseract_flat(dummy_tree, schema_paths=diff_paths)
+    flat_info = pytree_to_path_dict(dummy_tree, schema_paths=diff_paths)
     primal_info = compress(flat_info.items(), (not s for s in params.static_input_mask))
     primal_templates = [
         _merge_path(path, diff_paths)[1] if val is not None else None

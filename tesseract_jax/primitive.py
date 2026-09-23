@@ -14,19 +14,21 @@ import jax.tree
 import numpy as np
 from jax import dtypes, extend
 from jax._src import dispatch
+from jax._src.interpreters import partial_eval as pe
 from jax.core import ShapedArray
 from jax.interpreters import ad, batching, mlir
 from jax.typing import ArrayLike
 from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
+from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     TransportArray,
-    _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
+    pytree_to_path_dict,
     split_args,
     unflatten_args,
 )
@@ -99,7 +101,7 @@ def tesseract_dispatch_abstract_eval(
 
     if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
-        # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
+        # `live_input_paths` / `live_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
@@ -108,7 +110,7 @@ def tesseract_dispatch_abstract_eval(
             params.input_pytreedef,
             params.static_input_mask,
         )
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=params.client.differentiable_input_paths
         )
         path_to_shape = {
@@ -116,7 +118,7 @@ def tesseract_dispatch_abstract_eval(
             for p, v in flat_inputs.items()
             if v is not None
         }
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -132,13 +134,13 @@ def tesseract_dispatch_abstract_eval(
             if v is not None
         }
         jac_inputs = (
-            list(params.jac_input_paths)
-            if params.jac_input_paths is not None
+            list(params.live_input_paths)
+            if params.live_input_paths is not None
             else list(path_to_shape.keys())
         )
         jac_outputs = (
-            list(params.jac_output_paths)
-            if params.jac_output_paths is not None
+            list(params.live_output_paths)
+            if params.live_output_paths is not None
             else list(out_path_to_aval.keys())
         )
         # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
@@ -154,11 +156,26 @@ def tesseract_dispatch_abstract_eval(
                 )
         return tuple(avals_out)
 
-    # Those have the same shape as the outputs
+    # apply / jvp emit one aval per (live) output leaf with the output's shape.
+    # ``live_output_paths`` (set by the DCE rule) prunes the jvp output tangents to
+    # those still used downstream; non-differentiable leaves are always retained
+    # and apply is never pruned.
     assert params.eval_func in ("apply", "jacobian_vector_product")
-    return tuple(
-        jax.core.ShapedArray(aval.shape, aval.dtype) for aval in params.output_avals
-    )
+    if (
+        params.eval_func == "jacobian_vector_product"
+        and params.live_output_paths is not None
+    ):
+        positions = live_jvp_output_positions(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.client.differentiable_output_paths,
+            params.live_output_paths,
+            params.static_output_mask,
+        )
+        selected = tuple(params.output_avals[p] for p in positions)
+    else:
+        selected = params.output_avals
+    return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in selected)
 
 
 def tesseract_dispatch_jvp_rule(
@@ -205,7 +222,7 @@ def tesseract_dispatch_jvp_rule(
             params.static_input_mask,
             remove_static_args=True,
         )
-        _flat_tangents = _pytree_to_tesseract_flat(
+        _flat_tangents = pytree_to_path_dict(
             _tangent_inputs, schema_paths=params.client.differentiable_input_paths
         )
         for path, val in _flat_tangents.items():
@@ -239,7 +256,7 @@ def tesseract_dispatch_jvp_rule(
     # size such a mask and it keeps the inherited value -- as does `res`, which
     # reproduces the original call over the original operands.
     #
-    # Not cosmetic: the batching rule turns `has_tangent` into `jac_input_paths`,
+    # Not cosmetic: the batching rule turns `has_tangent` into `live_input_paths`,
     # i.e. which columns of the Jacobian get requested, so an inherited mask
     # over-fetches whenever only some arguments are differentiated.
     # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the
@@ -261,8 +278,7 @@ def tesseract_dispatch_jvp_rule(
                 if params.eval_func == "vector_jacobian_product"
                 else "jacobian_vector_product"
             ),
-            jac_input_paths=None,
-            jac_output_paths=None,
+            live_input_paths=None,
             jac_mode="bwd",
         ),
     )
@@ -271,8 +287,7 @@ def tesseract_dispatch_jvp_rule(
         *in_args,
         params=params.replace(
             has_tangent=has_tangent,
-            jac_input_paths=None,
-            jac_output_paths=None,
+            live_input_paths=None,
             jac_mode="bwd",
         ),
     )
@@ -319,6 +334,25 @@ def tesseract_dispatch_transpose_rule(
             "  jax.linear_transpose(lambda t: jax.jvp(f, primals, (t,))[1], x)"
         )
 
+    # If forward-mode DCE pruned this jvp equation, ``cotangent`` only carries the
+    # live leaves; scatter them back to the full layout (symbolic zeros elsewhere)
+    # so the VJP dispatched below sees the un-pruned structure.
+    if params.live_output_paths is not None:
+        live_positions = live_jvp_output_positions(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.client.differentiable_output_paths,
+            params.live_output_paths,
+            params.static_output_mask,
+        )
+        full_cotangent: list[Any] = [
+            ad.Zero(jax.core.ShapedArray(aval.shape, aval.dtype))
+            for aval in params.output_avals
+        ]
+        for k, pos in enumerate(live_positions):
+            full_cotangent[pos] = cotangent[k]
+        cotangent = full_cotangent
+
     if params.eval_func == "jacobian_vector_product":
         # `cotangent` aligns with the Tesseract's own outputs.
         # Raise if a cotangent for a non-differentiable one is not a symbolic zero.
@@ -336,7 +370,7 @@ def tesseract_dispatch_transpose_rule(
             len(params.output_avals),
             params.static_output_mask,
         )
-        flat_output_info = _pytree_to_tesseract_flat(
+        flat_output_info = pytree_to_path_dict(
             dummy_output, schema_paths=params.client.differentiable_output_paths
         )
         for cotan, (path, is_diff) in zip(
@@ -392,7 +426,7 @@ def tesseract_dispatch_transpose_rule(
         params.input_pytreedef,
         params.static_input_mask,
     )
-    _flat_inputs = _pytree_to_tesseract_flat(
+    _flat_inputs = pytree_to_path_dict(
         _primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
     _non_static_paths = [
@@ -679,10 +713,10 @@ def _batched_via_jacobian(
     primal_inputs = unflatten_args(
         primals, params.static_args, params.input_pytreedef, params.static_input_mask
     )
-    flat_inputs = _pytree_to_tesseract_flat(
+    flat_inputs = pytree_to_path_dict(
         primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
-    output_flat = _pytree_to_tesseract_flat(
+    output_flat = pytree_to_path_dict(
         dummy_output_tree(
             params.output_pytreedef,
             len(params.output_avals),
@@ -706,23 +740,27 @@ def _batched_via_jacobian(
             diff_input_path_to_pos[p] = non_static_idx
         non_static_idx += 1
 
-    # Map each diff output path to its leaf index in the output pytree.
-    # ``keys()`` give the path order of the Jacobian's rows; ``values()`` give
-    # the corresponding ``tans`` / ``output_avals`` positions, dropping unrequested
-    # outputs on the reverse-mode path (signalled by ``has_cotangent``).
+    # Map each live diff output path to its leaf index in the output pytree (the
+    # Jacobian's row order). Dead rows are dropped: via ``live_output_paths`` on
+    # the JVP path, via ``has_cotangent`` on the VJP path.
     is_jvp = params.eval_func == "jacobian_vector_product"
     diff_output_path_to_pos: dict[str, int] = {
         p: i
         for i, (p, v) in enumerate(output_flat.items())
-        if v is not None and (is_jvp or params.has_cotangent[i])
+        if v is not None
+        and (
+            (params.live_output_paths is None or p in params.live_output_paths)
+            if is_jvp
+            else params.has_cotangent[i]
+        )
     }
 
     jac_arrays = tesseract_dispatch_p.bind(
         *primals,
         params=params.replace(
             eval_func="jacobian",
-            jac_input_paths=tuple(diff_input_path_to_pos),
-            jac_output_paths=tuple(diff_output_path_to_pos),
+            live_input_paths=tuple(diff_input_path_to_pos),
+            live_output_paths=tuple(diff_output_path_to_pos),
             jac_mode="fwd" if params.eval_func == "jacobian_vector_product" else "bwd",
         ),
     )
@@ -784,10 +822,22 @@ def _batched_via_jacobian(
             diff_avals,
             jac_blocks,
         )
+        # Emit exactly the leaves this bind is contracted to emit: the
+        # non-differentiable ones (whose tangent is a NaN) plus the differentiable
+        # ones DCE left live. `live_jvp_output_positions` is the shared source of
+        # truth with abstract_eval, so the two agree on the count and the order.
+        positions = live_jvp_output_positions(
+            params.output_pytreedef,
+            len(params.output_avals),
+            params.client.differentiable_output_paths,
+            params.live_output_paths,
+            params.static_output_mask,
+        )
+        is_diff = [v is not None for _p, v in output_flat.items()]
         outs = _pad_nans(
             diff_outs,
-            params.output_avals,
-            [v is not None for _p, v in output_flat.items()],
+            [params.output_avals[pos] for pos in positions],
+            [is_diff[pos] for pos in positions],
         )
         return outs, (0,) * len(outs)
 
@@ -825,6 +875,7 @@ def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
+pe.dce_rules[tesseract_dispatch_p] = tesseract_dispatch_dce_rule
 
 
 def _check_dtype(dtype: Any) -> None:

@@ -52,9 +52,13 @@ class DispatchParams:
             ``vector_jacobian_product`` or ``jacobian``).
         vmap_method: Strategy for ``jax.vmap`` batching; see ``batching.py``.
         materialize_jacobian: Strategy for batching (co)tangents at a single primal.
-        jac_input_paths: When set, restrict a ``jacobian`` call to these input columns.
-        jac_output_paths: When set, restrict a ``jacobian`` call to these output rows.
+        live_input_paths: When set, restrict a ``jacobian`` call to these live
+            input columns.
         jac_mode: Dtype convention for a ``jacobian`` call (``"bwd"`` / ``"fwd"``).
+        live_output_paths: When set, restrict the request to these live output
+            paths — the ``jacobian`` rows or the ``jacobian_vector_product`` output
+            tangents that survive trace-time restriction and dead-code elimination.
+            ``None`` requests every differentiable output (the un-pruned default).
     """
 
     static_args: tuple[Any, ...]
@@ -71,9 +75,9 @@ class DispatchParams:
     check_static_outputs: bool = True
     vmap_method: "VmapMethod" = None
     materialize_jacobian: bool | None = None
-    jac_input_paths: tuple[str, ...] | None = None
-    jac_output_paths: tuple[str, ...] | None = None
+    live_input_paths: tuple[str, ...] | None = None
     jac_mode: Literal["fwd", "bwd"] = "bwd"
+    live_output_paths: tuple[str, ...] | None = None
 
     @property
     def n_primals(self) -> int:

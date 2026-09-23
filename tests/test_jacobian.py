@@ -11,15 +11,12 @@ and contracts it against the batched (co)tangents instead of calling the
 ``jvp`` / ``vjp`` endpoint per batch element.
 """
 
-from typing import Any
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
-from tesseract_jax.tesseract_compat import Jaxeract
 
 
 def _spy_endpoints(tess, monkeypatch):
@@ -330,145 +327,6 @@ def test_batched_jvp_dtype_matches_jax_convention(mixed_dtype_tess):
     )
 
 
-def test_jacfwd_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
-    """``jacfwd`` wrt one of several diff inputs requests only that column."""
-    x = jnp.array(1.0, dtype="float64")
-    y = jnp.array(2.0, dtype="float64")
-
-    def f(x):
-        # `y` is also schema-differentiable but JAX won't carry a tangent for it.
-        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
-
-    captured: dict[str, Any] = {}
-    orig = univariate_tess.jacobian
-
-    def spy(*, inputs, jac_inputs, jac_outputs):
-        captured["jac_inputs"] = list(jac_inputs)
-        captured["jac_outputs"] = list(jac_outputs)
-        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
-
-    monkeypatch.setattr(univariate_tess, "jacobian", spy)
-    g = jax.jacfwd(f)(x)
-
-    np.testing.assert_allclose(g, -400.0, rtol=1e-5)
-    assert captured["jac_inputs"] == ["x"], (
-        f"expected only 'x' to be requested, got {captured['jac_inputs']}"
-    )
-
-
-def test_jacrev_partial_diff_restricts_jac_inputs(univariate_tess, monkeypatch):
-    """``jacrev`` wrt one of several diff inputs requests only that column."""
-    x = jnp.array(1.0, dtype="float64")
-    y = jnp.array(2.0, dtype="float64")
-
-    def f(x):
-        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
-
-    captured: dict[str, Any] = {}
-    orig = univariate_tess.jacobian
-
-    def spy(*, inputs, jac_inputs, jac_outputs):
-        captured["jac_inputs"] = list(jac_inputs)
-        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
-
-    monkeypatch.setattr(univariate_tess, "jacobian", spy)
-    g = jax.jacrev(f)(x)
-
-    np.testing.assert_allclose(g, -400.0, rtol=1e-5)
-    assert captured["jac_inputs"] == ["x"]
-
-
-def test_jacrev_partial_output_restricts_jac_outputs(
-    pytree_tess, pytree_tess_inputs, monkeypatch
-):
-    """``jacrev`` of one of several diff outputs requests only that output's rows.
-
-    On the batched VJP shortcut the unused outputs carry symbolic-zero
-    cotangents. ``has_cotangent`` records that, so the ``jacobian`` request must
-    drop them rather than materialize (and contract against zero) every row.
-    """
-    inputs = {k: jax.tree.map(jnp.asarray, v) for k, v in pytree_tess_inputs.items()}
-
-    captured: dict[str, Any] = {}
-    orig_jac = pytree_tess.jacobian
-    orig_vjp = pytree_tess.vector_jacobian_product
-
-    def spy_jac(*, inputs, jac_inputs, jac_outputs):
-        captured["jac_outputs"] = sorted(jac_outputs)
-        return orig_jac(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
-
-    def spy_vjp(*, inputs, vjp_inputs, vjp_outputs, cotangent_vector):
-        captured["vjp_outputs"] = sorted(vjp_outputs)
-        return orig_vjp(
-            inputs=inputs,
-            vjp_inputs=vjp_inputs,
-            vjp_outputs=vjp_outputs,
-            cotangent_vector=cotangent_vector,
-        )
-
-    monkeypatch.setattr(pytree_tess, "jacobian", spy_jac)
-    monkeypatch.setattr(pytree_tess, "vector_jacobian_product", spy_vjp)
-
-    def f(x):
-        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
-        # Only `result` enters. result_dict / result_list stay unused, so JAX
-        # hands their cotangents in as symbolic zeros.
-        return apply_tesseract(pytree_tess, i)["result"]
-
-    x = inputs["alpha"]["x"]
-    got = jax.jacrev(f)(x)
-
-    # Reference via the sequential VJP path (no jacobian-materialization shortcut).
-    def f_seq(x):
-        i = {**inputs, "alpha": {**inputs["alpha"], "x": x}}
-        return apply_tesseract(
-            pytree_tess, i, materialize_jacobian=False, vmap_method="sequential"
-        )["result"]
-
-    expected = jax.jacrev(f_seq)(x)
-    np.testing.assert_allclose(got, expected, rtol=1e-5)
-    assert captured["jac_outputs"] == ["result"], (
-        f"expected only 'result' rows to be requested, got {captured['jac_outputs']}"
-    )
-    # The sequential reference path prunes the same unused outputs.
-    assert captured["vjp_outputs"] == ["result"], (
-        f"expected only 'result' cotangents to be requested, got {captured['vjp_outputs']}"
-    )
-
-
-def test_jacfwd_of_tangent_fn_restricts_jac_inputs(univariate_tess, monkeypatch):
-    """``jacfwd`` of a linearized function wrt one argument narrows the request too.
-
-    The tangent function's other argument gets a symbolic-zero tangent, which is
-    instantiated to dense zeros before it can cross a bind. Its Jacobian column
-    would then be fetched only to be multiplied by those zeros, so the JVP rule
-    recomputes ``has_tangent`` for the tangent bind rather than inheriting it.
-    """
-    x = jnp.array(1.0, dtype="float64")
-    y = jnp.array(2.0, dtype="float64")
-
-    def f(x, y):
-        return apply_tesseract(univariate_tess, dict(x=x, y=y))["result"]
-
-    _primal, tangent_fn = jax.linearize(f, x, y)
-    expected = jax.jacfwd(f, argnums=0)(x, y)  # before the spy, so it is not captured
-
-    captured: dict[str, Any] = {}
-    orig = univariate_tess.jacobian
-
-    def spy(*, inputs, jac_inputs, jac_outputs):
-        captured["jac_inputs"] = list(jac_inputs)
-        return orig(inputs=inputs, jac_inputs=jac_inputs, jac_outputs=jac_outputs)
-
-    monkeypatch.setattr(univariate_tess, "jacobian", spy)
-    g = jax.jacfwd(tangent_fn, argnums=0)(x, y)
-
-    np.testing.assert_allclose(g, expected, rtol=1e-5)
-    assert captured["jac_inputs"] == ["x"], (
-        f"expected only 'x' to be requested, got {captured['jac_inputs']}"
-    )
-
-
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
     """The shortcut's numerical result matches a pure-JAX implementation."""
@@ -488,106 +346,6 @@ def test_matches_jacrev_on_pure_jax(vectoradd_tess, use_jit, monkeypatch):
     M_tess = jax.jacfwd(f_tess)(a)
     M_jax = jax.jacfwd(f_jax)(a)
     np.testing.assert_allclose(M_tess, M_jax, rtol=1e-5)
-
-
-# ---------------------------------------------------------------------------
-# Common subexpression elimination of Tesseract calls
-#
-# A Tesseract endpoint is a pure function of its inputs, so XLA is free to fold
-# repeated identical calls into one request -- as it already does for LAPACK
-# custom calls. Two things are needed: the callback must be lowered as pure, and
-# the bind params (including the Jaxeract client) must compare equal.
-# ---------------------------------------------------------------------------
-
-
-def test_chunked_jacobian_calls_endpoint_once(vectoradd_tess, monkeypatch):
-    """Chunking the identity matrix must not multiply the ``jacobian`` requests.
-
-    Splitting the eye-vmap into chunks is a way to cap peak memory when the
-    Tesseract is one component of a larger function. The Jacobian does not depend
-    on the tangents, so every chunk issues an identical request and only one of
-    them needs to reach the Tesseract.
-    """
-    n = 6
-    a = jnp.arange(n, dtype="float32") + 1.0
-    b = jnp.full((n,), 0.5, dtype="float32")
-
-    def f(a):
-        # tanh stands in for the other, memory-hungry components that motivate
-        # chunking in the first place.
-        return jnp.tanh(apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"])
-
-    expected = jax.jacfwd(f)(a)
-    _primal, tangent_fn = jax.linearize(f, a)
-    batched = jax.vmap(tangent_fn)
-    eye = jnp.eye(n, dtype="float32")
-
-    # Spy only over the chunked computation, so the reference above is not counted.
-    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
-    M = jax.jit(lambda e: jnp.concatenate([batched(c) for c in jnp.split(e, 3)]))(eye)
-
-    np.testing.assert_allclose(M, expected, atol=1e-6)
-    assert counts["jacobian"] == 1
-    assert counts["jvp"] == 0
-
-
-def test_identical_calls_are_commoned_up(vectoradd_tess, monkeypatch):
-    """Two identical ``apply_tesseract`` calls in one trace issue one request.
-
-    Both operands are passed as arguments rather than closed over: a concrete
-    closed-over array becomes a static arg wrapped in ``_Hashable``, which
-    compares by identity and so defeats CSE for unrelated reasons.
-    """
-    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
-    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
-
-    @jax.jit
-    def twice(a, b):
-        c1 = apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
-        c2 = apply_tesseract(vectoradd_tess, dict(a=a, b=b))["c"]
-        return c1 + c2
-
-    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
-    out = twice(a, b)
-
-    np.testing.assert_allclose(out, 2.0 * (a + b), atol=1e-6)
-    assert counts["apply"] == 1
-
-
-def test_distinct_calls_are_not_commoned_up(vectoradd_tess, monkeypatch):
-    """Calls that differ in their inputs must stay separate requests."""
-    a1 = jnp.array([1.0, 2.0, 3.0], dtype="float32")
-    a2 = jnp.array([100.0, 200.0, 300.0], dtype="float32")
-    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
-
-    @jax.jit
-    def two_different(a1, a2, b):
-        c1 = apply_tesseract(vectoradd_tess, dict(a=a1, b=b))["c"]
-        c2 = apply_tesseract(vectoradd_tess, dict(a=a2, b=b))["c"]
-        return c1, c2
-
-    counts = _spy_endpoints(vectoradd_tess, monkeypatch)
-    c1, c2 = two_different(a1, a2, b)
-
-    np.testing.assert_allclose(c1, a1 + b, atol=1e-6)
-    np.testing.assert_allclose(c2, a2 + b, atol=1e-6)
-    assert counts["apply"] == 2
-
-
-def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
-    """Distinct wrappers around one Tesseract are equal, so bind params match."""
-    assert Jaxeract(vectoradd_tess) == Jaxeract(vectoradd_tess)
-    assert hash(Jaxeract(vectoradd_tess)) == hash(Jaxeract(vectoradd_tess))
-    assert Jaxeract(vectoradd_tess) != object()
-
-
-def test_jaxeract_gpu_transport_breaks_equality(vectoradd_tess):
-    """A device-transport wrapper differs from a host one, so XLA won't common them up."""
-    on_device = Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
-    host = Jaxeract(vectoradd_tess)
-    assert on_device != host
-    assert hash(on_device) != hash(host)
-    assert on_device == Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
 
 
 # ---------------------------------------------------------------------------

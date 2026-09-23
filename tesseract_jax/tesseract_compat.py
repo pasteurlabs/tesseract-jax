@@ -9,12 +9,13 @@ import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
 
+from tesseract_jax.dce import live_jvp_output_positions
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
-    _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
+    pytree_to_path_dict,
     split_args,
     unflatten_args,
     warn_on_static_output_drift,
@@ -356,7 +357,14 @@ class Jaxeract:
         array_args: tuple[TransportArray, ...],
         params: "DispatchParams",
     ) -> PyTree:
-        """Call the Tesseract's jvp endpoint with the given arguments."""
+        """Call the Tesseract's jvp endpoint with the given arguments.
+
+        ``params.live_output_paths`` (set by the DCE rule) restricts the request
+        to the output tangents that survive dead-code elimination. ``None``
+        requests all differentiable outputs (the un-pruned default). The returned
+        tuple is aligned to the live output leaves in ``output_avals`` order — see
+        :func:`tesseract_jax.dce.live_jvp_output_positions`.
+        """
         has_tangent = params.has_tangent
         n_primals = params.n_primals
         primals = array_args[:n_primals]
@@ -385,12 +393,12 @@ class Jaxeract:
             remove_static_args=True,
         )
 
-        flat_tangents = _pytree_to_tesseract_flat(
+        flat_tangents = pytree_to_path_dict(
             tangent_inputs, schema_paths=self.differentiable_input_paths
         )
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -399,7 +407,26 @@ class Jaxeract:
             schema_paths=self.differentiable_output_paths,
         )
 
-        jvp_outputs = [p for p, v in output_flat.items() if v is not None]
+        # Emit only the output tangents that survived DCE (``live_output_paths``).
+        # ``live_jvp_output_positions`` is the single source of truth for which
+        # leaves we return and in what order; abstract_eval sizes its result the
+        # same way.
+        live_positions = live_jvp_output_positions(
+            params.output_pytreedef,
+            len(params.output_avals),
+            self.differentiable_output_paths,
+            params.live_output_paths,
+            params.static_output_mask,
+        )
+        flat_items = list(output_flat.items())
+
+        # Only differentiable live leaves are requested from the Tesseract;
+        # non-differentiable leaves (if any) are NaN-padded below.
+        jvp_outputs = [
+            flat_items[pos][0]
+            for pos in live_positions
+            if flat_items[pos][1] is not None
+        ]
 
         out_data = self.client.jacobian_vector_product(
             inputs=primal_inputs,
@@ -408,12 +435,17 @@ class Jaxeract:
             tangent_vector=flat_tangents,
         )
 
+        # Emit exactly the live leaves, in ``live_positions`` order, so the tuple
+        # lines up with what abstract_eval declared. A non-differentiable live leaf
+        # (never requested from the Tesseract) gets a placeholder.
         on_device = _on_device(array_args)
         out = []
-        for path, aval in zip(output_flat, params.output_avals, strict=False):
+        for pos in live_positions:
+            path = flat_items[pos][0]
             if path in out_data:
                 out.append(out_data[path])
             else:
+                aval = params.output_avals[pos]
                 out.append(_placeholder(aval.shape, aval.dtype, on_device=on_device))
 
         return tuple(out)
@@ -441,15 +473,15 @@ class Jaxeract:
             params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if params.jac_input_paths is None:
+        if params.live_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(params.jac_input_paths)
+            jac_inputs = list(params.live_input_paths)
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -457,10 +489,10 @@ class Jaxeract:
             ),
             schema_paths=self.differentiable_output_paths,
         )
-        if params.jac_output_paths is None:
+        if params.live_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(params.jac_output_paths)
+            jac_outputs = list(params.live_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,
@@ -503,7 +535,7 @@ class Jaxeract:
             params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
 
@@ -535,7 +567,7 @@ class Jaxeract:
                 params.static_output_mask,
             )
         cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
-        flat_cotangents = _pytree_to_tesseract_flat(
+        flat_cotangents = pytree_to_path_dict(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
         )
 
