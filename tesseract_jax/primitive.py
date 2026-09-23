@@ -101,7 +101,7 @@ def tesseract_dispatch_abstract_eval(
 
     if params.eval_func == "jacobian":
         # One array per (diff_output, diff_input) pair, shape = out_shape + in_shape.
-        # `jac_input_paths` / `jac_output_paths` (when provided) restrict the
+        # `live_input_paths` / `live_output_paths` (when provided) restrict the
         # request to a sub-block of the Jacobian.
         primal_avals = array_args[:n_primals]
         primal_inputs = unflatten_args(
@@ -134,13 +134,13 @@ def tesseract_dispatch_abstract_eval(
             if v is not None
         }
         jac_inputs = (
-            list(params.jac_input_paths)
-            if params.jac_input_paths is not None
+            list(params.live_input_paths)
+            if params.live_input_paths is not None
             else list(path_to_shape.keys())
         )
         jac_outputs = (
-            list(params.jac_output_paths)
-            if params.jac_output_paths is not None
+            list(params.live_output_paths)
+            if params.live_output_paths is not None
             else list(out_path_to_aval.keys())
         )
         # Per JAX convention: fwd-mode → output dtype (jacfwd), bwd-mode →
@@ -161,7 +161,10 @@ def tesseract_dispatch_abstract_eval(
     # those still used downstream; non-differentiable leaves are always retained
     # and apply is never pruned.
     assert params.eval_func in ("apply", "jacobian_vector_product")
-    if params.eval_func == "jacobian_vector_product":
+    if (
+        params.eval_func == "jacobian_vector_product"
+        and params.live_output_paths is not None
+    ):
         positions = live_jvp_output_positions(
             params.output_pytreedef,
             len(params.output_avals),
@@ -253,7 +256,7 @@ def tesseract_dispatch_jvp_rule(
     # size such a mask and it keeps the inherited value -- as does `res`, which
     # reproduces the original call over the original operands.
     #
-    # Not cosmetic: the batching rule turns `has_tangent` into `jac_input_paths`,
+    # Not cosmetic: the batching rule turns `has_tangent` into `live_input_paths`,
     # i.e. which columns of the Jacobian get requested, so an inherited mask
     # over-fetches whenever only some arguments are differentiated.
     # `jacfwd(lin_fn, argnums=0)` would ask for every column and then multiply the
@@ -275,8 +278,7 @@ def tesseract_dispatch_jvp_rule(
                 if params.eval_func == "vector_jacobian_product"
                 else "jacobian_vector_product"
             ),
-            jac_input_paths=None,
-            jac_output_paths=None,
+            live_input_paths=None,
             jac_mode="bwd",
         ),
     )
@@ -285,8 +287,7 @@ def tesseract_dispatch_jvp_rule(
         *in_args,
         params=params.replace(
             has_tangent=has_tangent,
-            jac_input_paths=None,
-            jac_output_paths=None,
+            live_input_paths=None,
             jac_mode="bwd",
         ),
     )
@@ -758,8 +759,8 @@ def _batched_via_jacobian(
         *primals,
         params=params.replace(
             eval_func="jacobian",
-            jac_input_paths=tuple(diff_input_path_to_pos),
-            jac_output_paths=tuple(diff_output_path_to_pos),
+            live_input_paths=tuple(diff_input_path_to_pos),
+            live_output_paths=tuple(diff_output_path_to_pos),
             jac_mode="fwd" if params.eval_func == "jacobian_vector_product" else "bwd",
         ),
     )

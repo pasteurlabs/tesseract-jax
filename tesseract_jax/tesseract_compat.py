@@ -476,10 +476,10 @@ class Jaxeract:
         flat_inputs = _pytree_to_tesseract_flat(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
-        if params.jac_input_paths is None:
+        if params.live_input_paths is None:
             jac_inputs = [p for p, v in flat_inputs.items() if v is not None]
         else:
-            jac_inputs = list(params.jac_input_paths)
+            jac_inputs = list(params.live_input_paths)
 
         output_flat = _pytree_to_tesseract_flat(
             dummy_output_tree(
@@ -489,10 +489,10 @@ class Jaxeract:
             ),
             schema_paths=self.differentiable_output_paths,
         )
-        if params.jac_output_paths is None:
+        if params.live_output_paths is None:
             jac_outputs = [p for p, v in output_flat.items() if v is not None]
         else:
-            jac_outputs = list(params.jac_output_paths)
+            jac_outputs = list(params.live_output_paths)
 
         out_data = self.client.jacobian(
             inputs=primal_inputs,

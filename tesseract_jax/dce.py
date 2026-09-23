@@ -7,7 +7,7 @@ AD requests the derivative of *every* differentiable leaf even when only a few
 survive downstream (e.g. ``jacfwd`` of a function that returns one leaf of a
 multi-output Tesseract, or ``jax.grad(...)[...]`` that keeps one input gradient).
 JAX exposes the survivors to a primitive's DCE rule, letting us narrow the
-requested sub-block (the ``jac_*_paths`` for a ``jacobian``, ``live_output_paths``
+requested sub-block (the ``live_*_paths`` for a ``jacobian``, ``live_output_paths``
 for a ``jacobian_vector_product``, ``has_tangent`` for a
 ``vector_jacobian_product``) and drop the dead outvars so the Tesseract computes
 only what is used.
@@ -50,17 +50,12 @@ def live_jvp_output_positions(
     Positions are returned in ``output_avals`` order so that abstract_eval, the
     endpoint wrapper and the DCE rule all agree on the layout. A leaf is kept
     when it is non-differentiable (its tangent is a cheap NaN and cannot be named
-    by a path) or when its differentiable path is in ``live_output_paths``.
-    ``live_output_paths is None`` means "keep everything" (the un-pruned default,
-    e.g. when DCE never ran).
+    by a path) or when its differentiable path is in ``live_output_paths``;
+    ``live_output_paths is None`` means "keep everything".
 
     Static (non-array) output leaves never enter the bind, so ``static_output_mask``
     drops them from the layout via :func:`dummy_output_tree`; the positions returned
     then index ``output_avals``, which holds arrays only.
-
-    This is the single source of truth shared by ``abstract_eval`` (which sizes
-    the primitive's outputs) and ``Jaxeract.jacobian_vector_product`` (which
-    assembles them); keeping them in lock-step is what makes pruning safe.
     """
     output_flat = _pytree_to_tesseract_flat(
         dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
@@ -79,7 +74,7 @@ def tesseract_dispatch_dce_rule(
     """Drop dead derivative outputs from a ``tesseract_dispatch`` equation.
 
     JAX surfaces which outputs survive downstream as ``used_outputs``; we narrow
-    the requested sub-block (the ``jac_*_paths`` for a ``jacobian``,
+    the requested sub-block (the ``live_*_paths`` for a ``jacobian``,
     ``live_output_paths`` for a ``jacobian_vector_product``, ``has_tangent`` for a
     ``vector_jacobian_product``) and drop the dead outvars so the Tesseract
     computes only what is used.
@@ -112,8 +107,8 @@ def _dce_jacobian(
 ) -> tuple[list[bool], JaxprEqn | None]:
     """Prune a ``jacobian`` equation's (out x in) block grid to its live rectangle."""
     dispatch_params = eqn.params["params"]
-    in_paths = dispatch_params.jac_input_paths
-    out_paths = dispatch_params.jac_output_paths
+    in_paths = dispatch_params.live_input_paths
+    out_paths = dispatch_params.live_output_paths
     if in_paths is None or out_paths is None:
         # No explicit path layout to map ``used_outputs`` onto; keep everything.
         return [True] * len(eqn.invars), eqn
@@ -127,8 +122,8 @@ def _dce_jacobian(
     new_params = dict(
         eqn.params,
         params=dispatch_params.replace(
-            jac_output_paths=tuple(out_paths[i] for i in live_out),
-            jac_input_paths=tuple(in_paths[j] for j in live_in),
+            live_output_paths=tuple(out_paths[i] for i in live_out),
+            live_input_paths=tuple(in_paths[j] for j in live_in),
         ),
     )
     # Emit the live rectangle in the same row-major order abstract_eval expects.
@@ -195,21 +190,17 @@ def _dce_vector_jacobian_product(
 ) -> tuple[list[bool], JaxprEqn | None]:
     """Prune a ``vector_jacobian_product`` equation's dead input gradients.
 
-    A VJP bind returns one array per differentiated primal (the ``has_tangent``-True
-    slots, in primal order; see the reverse branch of
-    ``tesseract_dispatch_abstract_eval``), so ``used_outputs`` lines up 1:1 with
-    those slots. A dead output means that primal's gradient is never consumed
-    downstream, e.g. ``jax.grad(f)(inputs)["a"]`` keeps only ``a``'s gradient.
+    A VJP bind returns one array per differentiated primal. A dead output means
+    that primal's gradient is never consumed downstream, e.g.
+    ``jax.grad(f)(inputs)["a"]``.
 
-    We AND ``used_outputs`` back into ``has_tangent`` and drop the dead outvars;
-    ``abstract_eval`` then recomputes the shorter output arity and the endpoint
-    scatters the survivors back into full primal order.
+    ``has_tangent`` already exists to distinguish arrays that are closed over on
+    the forward pass. Therefore, we can update this to also drop tangents
+    recognised as dead by DCE after the reverse pass.
     """
     dispatch_params = eqn.params["params"]
     old_has_tangent = dispatch_params.has_tangent
 
-    # Consume one ``used_outputs`` flag per live (True) slot; a live slot now dead
-    # flips to False.
     used_iter = iter(used_outputs)
     new_has_tangent = tuple(h and next(used_iter) for h in old_has_tangent)
 
