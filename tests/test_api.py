@@ -691,7 +691,7 @@ def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
     ``unflatten_args(..., remove_static_args=True)`` replaces non-differentiated
-    leaves with ``None``, and ``_pytree_to_tesseract_flat`` derives list paths
+    leaves with ``None``, and ``pytree_to_path_dict`` derives list paths
     positionally. Dropping the ``None`` entries therefore renumbered the
     survivors, so a tangent for ``w[1]`` was shipped to the Tesseract under the
     path ``w.[0]`` — a silently wrong forward-mode gradient.
@@ -701,7 +701,7 @@ def test_list_index_survives_static_pruning():
 
     See https://github.com/pasteurlabs/tesseract-jax/issues/235.
     """
-    from tesseract_jax.tree_util import _pytree_to_tesseract_flat, unflatten_args
+    from tesseract_jax.tree_util import pytree_to_path_dict, unflatten_args
 
     tree = {"w": [jnp.zeros(3), jnp.ones(3)]}
     leaves, treedef = jax.tree.flatten(tree)
@@ -716,7 +716,7 @@ def test_list_index_survives_static_pruning():
     )
 
     # schema_paths mirrors the OpenAPI ``differentiable_arrays`` mapping.
-    flat = _pytree_to_tesseract_flat(result, {"w.[]": {}})
+    flat = pytree_to_path_dict(result, {"w.[]": {}})
     assert list(flat) == ["w.[1]"]
 
 

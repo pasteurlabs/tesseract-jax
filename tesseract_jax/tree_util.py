@@ -169,7 +169,7 @@ def _merge_path(
     return ".".join(explicit_parts), None
 
 
-def _pytree_to_tesseract_flat(
+def pytree_to_path_dict(
     pytree: PyTree, schema_paths: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Flatten a pytree to tesseract path format.
@@ -263,7 +263,7 @@ def dummy_output_tree(
     """The output pytree with each array leaf holding its own aval index.
 
     Static leaves get ``None``, an empty pytree node, so they drop out when the
-    tree is flattened. ``_pytree_to_tesseract_flat`` therefore never sees a static
+    tree is flattened. ``pytree_to_path_dict`` therefore never sees a static
     output, and the path-to-position maps built from this tree line up with
     ``output_avals``, which holds arrays only.
     """

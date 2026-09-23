@@ -26,9 +26,9 @@ from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
     TransportArray,
-    _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
+    pytree_to_path_dict,
     split_args,
     unflatten_args,
 )
@@ -110,7 +110,7 @@ def tesseract_dispatch_abstract_eval(
             params.input_pytreedef,
             params.static_input_mask,
         )
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=params.client.differentiable_input_paths
         )
         path_to_shape = {
@@ -118,7 +118,7 @@ def tesseract_dispatch_abstract_eval(
             for p, v in flat_inputs.items()
             if v is not None
         }
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -222,7 +222,7 @@ def tesseract_dispatch_jvp_rule(
             params.static_input_mask,
             remove_static_args=True,
         )
-        _flat_tangents = _pytree_to_tesseract_flat(
+        _flat_tangents = pytree_to_path_dict(
             _tangent_inputs, schema_paths=params.client.differentiable_input_paths
         )
         for path, val in _flat_tangents.items():
@@ -370,7 +370,7 @@ def tesseract_dispatch_transpose_rule(
             len(params.output_avals),
             params.static_output_mask,
         )
-        flat_output_info = _pytree_to_tesseract_flat(
+        flat_output_info = pytree_to_path_dict(
             dummy_output, schema_paths=params.client.differentiable_output_paths
         )
         for cotan, (path, is_diff) in zip(
@@ -426,7 +426,7 @@ def tesseract_dispatch_transpose_rule(
         params.input_pytreedef,
         params.static_input_mask,
     )
-    _flat_inputs = _pytree_to_tesseract_flat(
+    _flat_inputs = pytree_to_path_dict(
         _primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
     _non_static_paths = [
@@ -713,10 +713,10 @@ def _batched_via_jacobian(
     primal_inputs = unflatten_args(
         primals, params.static_args, params.input_pytreedef, params.static_input_mask
     )
-    flat_inputs = _pytree_to_tesseract_flat(
+    flat_inputs = pytree_to_path_dict(
         primal_inputs, schema_paths=params.client.differentiable_input_paths
     )
-    output_flat = _pytree_to_tesseract_flat(
+    output_flat = pytree_to_path_dict(
         dummy_output_tree(
             params.output_pytreedef,
             len(params.output_avals),

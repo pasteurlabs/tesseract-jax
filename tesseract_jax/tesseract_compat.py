@@ -13,9 +13,9 @@ from tesseract_jax.dce import live_jvp_output_positions
 from tesseract_jax.tree_util import (
     PyTree,
     TransportArray,
-    _pytree_to_tesseract_flat,
     combine_args,
     dummy_output_tree,
+    pytree_to_path_dict,
     split_args,
     unflatten_args,
     warn_on_static_output_drift,
@@ -393,12 +393,12 @@ class Jaxeract:
             remove_static_args=True,
         )
 
-        flat_tangents = _pytree_to_tesseract_flat(
+        flat_tangents = pytree_to_path_dict(
             tangent_inputs, schema_paths=self.differentiable_input_paths
         )
         flat_tangents = {p: v for p, v in flat_tangents.items() if v is not None}
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -473,7 +473,7 @@ class Jaxeract:
             params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
         if params.live_input_paths is None:
@@ -481,7 +481,7 @@ class Jaxeract:
         else:
             jac_inputs = list(params.live_input_paths)
 
-        output_flat = _pytree_to_tesseract_flat(
+        output_flat = pytree_to_path_dict(
             dummy_output_tree(
                 params.output_pytreedef,
                 len(params.output_avals),
@@ -535,7 +535,7 @@ class Jaxeract:
             params.static_input_mask,
         )
 
-        flat_inputs = _pytree_to_tesseract_flat(
+        flat_inputs = pytree_to_path_dict(
             primal_inputs, schema_paths=self.differentiable_input_paths
         )
 
@@ -567,7 +567,7 @@ class Jaxeract:
                 params.static_output_mask,
             )
         cotangent_pytree = jax.tree.unflatten(params.output_pytreedef, cotangents)
-        flat_cotangents = _pytree_to_tesseract_flat(
+        flat_cotangents = pytree_to_path_dict(
             cotangent_pytree, schema_paths=self.differentiable_output_paths
         )
 

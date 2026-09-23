@@ -33,8 +33,8 @@ except ImportError:  # pragma: no cover - exercised only on JAX 0.7.x
     from jax.extend.core import JaxprEqn
 
 from tesseract_jax.tree_util import (
-    _pytree_to_tesseract_flat,
     dummy_output_tree,
+    pytree_to_path_dict,
 )
 
 
@@ -57,7 +57,7 @@ def live_jvp_output_positions(
     drops them from the layout via :func:`dummy_output_tree`; the positions returned
     then index ``output_avals``, which holds arrays only.
     """
-    output_flat = _pytree_to_tesseract_flat(
+    output_flat = pytree_to_path_dict(
         dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
         schema_paths=diff_output_paths,
     )
@@ -159,7 +159,7 @@ def _dce_jacobian_vector_product(
         static_output_mask,
     )
     flat_items = list(
-        _pytree_to_tesseract_flat(
+        pytree_to_path_dict(
             dummy_output_tree(output_pytreedef, n_outputs, static_output_mask),
             schema_paths=diff_output_paths,
         ).items()
