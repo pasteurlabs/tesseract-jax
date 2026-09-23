@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-09-23
+
+### Features
+
+- Support differentiating Tesseract derivative endpoints wrt (co)tangents (#229)
+- Support non-array output leaves in apply_tesseract (#248)
+- Support device-to-device GPU interop (#239)
+- Prune non-differentiable inputs and unused outputs from the VJP (#263)
+- Use DCE to leverage Tesseract's partial differentiation (#209)
+
+### Bug Fixes
+
+- Guard transpose rule against UndefinedPrimal (#228)
+- Keep list indices stable when pruning static leaves (#236)
+- Carry vmap_method and the jacobian params through nested binds (#242)
+- Keep dotted dict keys whole when matching schema templates (#252)
+- Fill discarded derivative slots with each dtype's 0/0 value (#259)
+- Support transposing vector_jacobian_product wrt cotangents (#270)
+
+### Refactor
+
+- Bundle primitive dispatch kwargs into a DispatchParams dataclass (#256)
+- [**breaking**] Dispatch through the primitive in eager mode, always requiring abstract_eval (#262)
+- Rename device_transport parameter to gpu_transport (#273)
+
+### Documentation
+
+- Document that Tesseracts only support first-order derivatives (#265)
+
+### Performance
+
+- Enable CSE with `has_side_effect=False` (#233)
+
 ## [0.4.1] - 2026-07-21
 
 ### Bug Fixes
