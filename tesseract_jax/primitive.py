@@ -23,7 +23,7 @@ from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
-from tesseract_jax.direct_trace import TracedClient, is_traceable
+from tesseract_jax.direct_trace import TracedClient
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import Jaxeract
 from tesseract_jax.tree_util import (
@@ -1178,7 +1178,7 @@ def apply_tesseract(
             "applies to a served (HTTPClient) Tesseract."
         )
 
-    if traceable and not is_traceable(tesseract_client):
+    if traceable and getattr(tesseract_client._client, "api_module", None) is None:
         raise ValueError(
             "traceable=True requires an in-process Tesseract built via "
             "Tesseract.from_tesseract_api(...); "

@@ -17,48 +17,11 @@ follow from the same fact -- pydantic's ``Array[...]`` validator calls
 
 import functools
 import warnings
-from types import ModuleType
 from typing import Any
 
 from pydantic import BaseModel
-from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import to_shape_dtype_pytree
-
-
-def _extract_api_module_from_local_client(
-    local_client: Any, endpoint: str = "apply"
-) -> ModuleType | None:
-    """The real ``tesseract_api`` module backing a ``LocalClient``, or ``None``."""
-    api_module = getattr(local_client, "api_module", None)
-    if isinstance(api_module, ModuleType):
-        return api_module
-
-    # TODO: Remove the below when #684 lands and maybe inline this function
-    endpoints = getattr(local_client, "_endpoints", None)
-    if not endpoints or endpoint not in endpoints:
-        return None
-    func = endpoints[endpoint]
-    freevars = func.__code__.co_freevars
-    closure = func.__closure__
-    if not closure or "api_module" not in freevars:
-        return None
-    api_module = closure[freevars.index("api_module")].cell_contents
-    if not isinstance(api_module, ModuleType):
-        return None
-    return api_module
-
-
-def is_traceable(tesseract_client: Tesseract, endpoint: str = "apply") -> bool:
-    """Whether ``tesseract_client`` has an importable Python function to trace directly.
-
-    Only a ``LocalClient`` (``Tesseract.from_tesseract_api``) has one: a
-    served (``HTTPClient``) Tesseract runs in another process.
-
-    TODO: This function is only called once it will also be inlined when #684 lands
-    """
-    local_client = getattr(tesseract_client, "_client", None)
-    return _extract_api_module_from_local_client(local_client, endpoint) is not None
 
 
 @functools.cache
@@ -163,7 +126,7 @@ class TracedClient:
                 endpoint, payload, run_id, stream_logs
             )
 
-        api_module = _extract_api_module_from_local_client(self._local_client, endpoint)
+        api_module = getattr(self._local_client, "api_module", None)
         if api_module is None:
             raise ValueError(
                 "traceable=True requires an in-process Tesseract built via "

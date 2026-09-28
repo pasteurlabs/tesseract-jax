@@ -39,7 +39,7 @@ def test_traceable_and_device_transport_are_mutually_exclusive(
             vectoradd_jax_tess,
             {**vectoradd_jax_ab, "norm_ord": 2},
             traceable=True,
-            device_transport="cuda_ipc",
+            gpu_transport="cuda_ipc",
         )
 
 
@@ -107,17 +107,21 @@ def test_patch_falls_back_to_schema_default_for_an_omitted_field(
     reason unrelated to this fix.
     """
     from tesseract_jax.direct_trace import (
-        _abstract_inputs_schema_for_local_client,
-        _patch_inputs,
+        _abstract_input_schema,
+        _patch_with_real_values,
     )
+    from tesseract_jax.tree_util import to_shape_dtype_pytree
 
-    _api_module, AbstractInputSchema = _abstract_inputs_schema_for_local_client(
-        vectoradd_jax_tess._client, "apply"
+    api_module = vectoradd_jax_tess._client.api_module
+    AbstractInputSchema = _abstract_input_schema(
+        api_module.InputSchema, api_module.OutputSchema
     )
 
     a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"
     real_inputs_omitted = {"a": a_no_s, "b": vectoradd_jax_ab["b"], "norm_ord": 2}
 
-    patched = _patch_inputs(AbstractInputSchema, real_inputs_omitted)
+    abstract_inputs = to_shape_dtype_pytree(real_inputs_omitted)
+    abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
+    patched = _patch_with_real_values(abstract_instance.inputs, real_inputs_omitted)
     # Falls back to Vector_and_Scalar.s's own default rather than raising.
     assert float(patched.a.s) == pytest.approx(1.0)
