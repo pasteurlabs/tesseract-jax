@@ -5,6 +5,7 @@ import contextlib
 from collections.abc import Generator
 from typing import TYPE_CHECKING
 
+import jax.numpy as jnp
 import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
@@ -17,6 +18,7 @@ from tesseract_jax.tree_util import (
     dummy_output_tree,
     pytree_to_path_dict,
     split_args,
+    to_shape_dtype_pytree,
     unflatten_args,
     warn_on_static_output_drift,
 )
@@ -24,8 +26,10 @@ from tesseract_jax.tree_util import (
 if TYPE_CHECKING:
     from tesseract_jax.dispatch_params import DispatchParams
 
-# WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
-# and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+# WARNING: Jaxeract methods normally run inside an FFI callback, where
+# allocating jax.numpy arrays is unsafe -- use vanilla numpy. Under
+# params.traceable they run during ordinary JAX tracing instead, where
+# jax.numpy is required (numpy raises on a Tracer).
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -303,14 +307,7 @@ class Jaxeract:
 
         This used in order to get output shapes given input shapes.
         """
-        abstract_inputs = jax.tree.map(
-            lambda x: (
-                {"shape": x.shape, "dtype": x.dtype.name} if hasattr(x, "shape") else x
-            ),
-            inputs,
-        )
-
-        out_data = self.client.abstract_eval(abstract_inputs)
+        out_data = self.client.abstract_eval(to_shape_dtype_pytree(inputs))
         return out_data
 
     def apply(
@@ -508,13 +505,16 @@ class Jaxeract:
             )
             if v is not None
         }
+        # A traced value is a Tracer, which np.asarray (_cast_return) rejects;
+        # jnp.asarray is the traced equivalent.
+        cast = jnp.asarray if params.traceable else _cast_return
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                out.append(_cast_return(out_data[op][ip], dtype=target))
+                out.append(cast(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(
