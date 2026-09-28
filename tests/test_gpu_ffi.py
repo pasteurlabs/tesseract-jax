@@ -116,15 +116,15 @@ def test_cudart_candidates_uses_core_discovery(monkeypatch):
 
 
 class _StubClient:
-    """Minimal stand-in for a Jaxeract: the GPU lowering only reads _device_transport."""
+    """Minimal stand-in for a Jaxeract: the GPU lowering only reads _gpu_transport."""
 
-    _device_transport = "cuda_ipc"
+    _gpu_transport = "cuda_ipc"
 
 
 def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
     """A device transport with an unavailable shim is a hard error, not a fallback.
 
-    An explicit device_transport opt-in must not silently degrade to the slow host
+    An explicit gpu_transport opt-in must not silently degrade to the slow host
     path; the lowering raises before touching ctx/array_args.
     """
     from types import SimpleNamespace
@@ -134,14 +134,14 @@ def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
     from tesseract_jax import primitive
 
     monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
-    # The guard only reads params.client._device_transport before raising, so a
+    # The guard only reads params.client._gpu_transport before raising, so a
     # stub suffices; suppress typeguard's runtime check of the DispatchParams
     # annotation (armed for the whole package via --typeguard-packages).
     params = SimpleNamespace(client=_StubClient())
 
     with (
         typeguard.suppress_type_checks(),
-        pytest.raises(RuntimeError, match="device_transport='cuda_ipc' was requested"),
+        pytest.raises(RuntimeError, match="gpu_transport='cuda_ipc' was requested"),
     ):
         primitive.tesseract_dispatch_gpu_lowering(object(), params=params)
 
@@ -189,7 +189,7 @@ def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
     from tesseract_jax import primitive
 
     class _HostClient:
-        _device_transport = None
+        _gpu_transport = None
 
     sentinel = object()
     seen: dict = {}

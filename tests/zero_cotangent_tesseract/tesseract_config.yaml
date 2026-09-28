@@ -1,0 +1,9 @@
+name: zero_cotangent_tesseract
+version: "2025-11-05"
+description: |
+  Two differentiable outputs, one with a NaN gradient, used to check that an
+  output whose cotangent is a symbolic zero is not requested from the endpoint
+  (issue #4).
+
+build_config:
+  target_platform: "native"
