@@ -4,20 +4,30 @@
 """GPU-free tests for device-transport selection on the Jaxeract wrapper.
 
 These cover the transport-name plumbing that decides *which* on-device transport
-a call uses (and whether it uses one at all). The request/response encoding is
-exercised end-to-end by the GPU tests in ``test_gpu_direct.py``. Only the
-selection logic is unit-tested here, since it gates the GPU (FFI) lowering and a
-wrong answer silently sends an unsupported ``Accept`` to the server.
+a call uses (and whether it uses one at all), since it gates the GPU (FFI)
+lowering and a wrong answer silently sends an unsupported ``Accept`` to the
+server. Most stub the client; the rest check that tesseract-core's real clients
+behave the way the stubs assume, and that a client with a default transport stays
+usable from CPU-only JAX. The GPU-direct request/response encoding is exercised
+end-to-end by the GPU tests in ``test_gpu_direct.py``.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
+from tesseract_core import Tesseract
+from tesseract_core.sdk.tesseract import HTTPClient
 
-from tesseract_jax import gpu_ffi
-from tesseract_jax.tesseract_compat import Jaxeract
+from tesseract_jax import apply_tesseract, gpu_ffi
+from tesseract_jax.tesseract_compat import Jaxeract, _default_gpu_transport
+
+# Never contacted: the tests below only build clients for it, sending no requests.
+_UNREACHABLE_URL = "http://127.0.0.1:1"
 
 
 def _fake_client(supported_gpu_transports: tuple[str, ...] = ()) -> MagicMock:
@@ -91,27 +101,17 @@ def test_equality_and_hash_key_on_transport():
     assert a != host
 
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.headers: dict[str, str] = {}
-
-
-class _FakeHTTPClient:
-    """Stand-in for tesseract-core's HTTPClient with the attrs the CM touches."""
-
-    def __init__(self) -> None:
-        self._gpu_transport = "none"
-        self._output_format = "json+base64"
-        self._session = _FakeSession()
-
-
 def _client_with_http() -> MagicMock:
     c = _fake_client()
-    c._client = _FakeHTTPClient()
+    # A real HTTPClient, so the private attributes the context manager writes are
+    # the ones tesseract-core reads when encoding a request.
+    c._client = HTTPClient(_UNREACHABLE_URL)
     return c
 
 
-def test_gpu_transport_encoding_drives_gpu_transport_and_accept():
+# requests sends ``Accept: */*`` unless the session's default is removed.
+@pytest.mark.parametrize("session_accept", ["*/*", None])
+def test_gpu_transport_encoding_drives_gpu_transport_and_accept(session_accept):
     # tesseract-core keeps CPU encoding (``_output_format``) and GPU transport
     # (``_gpu_transport``) on separate axes: selecting a device transport must set
     # ``_gpu_transport`` and negotiate the server's GPU output transport via an
@@ -119,6 +119,10 @@ def test_gpu_transport_encoding_drives_gpu_transport_and_accept():
     c = _client_with_http()
     j = Jaxeract(c, gpu_transport="cuda_ipc")
     http = c._client
+    if session_accept is None:
+        http._session.headers.pop("Accept", None)
+    else:
+        http._session.headers["Accept"] = session_accept
 
     with j.gpu_transport_encoding():
         assert http._gpu_transport == "cuda_ipc"
@@ -131,4 +135,35 @@ def test_gpu_transport_encoding_drives_gpu_transport_and_accept():
     # Fully restored on exit: the shared client must not leak the transport onto
     # host-callback / CPU uses.
     assert http._gpu_transport == "none"
-    assert "Accept" not in http._session.headers
+    assert http._session.headers.get("Accept") == session_accept
+
+
+def test_default_on_real_clients_without_transport(vectoradd_tess):
+    # The tests above stub ``supported_gpu_transports``. These are the clients
+    # tesseract-core builds without a transport: one reached by URL and an
+    # in-process one.
+    assert _default_gpu_transport(Tesseract.from_url(_UNREACHABLE_URL)) is None
+    assert _default_gpu_transport(vectoradd_tess) is None
+
+
+def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesseract):
+    """A client served with cuda_ipc stays usable from CPU-only JAX.
+
+    The default selects cuda_ipc for it, but only the ``cuda`` lowering acts on
+    the transport, so CPU arrays take the host callback instead of failing for
+    lack of a CUDA device.
+    """
+    tess = served_cuda_ipc_vectoradd_tesseract
+    assert _default_gpu_transport(tess) == "cuda_ipc"
+
+    def f(a, b):
+        return apply_tesseract(tess, {"a": a, "b": b})["c"]
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        c = jax.jit(f)(a, b)
+        grad_a = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
+
+    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
+    np.testing.assert_array_equal(grad_a, np.ones(8))

@@ -200,8 +200,11 @@ def test_gpu_transport_selects_lowering(
 ):
     """A cuda_ipc client lowers to the FFI call by default; ``"none"`` opts out.
 
-    Both lowerings compute the same result, so this inspects the lowered program
-    for the FFI target rather than the output.
+    Both lowerings compute the same result, so the lowered program is inspected
+    for the FFI target to tell them apart. The output is checked too: with
+    ``"none"`` the request names no transport, so the server replies over the
+    cuda_ipc transport it was served with and the host callback has to handle
+    that reply.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
@@ -212,6 +215,10 @@ def test_gpu_transport_selects_lowering(
         )["c"]
     )
     assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
+
+    c = f(a, a)
+    assert _on_gpu(c)
+    np.testing.assert_allclose(_to_np(c), np.full(8, 3.0, np.float32))
 
 
 def test_grad_through_gpu_ffi(served_gpu_tesseract):

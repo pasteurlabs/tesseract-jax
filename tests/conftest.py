@@ -174,6 +174,17 @@ def served_vectoradd_tesseract():
 
 
 @pytest.fixture(scope="session")
+def served_cuda_ipc_vectoradd_tesseract():
+    """The vectoradd Tesseract served with cuda_ipc, which works without a GPU.
+
+    Its client advertises cuda_ipc, so ``apply_tesseract`` selects it by default.
+    """
+    yield from _serve_tesseract(
+        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
+
+
+@pytest.fixture(scope="session")
 def served_pytree_tesseract():
     yield from _serve_tesseract(here / "pytree_tesseract" / "tesseract_api.py")
 
