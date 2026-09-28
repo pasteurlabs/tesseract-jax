@@ -10,7 +10,7 @@ requires-python = ">=3.12,<4"
 dependencies = [
     "jax>=0.7.0",
     "packaging",
-    "tesseract-core>=1.13.0",
+    "tesseract-core>=1.14.0",
 ]
 dynamic = ["version"]
 
@@ -36,7 +36,6 @@ dev = [
     "pytest-cov",
     "pytest-timeout",
     "typeguard",
-    "requests",
     "equinox",
     "tesseract-core[runtime]",
     "tesseract-jax[docs]",

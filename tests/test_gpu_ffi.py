@@ -124,8 +124,9 @@ class _StubClient:
 def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
     """A device transport with an unavailable shim is a hard error, not a fallback.
 
-    An explicit gpu_transport opt-in must not silently degrade to the slow host
-    path; the lowering raises before touching ctx/array_args.
+    A selected device transport, whether passed explicitly or taken from the
+    client, must not silently degrade to the slow host path. The lowering raises
+    before touching ctx/array_args.
     """
     from types import SimpleNamespace
 
@@ -141,7 +142,7 @@ def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
 
     with (
         typeguard.suppress_type_checks(),
-        pytest.raises(RuntimeError, match="gpu_transport='cuda_ipc' was requested"),
+        pytest.raises(RuntimeError, match="gpu_transport='cuda_ipc' is selected"),
     ):
         primitive.tesseract_dispatch_gpu_lowering(object(), params=params)
 
@@ -179,8 +180,8 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
 def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
     """No device transport selected: defer to the host-callback lowering.
 
-    A client that did not opt into a device transport must behave exactly as on
-    CPU, so the GPU lowering delegates straight to the host lowering.
+    A call without a device transport must behave exactly as on CPU, so the GPU
+    lowering delegates straight to the host lowering.
     """
     from types import SimpleNamespace
 

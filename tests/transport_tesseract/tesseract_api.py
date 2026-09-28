@@ -4,15 +4,14 @@
 """An array-module-agnostic Tesseract for exercising both dispatch transports.
 
 The same endpoint bodies serve the host (device->host->device round-trip) and the
-cuda_ipc (GPU-direct) transports: the array module ``xp`` is chosen at serve time
-from the ``TESSERACT_JAX_TEST_XP`` environment variable -- ``numpy`` for the host
-leg, ``cupy`` for the cuda_ipc leg. Writing the math against ``xp`` (rather than
-duplicating a NumPy and a CuPy Tesseract) is how a single parametrised fixture can
-drive the platform-sensitive tests on both transports and be sure they compute the
-same thing.
+cuda_ipc (GPU-direct) transports. The array module ``xp`` is ``cupy`` when the
+runtime's ``gpu_transport`` is ``cuda_ipc`` and ``numpy`` otherwise. Writing the
+math against ``xp`` (rather than duplicating a NumPy and a CuPy Tesseract) is how a
+single parametrised fixture can drive the platform-sensitive tests on both
+transports and be sure they compute the same thing.
 
-On the cuda_ipc leg the compute stays in GPU memory (``xp is cupy``), which is what
-lets the runtime export the outputs by CUDA IPC with no device->host copy.
+On the cuda_ipc leg the compute stays in GPU memory, which is what lets the runtime
+export the outputs by CUDA IPC with no device->host copy.
 
 The math mirrors the all-float32 ``gpu_tesseract``: ``c = (a * scale + b) * mask``
 with a *non-differentiable* array input ``mask`` (default all-ones) and a
@@ -21,22 +20,17 @@ handling of a non-differentiable, non-static array input and a discarded output
 slot -- the placeholder paths that differ between host and device.
 """
 
-import os
 from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime.config import get_config
 
 
 def _xp():
-    """The array module the endpoints compute with, selected at serve time.
-
-    ``cupy`` keeps results in GPU memory for the cuda_ipc leg; ``numpy`` (the
-    default) is the host leg. Imported lazily so the host leg never needs CuPy.
-    """
-    name = os.environ.get("TESSERACT_JAX_TEST_XP", "numpy")
-    if name == "cupy":
+    """The array module to compute with. CuPy is imported lazily for the host leg."""
+    if get_config().gpu_transport == "cuda_ipc":
         import cupy
 
         return cupy

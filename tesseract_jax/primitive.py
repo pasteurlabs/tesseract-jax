@@ -553,12 +553,11 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering when the caller did not select a
-    device transport (``client._gpu_transport``), so a host-transport call
-    behaves exactly as on CPU. When the caller did select one but the native shim
-    is unavailable (e.g. a CPU-only install where it wasn't compiled), this raises
-    rather than silently falling back, since ``gpu_transport`` is an explicit
-    opt-in to the GPU-direct path.
+    Falls back to the host-callback lowering when the call has no device
+    transport (``client._gpu_transport``), so a host-transport call behaves
+    exactly as on CPU. When it has one but the native shim is unavailable (e.g. a
+    CPU-only install where it wasn't compiled), this raises instead of silently
+    falling back, even when the transport was picked by default.
     """
     from tesseract_jax import gpu_ffi
 
@@ -567,27 +566,31 @@ def tesseract_dispatch_gpu_lowering(
     if client._gpu_transport is None:
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
+    selected = (
+        f"gpu_transport={client._gpu_transport!r} is selected (passed explicitly "
+        "or taken from the Tesseract's supported_gpu_transports) but"
+    )
+    opt_out = "pass gpu_transport='none' to use the host-callback transport."
+
     if not gpu_ffi.is_available():
         raise RuntimeError(
-            f"gpu_transport={client._gpu_transport!r} was requested but "
-            "the native GPU FFI shim is unavailable (not compiled or failed to "
-            "import), so GPU-direct dispatch cannot run. Reinstall tesseract-jax "
-            "with the shim built (a source install compiles it via the hatch "
-            "build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure "
-            "fatal), or drop gpu_transport to use the host-callback transport."
+            f"{selected} the native GPU FFI shim is unavailable (not compiled or "
+            "failed to import), so GPU-direct dispatch cannot run. Reinstall "
+            "tesseract-jax with the shim built (a source install compiles it via "
+            "the hatch build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build "
+            f"failure fatal), or {opt_out}"
         )
 
     # Every supported device transport is CUDA-based, so this lowering cannot run
-    # without a CUDA device. Reaching here means the caller selected a transport
-    # and the program is being lowered for the GPU, so a missing device is a
+    # without a CUDA device. Reaching here means the call has a transport and
+    # the program is being lowered for the GPU, so a missing device is a
     # misconfiguration worth raising over rather than the (much slower) host path.
     try:
         jax.devices("cuda")
     except RuntimeError as exc:
         raise RuntimeError(
-            f"gpu_transport={client._gpu_transport!r} was requested but "
-            "JAX sees no CUDA device. Install a CUDA-enabled jaxlib and run on a "
-            "GPU host, or drop gpu_transport to use the host-callback transport."
+            f"{selected} JAX sees no CUDA device. Install a CUDA-enabled jaxlib and "
+            f"run on a GPU host, or {opt_out}"
         ) from exc
 
     _raise_if_unimplemented(params.eval_func, client)
@@ -1106,14 +1109,15 @@ def apply_tesseract(
             methods) ``False`` may be more efficient.
         gpu_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
-            ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
-            with the matching ``gpu_transport`` in its ``runtime_config`` and a
-            GPU-backed JAX (arrays on a ``cuda`` device); has no effect on CPU
-            arrays or a local (in-process) client, which already shares memory.
-            For ``cuda_ipc`` both processes must share the CUDA IPC namespace
-            (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
-            the same host round-trip as CPU arrays. This is an experimental
-            tesseract-core feature.
+            ``"cuda_ipc"``). Requires a served Tesseract started with the
+            matching ``gpu_transport`` and a GPU-backed JAX (arrays on a ``cuda``
+            device). It has no effect on CPU arrays or a local (in-process)
+            client, which already shares memory. For ``cuda_ipc`` both processes
+            must share the CUDA IPC namespace (Docker's ``--ipc=host``). The
+            default ``None`` uses the transport the Tesseract was created with,
+            if any (see ``Tesseract.supported_gpu_transports``), and ``"none"``
+            forces GPU arrays through the same host round-trip as CPU arrays.
+            This is an experimental tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from

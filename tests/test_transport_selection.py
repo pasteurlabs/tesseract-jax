@@ -16,11 +16,13 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tesseract_jax import gpu_ffi
 from tesseract_jax.tesseract_compat import Jaxeract
 
 
-def _fake_client() -> MagicMock:
+def _fake_client(supported_gpu_transports: tuple[str, ...] = ()) -> MagicMock:
     c = MagicMock()
+    c.supported_gpu_transports = supported_gpu_transports
     c.openapi_schema = {
         "components": {
             "schemas": {
@@ -36,12 +38,37 @@ def _fake_client() -> MagicMock:
 
 
 def test_gpu_transport_name_selects_transport():
+    # A plain ``from_url`` client advertises no transport, so naming one per call
+    # must work without it.
     j = Jaxeract(_fake_client(), gpu_transport="cuda_ipc")
     assert j._gpu_transport == "cuda_ipc"
 
 
 def test_default_is_host_roundtrip():
     j = Jaxeract(_fake_client())
+    assert j._gpu_transport is None
+
+
+def test_default_uses_client_transport():
+    j = Jaxeract(_fake_client(("cuda_ipc",)))
+    assert j._gpu_transport == "cuda_ipc"
+
+
+def test_default_ignores_transports_the_lowering_lacks():
+    j = Jaxeract(_fake_client(("nixl",)))
+    assert j._gpu_transport is None
+
+
+def test_default_does_not_depend_on_shim(monkeypatch):
+    # Without the shim, a selected transport fails at lowering time (see
+    # test_gpu_ffi.py) instead of silently falling back to the host.
+    monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
+    j = Jaxeract(_fake_client(("cuda_ipc",)))
+    assert j._gpu_transport == "cuda_ipc"
+
+
+def test_none_forces_host_roundtrip():
+    j = Jaxeract(_fake_client(("cuda_ipc",)), gpu_transport="none")
     assert j._gpu_transport is None
 
 
