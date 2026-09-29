@@ -841,7 +841,7 @@ def test_integer_output_feeds_integer_input(gather_tess, use_jit):
     """An integer output can be chained into another call's integer input.
 
     Its tangent is a symbolic zero, so the second call sees no tangent on its
-    non-differentiable input, in forward mode as it already did in reverse.
+    non-differentiable input.
     """
     weights = np.array([1.0, 2.0, 3.0], dtype="float32")
     indices = np.array([0, 2, 2], dtype="int32")
