@@ -797,9 +797,10 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     """A non-differentiable output's tangent is a slot the caller can read.
 
     ``jax.jvp`` returns it directly, so its dtype and value are observable and
-    follow the rule in ``_compute_discarded_fill``: whatever ``0/0`` yields for
-    the dtype, which is NaN in every component for the inexact dtypes and zero
-    for those with no NaN to spell. ``gather_tess`` carries one such output per
+    follow the rule in ``_compute_discarded_fill`` for the inexact dtypes:
+    whatever ``0/0`` yields, NaN in every component. An integer output has no
+    tangent space, so its slot is the symbolic zero JAX itself uses for integer
+    values, of dtype ``float0``. ``gather_tess`` carries one such output per
     dtype class.
     """
     weights = np.array([1.0, 2.0, 3.0], dtype="float32")
@@ -831,8 +832,35 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     assert np.isnan(phase.imag).all(), "complex slots are poisoned in imag too"
 
     count = np.asarray(tangents["count"])
-    assert count.dtype == np.int32
-    np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
+    assert count.dtype == jax.dtypes.float0
+    assert count.shape == (3,)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_integer_output_feeds_integer_input(gather_tess, use_jit):
+    """An integer output can be chained into another call's integer input.
+
+    Its tangent is a symbolic zero, so the second call sees no tangent on its
+    non-differentiable input.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def chained(w):
+        count = apply_tesseract(gather_tess, inputs=dict(weights=w, indices=indices))
+        return apply_tesseract(
+            gather_tess, inputs=dict(weights=w, indices=count["count"])
+        )
+
+    def jvp_fn(w, dw):
+        return jax.jvp(chained, (w,), (dw,))
+
+    if use_jit:
+        jvp_fn = jax.jit(jvp_fn)
+
+    primals, tangents = jvp_fn(weights, np.ones_like(weights))
+    np.testing.assert_allclose(primals["gathered"], weights[[1, 0, 2]], rtol=1e-6)
+    np.testing.assert_allclose(tangents["gathered"], [1.0, 1.0, 1.0], rtol=1e-6)
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
