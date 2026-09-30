@@ -202,9 +202,8 @@ def test_gpu_transport_selects_lowering(
 
     Both lowerings compute the same result, so the lowered program is inspected
     for the FFI target to tell them apart. The output is checked too: with
-    ``"none"`` the request names no transport, so the server replies over the
-    cuda_ipc transport it was served with and the host callback has to handle
-    that reply.
+    ``"none"`` the request asks for host outputs, overriding the cuda_ipc
+    transport the Tesseract was served with, and JAX moves them back on-device.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 

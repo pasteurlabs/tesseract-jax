@@ -56,7 +56,7 @@ def test_gpu_transport_name_selects_transport():
 
 def test_default_is_host_roundtrip():
     j = Jaxeract(_fake_client())
-    assert j._gpu_transport is None
+    assert j._gpu_transport == "none"
 
 
 def test_default_uses_client_transport():
@@ -66,7 +66,7 @@ def test_default_uses_client_transport():
 
 def test_default_ignores_transports_the_lowering_lacks():
     j = Jaxeract(_fake_client(("nixl",)))
-    assert j._gpu_transport is None
+    assert j._gpu_transport == "none"
 
 
 def test_default_does_not_depend_on_shim(monkeypatch):
@@ -79,7 +79,14 @@ def test_default_does_not_depend_on_shim(monkeypatch):
 
 def test_none_forces_host_roundtrip():
     j = Jaxeract(_fake_client(("cuda_ipc",)), gpu_transport="none")
-    assert j._gpu_transport is None
+    assert j._gpu_transport == "none"
+
+
+def test_named_transport_is_dropped_for_local_client(vectoradd_tess):
+    # An in-process client shares memory with the caller, so a GPU array must
+    # reach it as it would without a transport.
+    j = Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
+    assert j._gpu_transport == "none"
 
 
 def test_unsupported_transport_is_rejected():
@@ -124,7 +131,7 @@ def test_gpu_transport_encoding_drives_gpu_transport_and_accept(session_accept):
     else:
         http._session.headers["Accept"] = session_accept
 
-    with j.gpu_transport_encoding():
+    with j.gpu_transport_encoding("cuda_ipc"):
         assert http._gpu_transport == "cuda_ipc"
         assert http._output_format == "json+base64"
         assert (
@@ -138,12 +145,30 @@ def test_gpu_transport_encoding_drives_gpu_transport_and_accept(session_accept):
     assert http._session.headers.get("Accept") == session_accept
 
 
+def test_gpu_transport_encoding_none_overrides_client_transport():
+    # A client served with cuda_ipc sends no Accept on its own, so the server
+    # would reply over cuda_ipc. ``"none"`` must ask for host outputs instead.
+    c = _fake_client(("cuda_ipc",))
+    c._client = HTTPClient(_UNREACHABLE_URL, gpu_transport="cuda_ipc")
+    j = Jaxeract(c)
+    http = c._client
+
+    with j.gpu_transport_encoding("none"):
+        assert http._gpu_transport == "none"
+        assert (
+            http._session.headers["Accept"]
+            == "application/json+base64; gpu_transport=none"
+        )
+
+    assert http._gpu_transport == "cuda_ipc"
+
+
 def test_default_on_real_clients_without_transport(vectoradd_tess):
     # The tests above stub ``supported_gpu_transports``. These are the clients
     # tesseract-core builds without a transport: one reached by URL and an
     # in-process one.
-    assert _default_gpu_transport(Tesseract.from_url(_UNREACHABLE_URL)) is None
-    assert _default_gpu_transport(vectoradd_tess) is None
+    assert _default_gpu_transport(Tesseract.from_url(_UNREACHABLE_URL)) == "none"
+    assert _default_gpu_transport(vectoradd_tess) == "none"
 
 
 def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesseract):
@@ -167,3 +192,34 @@ def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesserac
 
     np.testing.assert_array_equal(c, np.arange(8) + 1.0)
     np.testing.assert_array_equal(grad_a, np.ones(8))
+
+
+@pytest.mark.parametrize("gpu_transport", [None, "none"])
+def test_host_lowering_requests_host_outputs(
+    served_cuda_ipc_vectoradd_tesseract, monkeypatch, gpu_transport
+):
+    """Compiled for CPU, each dispatch sends ``gpu_transport=none``.
+
+    That holds even when the default selects cuda_ipc, since the host callback
+    moves the arrays through the host anyway.
+    """
+    tess = served_cuda_ipc_vectoradd_tesseract
+    http = tess._client
+    sent: list[tuple[str, str | None]] = []
+    send = http._send
+
+    def recording_send(url, *args, **kwargs):
+        sent.append((url, http._session.headers.get("Accept")))
+        return send(url, *args, **kwargs)
+
+    monkeypatch.setattr(http, "_send", recording_send)
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        c = apply_tesseract(tess, {"a": a, "b": b}, gpu_transport=gpu_transport)["c"]
+
+    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
+    apply_accepts = [accept for url, accept in sent if url.endswith("/apply")]
+    assert apply_accepts
+    assert all(accept.endswith("; gpu_transport=none") for accept in apply_accepts)

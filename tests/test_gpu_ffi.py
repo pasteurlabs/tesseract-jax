@@ -190,7 +190,7 @@ def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
     from tesseract_jax import primitive
 
     class _HostClient:
-        _gpu_transport = None
+        _gpu_transport = "none"
 
     sentinel = object()
     seen: dict = {}

@@ -129,10 +129,11 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) != object()
 
 
-def test_jaxeract_gpu_transport_breaks_equality(vectoradd_tess):
+def test_jaxeract_gpu_transport_breaks_equality(served_cuda_ipc_vectoradd_tesseract):
     """A device-transport wrapper differs from a host one, so XLA won't common them up."""
-    on_device = Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
-    host = Jaxeract(vectoradd_tess)
+    tess = served_cuda_ipc_vectoradd_tesseract
+    on_device = Jaxeract(tess)
+    host = Jaxeract(tess, gpu_transport="none")
     assert on_device != host
     assert hash(on_device) != hash(host)
-    assert on_device == Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
+    assert on_device == Jaxeract(tess, gpu_transport="cuda_ipc")
