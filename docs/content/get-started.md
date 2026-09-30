@@ -58,6 +58,17 @@ For more detailed installation instructions, please refer to the [Tesseract Core
    vector_sum_vmap(x.reshape(10, 100), y.reshape(10, 100))
    ```
 
+````{tip}
+To skip Docker, serve the Tesseract from its source directory in a subprocess instead of building an image:
+
+```python
+t = Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")
+t.serve()
+```
+
+This builds a virtual environment from the Tesseract's requirements next to `tesseract_api.py` on first use (which needs [`uv`](https://docs.astral.sh/uv/)), or runs on an existing interpreter passed as `python_executable=...`. Unlike a container, it is not isolated from your environment and filesystem.
+````
+
 ```{seealso}
 See [Batching strategies for jax.vmap](vmap-methods.md) for a guide on selecting the appropriate `vmap_method`.
 ```
@@ -78,7 +89,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 
 - **No JAX operations inside `from_tesseract_api` endpoints**: When using `Tesseract.from_tesseract_api(...)`, the `apply`, `vector_jacobian_product`, and `jacobian_vector_product` functions in your `tesseract_api.py` execute inside JAX FFI callbacks. **Using `jax.numpy` or any other JAX operation that allocates arrays in these functions can cause deadlocks**, because JAX's runtime is already holding a lock during the callback.
 
-  Use plain NumPy instead:
+  Use plain NumPy instead, or serve the Tesseract in its own process with `Tesseract.from_source(...)` (see the tip under Quick start):
 
   ```python
   # ❌ Bad — will deadlock under jit/grad
@@ -87,7 +98,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   def apply(inputs):
       return OutputSchema(c=jnp.sin(inputs.a))
 
-  # ✅ Good — use numpy for in-process Tesseracts
+  # ✅ Good — use numpy for in-process Tesseracts, or jnp via from_source
   import numpy as np
 
   def apply(inputs):
@@ -95,7 +106,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   ```
 
   ```{note}
-  This only affects `from_tesseract_api` (in-process execution). Tesseracts served via Docker (`from_image`) run in a separate process and are not subject to this restriction.
+  This only affects `from_tesseract_api` (in-process execution). Tesseracts served in a separate process (`from_source`, `from_image`, or `from_url`) are not subject to this restriction.
   ```
 
 - **Tesseracts are assumed pure functions of their inputs.** Tesseract-JAX lowers each

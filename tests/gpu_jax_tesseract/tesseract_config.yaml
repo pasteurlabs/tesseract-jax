@@ -1,0 +1,9 @@
+name: "gpu_jax"
+version: "0.1.0"
+description: |
+  Unit tesseract that computes on the GPU with JAX, for exercising cuda_ipc dispatch
+
+# The test process's JAX already preallocates most of the GPU's memory, so this
+# one must allocate on demand to fit alongside it.
+env:
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"

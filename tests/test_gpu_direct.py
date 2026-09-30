@@ -8,7 +8,8 @@ On GPU, ``apply_tesseract(..., gpu_transport="cuda_ipc")`` lowers
 device. There is no separate entry point: the ``cuda`` platform lowering routes
 through the FFI path when the call selected a device transport, and without one
 it falls back to the host-callback lowering (a device->host->device round-trip).
-So every test here passes ``gpu_transport="cuda_ipc"``.
+The served fixtures are created with ``gpu_transport="cuda_ipc"``, which
+``apply_tesseract`` also uses when a call does not name a transport.
 
 These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA IPC
 is cross-process and cannot be self-opened. Marked ``gpu``; the
@@ -25,7 +26,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
@@ -191,6 +191,35 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
     np.testing.assert_array_equal(_to_np(gpu), np.asarray(cpu))
 
 
+@pytest.mark.parametrize(
+    ("gpu_transport", "expect_ffi"),
+    [(None, True), ("cuda_ipc", True), ("none", False)],
+)
+def test_gpu_transport_selects_lowering(
+    served_gpu_tesseract, gpu_transport, expect_ffi
+):
+    """A cuda_ipc client lowers to the FFI call by default; ``"none"`` opts out.
+
+    Both lowerings compute the same result, so the lowered program is inspected
+    for the FFI target to tell them apart. The output is checked too: with
+    ``"none"`` the request asks for host outputs, overriding the cuda_ipc
+    transport the Tesseract was served with, and JAX moves them back on-device.
+    """
+    from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
+
+    a = jnp.ones(8, dtype=jnp.float32)
+    f = jax.jit(
+        lambda a, b: apply_tesseract(
+            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport=gpu_transport
+        )["c"]
+    )
+    assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
+
+    c = f(a, a)
+    assert _on_gpu(c)
+    np.testing.assert_allclose(_to_np(c), np.full(8, 3.0, np.float32))
+
+
 def test_grad_through_gpu_ffi(served_gpu_tesseract):
     """Derivatives dispatch generically through the same FFI path (vjp)."""
     a = jnp.arange(512, dtype=jnp.float32)
@@ -205,6 +234,33 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     assert _on_gpu(g)
     # d/da sum(a*2 + b) = 2
     np.testing.assert_allclose(_to_np(g), np.full((512,), 2.0), rtol=1e-6)
+
+
+def test_jax_tesseract_round_trip_stays_on_device(served_gpu_jax_tesseract):
+    """A Tesseract computing with JAX exchanges arrays over cuda_ipc, host-copy free.
+
+    JAX arrays expose device memory only through DLPack, unlike the CuPy arrays
+    the other GPU Tesseracts return. The Tesseract rejects inputs that reach it in
+    host memory, and the residency check armed for this module rejects results
+    that reach the FFI boundary in host memory, so passing rules out a host copy
+    in either direction, for both apply and the vjp behind ``jax.grad``.
+    """
+    a = jnp.arange(64, dtype=jnp.float32)
+    b = jnp.ones(64, dtype=jnp.float32) * 3.0
+
+    def f(a, b):
+        return apply_tesseract(served_gpu_jax_tesseract, {"a": a, "b": b})["c"]
+
+    c = jax.jit(f)(a, b)
+    assert _on_gpu(c)
+    np.testing.assert_allclose(
+        _to_np(c), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
+    )
+
+    grad_a, grad_b = jax.jit(jax.grad(lambda a, b: f(a, b).sum(), argnums=(0, 1)))(a, b)
+    assert _on_gpu(grad_a) and _on_gpu(grad_b)
+    np.testing.assert_allclose(_to_np(grad_a), np.full(64, 2.0, np.float32))
+    np.testing.assert_allclose(_to_np(grad_b), np.ones(64, np.float32))
 
 
 def test_serial_reuse_ring1(served_gpu_tesseract):
@@ -407,7 +463,7 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     gpu_transport), which takes the usual device->host->device round-trip. The
     two lower to different custom calls and compose without interfering.
     """
-    cpu_tess = Tesseract.from_url(served_vectoradd_tesseract)
+    cpu_tess = served_vectoradd_tesseract
 
     a = jnp.arange(64, dtype=jnp.float32)
     b = jnp.ones(64, dtype=jnp.float32) * 3.0

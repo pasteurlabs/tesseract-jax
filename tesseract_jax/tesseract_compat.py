@@ -150,6 +150,27 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
 # learns to drive them.
 _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
+# The transport a call uses by default, when the Tesseract advertises it.
+_DEFAULT_GPU_TRANSPORT = "cuda_ipc"
+
+
+def _default_gpu_transport(tesseract_client: Tesseract) -> str:
+    """``_DEFAULT_GPU_TRANSPORT`` if the client advertises it, else ``"none"``."""
+    if _DEFAULT_GPU_TRANSPORT in tesseract_client.supported_gpu_transports:
+        return _DEFAULT_GPU_TRANSPORT
+    return "none"
+
+
+def _supports_gpu_transport(tesseract_client: Tesseract) -> bool:
+    """Whether the client can be switched to a device transport.
+
+    True only for an ``HTTPClient`` (has ``_gpu_transport``). An in-process
+    ``LocalClient`` shares memory with the caller, so there is nothing to
+    transport.
+    """
+    client = getattr(tesseract_client, "_client", None)
+    return client is not None and hasattr(client, "_gpu_transport")
+
 
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
@@ -162,24 +183,25 @@ class Jaxeract:
     ) -> None:
         """Initialize the Tesseract client.
 
-        ``gpu_transport`` names the on-device transport used to exchange GPU
-        arrays with a served Tesseract instead of a host round-trip (e.g.
-        ``"cuda_ipc"``), selecting one of the runtime's registered device
-        transports. It gates both the GPU FFI lowering and the
-        :meth:`gpu_transport_encoding` context below.
+        ``gpu_transport`` is as in :func:`apply_tesseract`. A client that fails
+        :func:`_supports_gpu_transport` always gets ``"none"``.
         """
+        if gpu_transport is None:
+            gpu_transport = _default_gpu_transport(tesseract_client)
         # Only transports the GPU (FFI) lowering actually implements end-to-end
         # are accepted. The lowering is currently cuda_ipc-specific, so an
         # unsupported name would otherwise route silently into that path and send
         # an Accept the server has no backend for.
-        if gpu_transport is not None and gpu_transport not in _SUPPORTED_TRANSPORTS:
+        elif gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
             raise ValueError(
                 f"Unsupported gpu_transport {gpu_transport!r}; "
-                f"supported: {sorted(_SUPPORTED_TRANSPORTS)}."
+                f"supported: {['none', *sorted(_SUPPORTED_TRANSPORTS)]}."
             )
+        if not _supports_gpu_transport(tesseract_client):
+            gpu_transport = "none"
 
         self.client = tesseract_client
-        # The transport name, or ``None`` for a host round-trip.
+        # ``"none"`` for a host round-trip, else the device transport's name.
         self._gpu_transport = gpu_transport
 
         self.tesseract_input_args = tuple(
@@ -236,13 +258,14 @@ class Jaxeract:
         return hash((Jaxeract, self.client, self._gpu_transport))
 
     @contextlib.contextmanager
-    def gpu_transport_encoding(self) -> Generator[None]:
-        """Temporarily make the HTTP client use this call's device transport.
+    def gpu_transport_encoding(self, gpu_transport: str) -> Generator[None]:
+        """Temporarily make the HTTP client use ``gpu_transport``.
 
-        Used by the GPU (FFI) lowering so that, for the duration of one dispatch,
-        the client exports GPU array *inputs* by reference through the negotiated
-        device transport and the served Tesseract hands the *outputs* back the
-        same way. GPU transport in tesseract-core is a separate axis from
+        The GPU lowering wraps each dispatch in this with the call's transport,
+        and the host-callback lowering with ``"none"``. A device transport sends
+        GPU array *inputs* by reference and asks for *outputs* the same way.
+        ``"none"`` keeps both on the host, even for a Tesseract served with a
+        transport. GPU transport in tesseract-core is a separate axis from
         ``output_format`` (which only governs CPU arrays), so two things must
         change and be restored:
 
@@ -257,17 +280,12 @@ class Jaxeract:
         it, so the CPU leaves of a mixed response are unaffected.
 
         Restored on exit so the shared client is not permanently mutated. A no-op
-        when this call did not opt into a device transport, or for non-HTTP
-        clients (e.g. the in-process ``LocalClient``).
+        for non-HTTP clients (e.g. the in-process ``LocalClient``).
         """
-        client = getattr(self.client, "_client", None)
-        if (
-            self._gpu_transport is None
-            or client is None
-            or not hasattr(client, "_gpu_transport")
-        ):
+        if not _supports_gpu_transport(self.client):
             yield
             return
+        client = self.client._client
         prev_transport = client._gpu_transport
         session = getattr(client, "_session", None)
         had_accept = session is not None and "Accept" in session.headers
@@ -277,10 +295,10 @@ class Jaxeract:
         # carry the GPU transport as a media-type parameter on the same header.
         output_format = getattr(client, "_output_format", "json+base64")
 
-        client._gpu_transport = self._gpu_transport
+        client._gpu_transport = gpu_transport
         if session is not None:
             session.headers["Accept"] = (
-                f"application/{output_format}; gpu_transport={self._gpu_transport}"
+                f"application/{output_format}; gpu_transport={gpu_transport}"
             )
         try:
             yield

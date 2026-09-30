@@ -81,6 +81,9 @@ jax.grad(vector_sum)(x, y) # 🎉
    ```
 
 > [!TIP]
+> To skip Docker, replace `Tesseract.from_image("vectoradd_jax")` with `Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")`. This serves the Tesseract in a subprocess, building a virtual environment from its requirements on first use (which needs [`uv`](https://docs.astral.sh/uv/)).
+
+> [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX.
 
 ## Sharp edges
