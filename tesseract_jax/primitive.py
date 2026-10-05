@@ -184,7 +184,7 @@ def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike | ad.Zero, ...],
     params: DispatchParams,
-) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike, ...]]:
+) -> tuple[tuple[ArrayLike, ...], tuple[ArrayLike | ad.Zero, ...]]:
     """Defines how to dispatch jvp operation.
 
     Note this function is also called when evaluating a VJP or doing
@@ -294,7 +294,13 @@ def tesseract_dispatch_jvp_rule(
         ),
     )
 
-    return tuple(res), tuple(jvp)
+    jvp = tuple(
+        t
+        if jax.numpy.issubdtype(r.dtype, jax.numpy.inexact)
+        else ad.Zero(ShapedArray(r.shape, dtypes.float0))
+        for r, t in zip(res, jvp, strict=True)
+    )
+    return tuple(res), jvp
 
 
 ad.primitive_jvps[tesseract_dispatch_p] = tesseract_dispatch_jvp_rule
