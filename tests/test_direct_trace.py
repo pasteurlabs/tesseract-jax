@@ -170,8 +170,8 @@ def test_gather_discarded_slots_match_on_traced_dispatch(gather_tess, traceable)
     assert np.isnan(phase.real).all()
 
     count = np.asarray(tangents["count"])
-    assert count.dtype == np.int32
-    np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
+    assert count.dtype == jax.dtypes.float0
+    assert count.shape == (3,)
 
     grad = jax.grad(lambda w: apply_fn(w)["gathered"].sum())(weights)
     np.testing.assert_allclose(grad, [1.0, 0.0, 2.0])
