@@ -83,6 +83,22 @@ def test_traceable_jvp_has_no_host_callback_in_lowered_hlo(
     assert _CALLBACK_TARGET in callback_hlo
 
 
+@pytest.mark.parametrize("traceable", [False, True])
+def test_input_dtype_is_cast_to_schema_dtype(
+    vectoradd_apply, vectoradd_jax_ab, traceable
+):
+    """A float64 input is cast to the schema's declared float32, on both dispatch paths.
+
+    Regression test for the traced path: ``_patch_with_real_values`` used to
+    patch the real (uncast) value straight through instead of casting it, so
+    a float64 input produced a float64 output that disagreed with
+    ``abstract_eval``'s declared float32 and failed MLIR's output-type check.
+    """
+    ab_f64 = jax.tree.map(lambda x: x.astype(jnp.float64), vectoradd_jax_ab)
+    out = vectoradd_apply(ab_f64, traceable)
+    assert out["vector_add"]["result"].dtype == jnp.float32
+
+
 def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
     """A schema-constructing (not dict-returning) endpoint fails loudly, not silently.
 

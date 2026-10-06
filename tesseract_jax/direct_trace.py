@@ -19,6 +19,7 @@ import functools
 import warnings
 from typing import Any
 
+import jax.numpy as jnp
 from pydantic import BaseModel
 
 from tesseract_jax.tree_util import to_shape_dtype_pytree
@@ -54,11 +55,18 @@ def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
     re-validate defaults either. A present non-array leaf also keeps
     ``schema_node``'s value, since it already passed whatever validator
     applies to it during the abstract-schema validation.
+
+    A present array leaf is cast to ``schema_node.dtype`` -- the dtype the
+    abstract-schema validation already resolved the field to (including any
+    expected_dtype coercion ``Array[...]`` declares) -- so a tracer gets the
+    same dtype coercion ``python_to_array`` would apply to a real value on
+    the callback path, instead of flowing through unconverted and failing
+    MLIR's output-type check later.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
     if isinstance(schema_node, ShapeDType):
-        return real_node
+        return jnp.asarray(real_node, dtype=schema_node.dtype)
     if isinstance(schema_node, BaseModel):
         updates = {
             name: (
