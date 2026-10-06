@@ -194,6 +194,6 @@ def _native_dispatch(
     return [
         r
         if r is None or hasattr(r, "__cuda_array_interface__")
-        else np.ascontiguousarray(r)
+        else np.asarray(r, order="C")
         for r in fn(views)
     ]

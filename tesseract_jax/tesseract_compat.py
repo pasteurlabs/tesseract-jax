@@ -50,9 +50,12 @@ def _to_host(value: TransportArray) -> TransportArray:
 
     Lazy import for the same reason as in :func:`_on_device`.
     """
-    from tesseract_core.runtime.cuda.ipc import cuda_array_to_host, is_gpu_array
+    from tesseract_core.runtime.cuda.ipc import (
+        cuda_array_to_host,
+        has_cuda_array_interface,
+    )
 
-    if is_gpu_array(value):
+    if has_cuda_array_interface(value):
         return cuda_array_to_host(value)
     return value
 

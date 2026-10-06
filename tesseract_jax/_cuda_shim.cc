@@ -296,6 +296,35 @@ std::string shape_str(const std::vector<int64_t>& shape) {
   return s;
 }
 
+// Whether array-interface `strides` (in bytes; None means row-major) describe a
+// row-major layout of `shape` with `nbytes` total. As in NumPy, the strides of
+// size-1 axes are ignored and an empty array counts as contiguous.
+bool is_row_major(nb::handle strides, const std::vector<int64_t>& shape,
+                  size_t nbytes) {
+  if (strides.is_none()) {
+    return true;
+  }
+  const auto s = nb::cast<std::vector<int64_t>>(strides);
+  if (s.size() != shape.size()) {
+    return false;
+  }
+  int64_t numel = 1;
+  for (int64_t d : shape) {
+    numel *= d;
+  }
+  if (numel == 0) {
+    return true;
+  }
+  int64_t expected = static_cast<int64_t>(nbytes) / numel;  // itemsize
+  for (size_t i = shape.size(); i-- > 0;) {
+    if (shape[i] != 1 && s[i] != expected) {
+      return false;
+    }
+    expected *= shape[i];
+  }
+  return true;
+}
+
 // A plain description of one buffer, handed to Python.
 struct BufferDesc {
   uintptr_t ptr;
@@ -496,6 +525,18 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
               shape_str(out_descs[i].shape));
         }
         rd.nbytes = out_descs[i].nbytes;  // now known to agree
+        // The copies below move one flat byte range, so a strided result (a
+        // transpose, a slice, a broadcast) would be read in the wrong order or
+        // past its allocation. A served Tesseract's cuda_ipc encoder already
+        // rejects these, but an in-process endpoint hands its arrays over as is.
+        nb::object strides = cai.attr("get")("strides", nb::none());
+        if (!is_row_major(strides, rd.shape, rd.nbytes)) {
+          return ffi::Error::InvalidArgument(
+              "tesseract_jax result " + std::to_string(i) +
+              ": Tesseract returned a non-contiguous array with strides " +
+              shape_str(nb::cast<std::vector<int64_t>>(strides)) +
+              "; make it C-contiguous before returning it");
+        }
         result_descs.push_back(rd);
         // Debug: the dispatch's returned buffers must be device-resident.
         // This is the check that matters: a host copy on a derivative return path

@@ -345,8 +345,9 @@ def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
     """Host results reach the handler as C-contiguous NumPy arrays.
 
     The handler copies a host result as one flat byte range, so a strided one
-    must be made contiguous first. Device results and placeholder ``None`` slots
-    pass through untouched.
+    must be made contiguous first, without changing its shape (0-d results stay
+    0-d, so they match their output buffer). Device results and placeholder
+    ``None`` slots pass through untouched.
     """
 
     class _Device:
@@ -360,13 +361,23 @@ def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
 
     device = _Device()
     strided = np.arange(6, dtype=np.float32)[::2]
+    scalar = np.float32(3.0)
+    zero_d = np.array(4.0, dtype=np.float32)
     monkeypatch.setattr(
-        gpu_ffi, "_registry", {7: lambda views: (device, None, strided)}
+        gpu_ffi,
+        "_registry",
+        {7: lambda views: (device, None, strided, scalar, zero_d)},
     )
 
-    out_device, out_none, out_host = gpu_ffi._native_dispatch(7, [])
+    out_device, out_none, out_host, out_scalar, out_zero_d = gpu_ffi._native_dispatch(
+        7, []
+    )
 
     assert out_device is device
     assert out_none is None
     assert out_host.flags.c_contiguous
     np.testing.assert_array_equal(out_host, strided)
+    for out, expected in ((out_scalar, scalar), (out_zero_d, zero_d)):
+        assert out.shape == ()
+        assert out.flags.c_contiguous
+        assert out == expected

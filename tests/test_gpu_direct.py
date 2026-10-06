@@ -605,6 +605,49 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     _assert_interpreter_alive()
 
 
+@pytest.mark.parametrize("contiguous", [True, False])
+def test_result_strides_at_ffi_boundary(served_gpu_tesseract, contiguous):
+    """A strided result must raise; explicit row-major strides are accepted.
+
+    The handler copies each result as one flat byte range, so a strided array
+    (which an in-process endpoint can hand over, unlike cuda_ipc, which rejects
+    them) would be misread. We re-expose the first result with explicit strides:
+    its own itemsize (row-major, copied as usual) or 0 (a broadcast, rejected).
+    """
+    n = 8
+
+    def _strided_dispatch(real_dispatch):
+        def dispatch(token, inputs):
+            out = real_dispatch(token, inputs)
+            cai = dict(out[0].__cuda_array_interface__)
+            # A size-1 axis ignores its stride, so this must be ``c``, not ``c_sum``.
+            assert tuple(cai["shape"]) == (n,)
+            itemsize = np.dtype(cai["typestr"]).itemsize
+            cai["strides"] = (itemsize if contiguous else 0,)
+
+            class _Strided:
+                __cuda_array_interface__ = cai
+                # Keeps the real result's buffer alive through the copy.
+                owner = out[0]
+
+            return [_Strided(), *out[1:]]
+
+        return dispatch
+
+    with _patched_dispatch(_strided_dispatch):
+        run = _apply_c(served_gpu_tesseract, n)
+        if contiguous:
+            c = run()
+            np.testing.assert_allclose(
+                _to_np(c), np.arange(n, dtype=np.float32) * 2.0 + 1.0, rtol=1e-6
+            )
+        else:
+            with pytest.raises(jax.errors.JaxRuntimeError, match=r"non-contiguous"):
+                run()
+
+    _assert_interpreter_alive()
+
+
 def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     served_gpu_tesseract, served_vectoradd_tesseract
 ):
