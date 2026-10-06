@@ -3,27 +3,17 @@
 ## Quick start
 
 ```{note}
-Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+You need Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/installation/), which Tesseract uses to build a separate virtual environment for each Tesseract. Docker is only needed to build container images.
 ```
 
-```{seealso}
-For more detailed installation instructions, please refer to the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/introduction/installation.html).
-```
-
-1. Install Tesseract-JAX:
+1. Install Tesseract-JAX and get the example Tesseracts:
 
    ```bash
    $ pip install tesseract-jax
-   ```
-
-2. Build an example Tesseract:
-
-   ```bash
    $ git clone https://github.com/pasteurlabs/tesseract-jax
-   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
    ```
 
-3. Use it as part of a JAX program:
+2. Use a Tesseract as part of a JAX program:
 
    ```python
    import jax
@@ -31,8 +21,8 @@ For more detailed installation instructions, please refer to the [Tesseract Core
    from tesseract_core import Tesseract
    from tesseract_jax import apply_tesseract
 
-   # Load the Tesseract
-   t = Tesseract.from_image("vectoradd_jax")
+   # Serve the Tesseract in its own process (its environment is built on first use)
+   t = Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")
    t.serve()
 
    # Run it with JAX
@@ -58,19 +48,22 @@ For more detailed installation instructions, please refer to the [Tesseract Core
    vector_sum_vmap(x.reshape(10, 100), y.reshape(10, 100))
    ```
 
-````{tip}
-To skip Docker, serve the Tesseract from its source directory in a subprocess instead of building an image:
+   `from_source` builds the environment from the Tesseract's requirements into `.tesseract-venv` next to `tesseract_api.py`, or runs on an existing interpreter passed as `python_executable=...`. Unlike a container, the Tesseract is not isolated from your filesystem and user.
 
-```python
-t = Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")
-t.serve()
-```
+3. To share or deploy the Tesseract, build the same folder into a container image (this step requires [Docker](https://docs.docker.com/engine/install/)) and replace `from_source` with `from_image`:
 
-This builds a virtual environment from the Tesseract's requirements next to `tesseract_api.py` on first use (which needs [`uv`](https://docs.astral.sh/uv/)), or runs on an existing interpreter passed as `python_executable=...`. Unlike a container, it is not isolated from your environment and filesystem.
-````
+   ```bash
+   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
+   ```
+
+   ```python
+   t = Tesseract.from_image("vectoradd_jax")
+   ```
+
+   A Tesseract that is already running elsewhere is reached with `Tesseract.from_url(...)`. `apply_tesseract` works the same way with all three.
 
 ```{seealso}
-See [Batching strategies for jax.vmap](vmap-methods.md) for a guide on selecting the appropriate `vmap_method`.
+See [Batching strategies for jax.vmap](vmap-methods.md) for a guide on selecting the appropriate `vmap_method`, and the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/) for more on installing and serving Tesseracts.
 ```
 
 ```{tip}
@@ -89,7 +82,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
 
 - **No JAX operations inside `from_tesseract_api` endpoints**: When using `Tesseract.from_tesseract_api(...)`, the `apply`, `vector_jacobian_product`, and `jacobian_vector_product` functions in your `tesseract_api.py` execute inside JAX FFI callbacks. **Using `jax.numpy` or any other JAX operation that allocates arrays in these functions can cause deadlocks**, because JAX's runtime is already holding a lock during the callback.
 
-  Use plain NumPy instead, or serve the Tesseract in its own process with `Tesseract.from_source(...)` (see the tip under Quick start):
+  Use plain NumPy instead, or serve the Tesseract in its own process with `Tesseract.from_source(...)` as in the quick start:
 
   ```python
   # ❌ Bad — will deadlock under jit/grad

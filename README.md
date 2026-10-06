@@ -26,25 +26,16 @@ jax.grad(vector_sum)(x, y) # 🎉
 ## Quick start
 
 > [!NOTE]
-> Before proceeding, make sure you have a [working installation of Docker](https://docs.docker.com/engine/install/) and a modern Python installation (Python 3.10+).
+> You need Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/installation/), which Tesseract uses to build a separate virtual environment for each Tesseract. Docker is only needed to build container images.
 
-> [!IMPORTANT]
-> For more detailed installation instructions, please refer to the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/content/introduction/installation.html).
-
-1. Install Tesseract-JAX:
+1. Install Tesseract-JAX and get the example Tesseracts:
 
    ```bash
    $ pip install tesseract-jax
-   ```
-
-2. Build an example Tesseract:
-
-   ```bash
    $ git clone https://github.com/pasteurlabs/tesseract-jax
-   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
    ```
 
-3. Use it as part of a JAX program via the JAX-native `apply_tesseract` function:
+2. Use a Tesseract as part of a JAX program via the JAX-native `apply_tesseract` function:
 
    ```python
    import jax
@@ -52,8 +43,8 @@ jax.grad(vector_sum)(x, y) # 🎉
    from tesseract_core import Tesseract
    from tesseract_jax import apply_tesseract
 
-   # Load the Tesseract
-   t = Tesseract.from_image("vectoradd_jax")
+   # Serve the Tesseract in its own process (its environment is built on first use)
+   t = Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")
    t.serve()
 
    # Run it with JAX
@@ -80,11 +71,20 @@ jax.grad(vector_sum)(x, y) # 🎉
    vector_sum_vmap(x.reshape(10, 100), y.reshape(10, 100))
    ```
 
-> [!TIP]
-> To skip Docker, replace `Tesseract.from_image("vectoradd_jax")` with `Tesseract.from_source("tesseract-jax/examples/simple/vectoradd_jax/tesseract_api.py")`. This serves the Tesseract in a subprocess, building a virtual environment from its requirements on first use (which needs [`uv`](https://docs.astral.sh/uv/)).
+3. To share or deploy the Tesseract, build the same folder into a container image (this step requires [Docker](https://docs.docker.com/engine/install/)) and replace `from_source` with `from_image`:
+
+   ```bash
+   $ tesseract build tesseract-jax/examples/simple/vectoradd_jax
+   ```
+
+   ```python
+   t = Tesseract.from_image("vectoradd_jax")
+   ```
+
+   A Tesseract that is already running elsewhere is reached with `Tesseract.from_url(...)`. `apply_tesseract` works the same way with all three.
 
 > [!TIP]
-> Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX.
+> Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX. For more on installing and serving Tesseracts, see the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/).
 
 ## Sharp edges
 
