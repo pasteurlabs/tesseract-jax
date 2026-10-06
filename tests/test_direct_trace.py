@@ -99,6 +99,84 @@ def test_input_dtype_is_cast_to_schema_dtype(
     assert out["vector_add"]["result"].dtype == jnp.float32
 
 
+@pytest.mark.parametrize("traceable", [False, True])
+def test_static_leaves_survive_traced_dispatch(nonarray_output_tess, traceable):
+    """A non-array (str/bool) output leaf comes back unchanged on both paths.
+
+    ``direct_trace.py`` only patches ``ShapeDType`` (array) leaves; a static
+    leaf is carried separately by the primitive (see ``test_nonarray_outputs.py``),
+    so it should be unaffected by which dispatch path produced it.
+    """
+    x = jnp.arange(3, dtype=jnp.float64)
+
+    def loss(x):
+        return apply_tesseract(nonarray_output_tess, dict(x=x), traceable=traceable)[
+            "y"
+        ].sum()
+
+    out = apply_tesseract(nonarray_output_tess, dict(x=x), traceable=traceable)
+    assert out["backend"] == "reference"
+    assert out["converged"] is True
+    np.testing.assert_allclose(out["y"], 2.0 * x)
+    np.testing.assert_allclose(jax.grad(loss)(x), 2.0 * jnp.ones_like(x))
+
+
+@pytest.mark.parametrize("traceable", [False, True])
+def test_symbolic_zero_cotangent_matches_on_traced_dispatch(
+    zero_cotangent_tess, traceable
+):
+    """A symbolic-zero cotangent is dropped identically on both dispatch paths.
+
+    ``unsafe`` has a NaN gradient at x = 0; when only ``safe`` enters the loss,
+    its cotangent must be a symbolic zero and not poison the gradient -- on
+    the traced path just as on the callback path (see ``test_api.py``'s
+    ``test_unused_output_cotangent_is_not_requested``).
+    """
+    x = jnp.zeros(3, dtype=jnp.float64)
+
+    def loss(x):
+        return apply_tesseract(zero_cotangent_tess, dict(x=x), traceable=traceable)[
+            "safe"
+        ].sum()
+
+    grad = jax.grad(loss)(x)
+    np.testing.assert_array_equal(grad, [2.0, 2.0, 2.0])
+
+
+@pytest.mark.parametrize("traceable", [False, True])
+def test_gather_discarded_slots_match_on_traced_dispatch(gather_tess, traceable):
+    """Non-differentiable int/float/complex output tangents match on both paths.
+
+    ``gather_tess`` covers all three discarded-tangent dtype classes (see
+    ``test_api.py``'s ``test_discarded_tangent_fill_value``); the traced path's
+    ``apply`` is rewritten in ``jnp`` (``bincount``, scatter-add) instead of
+    ``np``, since ``inputs.weights``/``inputs.indices`` may be tracers.
+    """
+    weights = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
+    indices = jnp.array([0, 2, 2], dtype=jnp.int32)
+
+    def apply_fn(w):
+        return apply_tesseract(
+            gather_tess, dict(weights=w, indices=indices), traceable=traceable
+        )
+
+    _, tangents = jax.jvp(apply_fn, (weights,), (jnp.ones_like(weights),))
+    magnitude = np.asarray(tangents["magnitude"])
+    assert magnitude.dtype == np.float32
+    assert np.isnan(magnitude).all()
+
+    phase = np.asarray(tangents["phase"])
+    assert phase.dtype == np.complex64
+    assert np.isnan(phase.real).all()
+
+    count = np.asarray(tangents["count"])
+    assert count.dtype == np.int32
+    np.testing.assert_array_equal(count, np.zeros(3, dtype="int32"))
+
+    grad = jax.grad(lambda w: apply_fn(w)["gathered"].sum())(weights)
+    np.testing.assert_allclose(grad, [1.0, 0.0, 2.0])
+
+
 def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
     """A schema-constructing (not dict-returning) endpoint fails loudly, not silently.
 
