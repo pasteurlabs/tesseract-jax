@@ -80,14 +80,18 @@ def _gpu_available() -> bool:
         return False
 
 
-def _served_gpu_tesseract(folder: str, *, needs_cupy: bool = True):
-    """Skip-or-serve helper shared by the GPU Tesseract fixtures."""
+def _skip_without_gpu(*, needs_cupy: bool) -> None:
     if not _gpu_available():
         pytest.skip("no GPU backend for JAX")
     if needs_cupy:
         # CuPy is required by the *test Tesseract's* compute (its apply runs on
         # cupy), not by tesseract-jax's transport, which is CUDA-array-library-free.
         pytest.importorskip("cupy")
+
+
+def _served_gpu_tesseract(folder: str, *, needs_cupy: bool = True):
+    """Skip-or-serve helper shared by the GPU Tesseract fixtures."""
+    _skip_without_gpu(needs_cupy=needs_cupy)
     yield from _serve_tesseract(
         here / folder / "tesseract_api.py",
         # cuda_ipc GPU transport is an experimental opt-in in tesseract-core.
@@ -111,6 +115,13 @@ def served_gpu_mixed_dtype_tesseract():
 def served_gpu_jax_tesseract():
     """A served GPU Tesseract that computes with JAX. Skips without a GPU."""
     yield from _served_gpu_tesseract("gpu_jax_tesseract", needs_cupy=False)
+
+
+@pytest.fixture(scope="module")
+def local_gpu_tesseract():
+    """The all-float32 GPU Tesseract, loaded in-process. Skips without a GPU/CuPy."""
+    _skip_without_gpu(needs_cupy=True)
+    return _load_tesseract("gpu_tesseract")
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@ owns the native side of that path:
   as an FFI attribute) to the Python dispatch closure for that call, and
 * the single callback the handler invokes, which wraps the XLA input device
   pointers as ``__cuda_array_interface__`` views, runs the dispatch, and returns
-  the result device arrays for the handler to copy into XLA's output buffers.
+  the result arrays for the handler to copy into XLA's output buffers.
 
 The dispatch closure is the same ``getattr(client, eval_func)(...)`` closure the
 CPU lowering builds, so every endpoint (apply / jvp / vjp / jacobian) routes
@@ -139,11 +139,14 @@ class _DeviceArrayView:
     allocation. It never adopts, frees, or runs kernels on the object. So the
     minimal thing we must hand it is an object exposing that one attribute; a
     full array library (CuPy) is not needed, which keeps CUDA-array-library
-    dependencies off the GPU-direct input path.
+    dependencies off the GPU-direct input path. An in-process Tesseract receives
+    the view itself, and adopts it through the same protocol (e.g.
+    ``cupy.asarray``).
 
     The view owns nothing: the memory is XLA's input buffer, valid for the
     duration of the dispatch. ``data``'s read-only flag is ``False`` because the
-    encoder may read it via an on-GPU copy.
+    encoder may read it via an on-GPU copy. There is no ``stream`` key, since the
+    handler synchronizes XLA's stream before the dispatch runs.
     """
 
     def __init__(self, ptr: int, typestr: str, shape: tuple[int, ...]) -> None:
@@ -172,9 +175,12 @@ def _native_dispatch(
     """Invoked by the native FFI handler under the GIL.
 
     ``inputs`` is a sequence of ``(device_ptr, numpy_typestr, shape)`` for the
-    XLA input buffers (still on device). Returns a list of arrays exposing
-    ``__cuda_array_interface__`` whose bytes the handler copies into the XLA
-    output buffers.
+    XLA input buffers (still on device). Returns a list of arrays whose bytes
+    the handler copies into the XLA output buffers: device arrays exposing
+    ``__cuda_array_interface__``, ``None`` for a placeholder slot, or host
+    arrays, which an in-process endpoint may return. The handler copies a host
+    array as one flat byte range, so those are made C-contiguous NumPy arrays
+    here.
 
     The native shim marshals each entry across the nanobind boundary, where
     ``shape`` arrives as a Python ``list`` rather than a ``tuple``; the sequence
@@ -186,5 +192,9 @@ def _native_dispatch(
     views = tuple(
         _DeviceArrayView(ptr, typestr, tuple(shape)) for ptr, typestr, shape in inputs
     )
-    out = fn(views)
-    return list(out)
+    return [
+        r
+        if r is None or hasattr(r, "__cuda_array_interface__")
+        else np.ascontiguousarray(r)
+        for r in fn(views)
+    ]

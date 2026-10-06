@@ -24,7 +24,12 @@ from tesseract_core import Tesseract
 from tesseract_core.sdk.tesseract import HTTPClient
 
 from tesseract_jax import apply_tesseract, gpu_ffi
-from tesseract_jax.tesseract_compat import Jaxeract, _default_gpu_transport
+from tesseract_jax.tesseract_compat import (
+    Jaxeract,
+    _cast_return,
+    _default_gpu_transport,
+    _to_host,
+)
 
 # Never contacted: the tests below only build clients for it, sending no requests.
 _UNREACHABLE_URL = "http://127.0.0.1:1"
@@ -82,11 +87,46 @@ def test_none_forces_host_roundtrip():
     assert j._gpu_transport == "none"
 
 
-def test_named_transport_is_dropped_for_local_client(vectoradd_tess):
-    # An in-process client shares memory with the caller, so a GPU array must
-    # reach it as it would without a transport.
+def test_named_transport_is_kept_for_local_client(vectoradd_tess):
+    # An in-process client advertises no transport, so naming one per call is how
+    # it opts into receiving GPU arrays directly.
     j = Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
-    assert j._gpu_transport == "none"
+    assert j._gpu_transport == "cuda_ipc"
+
+
+class _FakeDeviceArray:
+    """Looks like a CuPy array: ``__cuda_array_interface__`` plus ``.get()``."""
+
+    def __init__(self, host: np.ndarray) -> None:
+        self._host = host
+        self.__cuda_array_interface__ = {
+            "shape": host.shape,
+            "typestr": host.dtype.str,
+            "data": (0x1000, False),
+            "version": 3,
+        }
+
+    def get(self) -> np.ndarray:
+        return self._host
+
+
+def test_to_host_copies_device_arrays_only():
+    host = np.arange(3.0)
+    np.testing.assert_array_equal(_to_host(_FakeDeviceArray(host)), host)
+    assert _to_host(host) is host
+
+
+def test_cast_return_keeps_results_on_the_calls_side():
+    # On the FFI path a device result is left for the shim, which checks its
+    # dtype. Everything else is cast on the host: a device result on the host
+    # path after a copy, and a host result on either path.
+    device = _FakeDeviceArray(np.arange(3.0))
+    assert _cast_return(device, dtype=np.dtype("float32"), on_device=True) is device
+    for value, on_device in [(device, False), (np.arange(3.0), True)]:
+        cast = _cast_return(value, dtype=np.dtype("float32"), on_device=on_device)
+        assert isinstance(cast, np.ndarray)
+        assert cast.dtype == np.float32
+        np.testing.assert_array_equal(cast, np.arange(3.0))
 
 
 def test_unsupported_transport_is_rejected():
@@ -183,6 +223,28 @@ def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesserac
 
     def f(a, b):
         return apply_tesseract(tess, {"a": a, "b": b})["c"]
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        c = jax.jit(f)(a, b)
+        grad_a = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
+
+    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
+    np.testing.assert_array_equal(grad_a, np.ones(8))
+
+
+def test_local_client_with_named_transport_runs_on_cpu(vectoradd_tess):
+    """An in-process client given a transport stays usable from CPU-only JAX.
+
+    Only the ``cuda`` lowering acts on the transport, so CPU arrays reach the
+    endpoint through the host callback as usual.
+    """
+
+    def f(a, b):
+        return apply_tesseract(
+            vectoradd_tess, {"a": a, "b": b}, gpu_transport="cuda_ipc"
+        )["c"]
 
     with jax.default_device(jax.devices("cpu")[0]):
         a = jnp.arange(8, dtype=jnp.float32)

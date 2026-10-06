@@ -45,21 +45,38 @@ def _on_device(values: "list | tuple") -> bool:
     return any(has_cuda_array_interface(v) for v in values)
 
 
-def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
-    """Coerce a dispatch result to the return ``dtype`` without leaving the device.
+def _to_host(value: TransportArray) -> TransportArray:
+    """Copy a GPU array to a host NumPy array, and return anything else as is.
 
-    On the host path ``value`` is a NumPy array, cast to ``dtype`` here. On the
-    cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the FFI
-    handler copies straight into XLA's output buffer, so casting here would force
-    a device->host round-trip; it is returned untouched. Since that does not
-    guarantee the device array already has ``dtype`` (tesseract-core does not pin
-    a jacobian endpoint's output dtype), the native shim checks each result's
-    dtype and shape against the XLA output buffer and raises on a mismatch rather
-    than reinterpreting bytes (see ``_cuda_shim.cc``).
+    The host-callback lowering hands results to XLA as host buffers, but an
+    in-process endpoint may return device arrays (e.g. CuPy) whatever arrays it
+    was given. Lazy import for the same reason as in :func:`_on_device`.
     """
-    if _on_device([value]):
+    from tesseract_core.runtime.cuda.ipc import cuda_array_to_host, is_gpu_array
+
+    if is_gpu_array(value):
+        return cuda_array_to_host(value)
+    return value
+
+
+def _cast_return(
+    value: TransportArray, *, dtype: np.dtype, on_device: bool
+) -> TransportArray:
+    """Coerce a dispatch result to the return ``dtype``, on the call's side.
+
+    On the cuda_ipc (GPU FFI) path a device ``value`` is returned untouched: the
+    FFI handler copies its bytes straight into XLA's output buffer, so casting
+    here would force a device->host round-trip. Since that does not guarantee
+    the device array already has ``dtype`` (tesseract-core does not pin a
+    jacobian endpoint's output dtype), the native shim checks each result's dtype
+    and shape against the XLA output buffer and raises on a mismatch rather than
+    reinterpreting bytes (see ``_cuda_shim.cc``). Every other ``value`` is cast
+    to ``dtype`` on the host, after a copy if it is a device array on the host
+    path.
+    """
+    if on_device and _on_device([value]):
         return value
-    return np.asarray(value, dtype=dtype)
+    return np.asarray(_to_host(value), dtype=dtype)
 
 
 def _placeholder(
@@ -162,11 +179,11 @@ def _default_gpu_transport(tesseract_client: Tesseract) -> str:
 
 
 def _supports_gpu_transport(tesseract_client: Tesseract) -> bool:
-    """Whether the client can be switched to a device transport.
+    """Whether the client has a wire encoding to switch to a device transport.
 
     True only for an ``HTTPClient`` (has ``_gpu_transport``). An in-process
-    ``LocalClient`` shares memory with the caller, so there is nothing to
-    transport.
+    ``LocalClient`` encodes nothing: it hands its endpoints whatever arrays the
+    lowering passes it.
     """
     client = getattr(tesseract_client, "_client", None)
     return client is not None and hasattr(client, "_gpu_transport")
@@ -183,8 +200,7 @@ class Jaxeract:
     ) -> None:
         """Initialize the Tesseract client.
 
-        ``gpu_transport`` is as in :func:`apply_tesseract`. A client that fails
-        :func:`_supports_gpu_transport` always gets ``"none"``.
+        ``gpu_transport`` is as in :func:`apply_tesseract`.
         """
         if gpu_transport is None:
             gpu_transport = _default_gpu_transport(tesseract_client)
@@ -197,8 +213,6 @@ class Jaxeract:
                 f"Unsupported gpu_transport {gpu_transport!r}; "
                 f"supported: {['none', *sorted(_SUPPORTED_TRANSPORTS)]}."
             )
-        if not _supports_gpu_transport(tesseract_client):
-            gpu_transport = "none"
 
         self.client = tesseract_client
         # ``"none"`` for a host round-trip, else the device transport's name.
@@ -526,13 +540,16 @@ class Jaxeract:
             )
             if v is not None
         }
+        on_device = _on_device(array_args)
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                out.append(_cast_return(out_data[op][ip], dtype=target))
+                out.append(
+                    _cast_return(out_data[op][ip], dtype=target, on_device=on_device)
+                )
         return tuple(out)
 
     def vector_jacobian_product(

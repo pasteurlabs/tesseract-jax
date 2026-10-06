@@ -3,10 +3,9 @@
 
 """A GPU Tesseract that computes with JAX, for exercising cuda_ipc end-to-end.
 
-JAX arrays expose their device memory only through DLPack, not the
-``__cuda_array_interface__`` that the CuPy-based GPU test Tesseracts rely on, so
-this covers the DLPack side of the transport in both directions: inputs are
-adopted with ``jnp.from_dlpack`` and outputs are returned as JAX arrays.
+Inputs are adopted with ``jnp.from_dlpack``, where the CuPy-based GPU test
+Tesseracts go through ``__cuda_array_interface__``, and outputs are returned as
+JAX arrays, whose buffers come from XLA's allocator rather than CuPy's.
 
 Every endpoint rejects inputs that arrive in host memory, so a host copy on the
 way in fails the call. A host copy on the way out is caught on the client side by

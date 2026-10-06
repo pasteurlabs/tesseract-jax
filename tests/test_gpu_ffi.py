@@ -339,3 +339,34 @@ def test_native_dispatch_wraps_inputs_as_views(monkeypatch):
     assert isinstance(view, gpu_ffi._DeviceArrayView)
     assert view.shape == (2, 2)  # list shape normalised to a tuple
     assert view.dtype == np.dtype("<f8")
+
+
+def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
+    """Host results reach the handler as C-contiguous NumPy arrays.
+
+    The handler copies a host result as one flat byte range, so a strided one
+    must be made contiguous first. Device results and placeholder ``None`` slots
+    pass through untouched.
+    """
+
+    class _Device:
+        def __init__(self) -> None:
+            self.__cuda_array_interface__ = {
+                "shape": (2,),
+                "typestr": "<f4",
+                "data": (0x1000, False),
+                "version": 3,
+            }
+
+    device = _Device()
+    strided = np.arange(6, dtype=np.float32)[::2]
+    monkeypatch.setattr(
+        gpu_ffi, "_registry", {7: lambda views: (device, None, strided)}
+    )
+
+    out_device, out_none, out_host = gpu_ffi._native_dispatch(7, [])
+
+    assert out_device is device
+    assert out_none is None
+    assert out_host.flags.c_contiguous
+    np.testing.assert_array_equal(out_host, strided)
