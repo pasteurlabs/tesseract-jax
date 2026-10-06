@@ -23,8 +23,8 @@
 //   marshalling ints/strings/lists/tuples/objects, well inside the Limited API,
 //   so one abi3 wheel per platform serves every supported CPython version.
 // * The registered Python callback returns the result arrays and the shim
-//   copies them into XLA's output buffers: device->device for objects exposing
-//   __cuda_array_interface__, host->device for C-contiguous NumPy arrays (an
+//   copies them into XLA's output buffers, device->device for objects exposing
+//   __cuda_array_interface__ and host->device for C-contiguous NumPy arrays (an
 //   in-process endpoint may return either).
 
 #include <algorithm>
@@ -462,14 +462,13 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
                                            : "__cuda_array_interface__");
         nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
         rd.ptr = nb::cast<uintptr_t>(data[0]);
-        // CAI v3: a producer whose work on the data may still be in flight names
-        // the stream it ran on, and the consumer must synchronize on it before
-        // reading. The copies below run on XLA's stream, which is unrelated to
-        // it, so they would otherwise race the producer's kernels. That happens
-        // when an in-process endpoint computes its results itself (e.g. with
-        // CuPy) rather than receiving them from a served Tesseract. 1 and 2
-        // denote the legacy and per-thread default streams, which are also the
-        // runtime's handles for them; 0 is disallowed by the protocol.
+        // Under CAI v3, a producer whose work on the data may still be in flight
+        // names the stream it ran on, and the consumer must synchronize on it
+        // before reading. The copies below run on XLA's unrelated stream, so they
+        // would otherwise race the producer's kernels, e.g. when an in-process
+        // endpoint computes its results with CuPy. The protocol's values 1 and 2
+        // (legacy and per-thread default stream) equal the runtime's handles for
+        // those streams, so any value but the disallowed 0 is passed as is.
         nb::object producer_stream =
             rd.host ? nb::none() : cai.attr("get")("stream", nb::none());
         if (!producer_stream.is_none()) {

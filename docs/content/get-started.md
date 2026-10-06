@@ -60,7 +60,7 @@ You need Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/install
    t = Tesseract.from_image("vectoradd_jax")
    ```
 
-   A Tesseract that is already running elsewhere is reached with `Tesseract.from_url(...)`. `apply_tesseract` works the same way with all three.
+   Use `Tesseract.from_url(...)` to reach a Tesseract that is already running elsewhere. `apply_tesseract` works the same way with all three.
 
 ```{seealso}
 See [Batching strategies for jax.vmap](vmap-methods.md) for a guide on selecting the appropriate `vmap_method`, and the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/) for more on installing and serving Tesseracts.

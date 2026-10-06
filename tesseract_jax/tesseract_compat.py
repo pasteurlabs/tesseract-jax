@@ -48,9 +48,7 @@ def _on_device(values: "list | tuple") -> bool:
 def _to_host(value: TransportArray) -> TransportArray:
     """Copy a GPU array to a host NumPy array, and return anything else as is.
 
-    The host-callback lowering hands results to XLA as host buffers, but an
-    in-process endpoint may return device arrays (e.g. CuPy) whatever arrays it
-    was given. Lazy import for the same reason as in :func:`_on_device`.
+    Lazy import for the same reason as in :func:`_on_device`.
     """
     from tesseract_core.runtime.cuda.ipc import cuda_array_to_host, is_gpu_array
 
@@ -60,27 +58,24 @@ def _to_host(value: TransportArray) -> TransportArray:
 
 
 def _cast_return(
-    value: TransportArray, *, dtype: np.dtype, on_device: bool
+    value: TransportArray, *, dtype: np.dtype, ffi_path: bool
 ) -> TransportArray:
-    """Coerce a dispatch result to the return ``dtype``, on the call's side.
+    """Coerce a dispatch result to the return ``dtype``.
 
-    On the cuda_ipc (GPU FFI) path a device ``value`` is returned untouched: the
-    FFI handler copies its bytes straight into XLA's output buffer, so casting
-    here would force a device->host round-trip. Since that does not guarantee
-    the device array already has ``dtype`` (tesseract-core does not pin a
-    jacobian endpoint's output dtype), the native shim checks each result's dtype
-    and shape against the XLA output buffer and raises on a mismatch rather than
-    reinterpreting bytes (see ``_cuda_shim.cc``). Every other ``value`` is cast
-    to ``dtype`` on the host, after a copy if it is a device array on the host
-    path.
+    On the GPU FFI path (``ffi_path``) a device ``value`` is returned as is,
+    since casting it would force a device->host round-trip. tesseract-core does
+    not pin a jacobian endpoint's output dtype, so the native shim checks the
+    result's dtype and shape against XLA's output buffer instead and raises on a
+    mismatch (see ``_cuda_shim.cc``). Every other ``value`` is copied to the host
+    if needed and cast there.
     """
-    if on_device and _on_device([value]):
+    if ffi_path and _on_device([value]):
         return value
     return np.asarray(_to_host(value), dtype=dtype)
 
 
 def _placeholder(
-    shape: tuple[int, ...], dtype: np.dtype, *, on_device: bool
+    shape: tuple[int, ...], dtype: np.dtype, *, ffi_path: bool
 ) -> TransportArray | None:
     """A discarded slot in a derivative call's output tuple.
 
@@ -89,12 +84,13 @@ def _placeholder(
     output-tuple-length contract; JAX's transpose machinery never consumes it for
     any user-requested derivative, so its value is immaterial.
 
-    On the cuda_ipc path this returns ``None`` and the native FFI handler fills
-    XLA's output buffer for that slot directly. On the host path it returns an
-    array filled with each dtype's ``0/0`` value (see :func:`_discarded_slot`), so
-    an accidental consumer surfaces loudly rather than silently.
+    On the GPU FFI path (``ffi_path``) this returns ``None`` and the native FFI
+    handler fills XLA's output buffer for that slot directly. On the host path it
+    returns an array filled with each dtype's ``0/0`` value (see
+    :func:`_discarded_slot`), so an accidental consumer surfaces loudly rather
+    than silently.
     """
-    if on_device:
+    if ffi_path:
         return None
     return _discarded_slot(shape, dtype)
 
@@ -178,12 +174,12 @@ def _default_gpu_transport(tesseract_client: Tesseract) -> str:
     return "none"
 
 
-def _supports_gpu_transport(tesseract_client: Tesseract) -> bool:
-    """Whether the client has a wire encoding to switch to a device transport.
+def _is_http_client(tesseract_client: Tesseract) -> bool:
+    """Whether the client is an ``HTTPClient``, detected by its ``_gpu_transport``.
 
-    True only for an ``HTTPClient`` (has ``_gpu_transport``). An in-process
-    ``LocalClient`` encodes nothing: it hands its endpoints whatever arrays the
-    lowering passes it.
+    Only an HTTP client has a request encoding to switch transports. An
+    in-process ``LocalClient`` encodes nothing and passes its endpoints whatever
+    arrays the lowering hands it.
     """
     client = getattr(tesseract_client, "_client", None)
     return client is not None and hasattr(client, "_gpu_transport")
@@ -286,9 +282,9 @@ class Jaxeract:
         * ``_gpu_transport``, which drives how GPU array *inputs* are encoded, and
         * an ``Accept`` header carrying the transport as a media-type parameter
           (``application/<output_format>; gpu_transport=<transport>``), which is
-          how the server selects the *output* transport. The client never sends
-          Accept on its own, so without this the response falls back to the
-          server's configured transport.
+          how the server selects the *output* transport. The client never names a
+          transport in Accept on its own, so without this the response falls
+          back to the server's configured transport.
 
         ``_output_format`` is left untouched and the ``Accept`` media type reuses
         it, so the CPU leaves of a mixed response are unaffected.
@@ -296,7 +292,7 @@ class Jaxeract:
         Restored on exit so the shared client is not permanently mutated. A no-op
         for non-HTTP clients (e.g. the in-process ``LocalClient``).
         """
-        if not _supports_gpu_transport(self.client):
+        if not _is_http_client(self.client):
             yield
             return
         client = self.client._client
@@ -470,7 +466,7 @@ class Jaxeract:
         # Emit exactly the live leaves, in ``live_positions`` order, so the tuple
         # lines up with what abstract_eval declared. A non-differentiable live leaf
         # (never requested from the Tesseract) gets a placeholder.
-        on_device = _on_device(array_args)
+        ffi_path = _on_device(array_args)
         out = []
         for pos in live_positions:
             path = flat_items[pos][0]
@@ -478,7 +474,7 @@ class Jaxeract:
                 out.append(out_data[path])
             else:
                 aval = params.output_avals[pos]
-                out.append(_placeholder(aval.shape, aval.dtype, on_device=on_device))
+                out.append(_placeholder(aval.shape, aval.dtype, ffi_path=ffi_path))
 
         return tuple(out)
 
@@ -540,7 +536,7 @@ class Jaxeract:
             )
             if v is not None
         }
-        on_device = _on_device(array_args)
+        ffi_path = _on_device(array_args)
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
@@ -548,7 +544,7 @@ class Jaxeract:
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
                 out.append(
-                    _cast_return(out_data[op][ip], dtype=target, on_device=on_device)
+                    _cast_return(out_data[op][ip], dtype=target, ffi_path=ffi_path)
                 )
         return tuple(out)
 

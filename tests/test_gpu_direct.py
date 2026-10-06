@@ -14,8 +14,8 @@ The served fixtures are created with ``gpu_transport="cuda_ipc"``, which
 Most of these use a served (subprocess) GPU Tesseract, since CUDA IPC is
 cross-process and cannot be self-opened. The ``local_*`` tests load the same
 Tesseract in-process, where a named transport hands the endpoints XLA's device
-buffers directly. Marked ``gpu``; the fixtures skip where CUDA / CuPy / a
-GPU-backed JAX are unavailable.
+buffers directly. The tests are marked ``gpu``, and the fixtures skip where
+CUDA / CuPy / a GPU-backed JAX are unavailable.
 """
 
 from __future__ import annotations
@@ -199,12 +199,11 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
 def test_gpu_transport_selects_lowering(
     served_gpu_tesseract, gpu_transport, expect_ffi
 ):
-    """A cuda_ipc client lowers to the FFI call by default; ``"none"`` opts out.
+    """A cuda_ipc client lowers to the FFI call by default, and ``"none"`` opts out.
 
-    Both lowerings compute the same result, so the lowered program is inspected
-    for the FFI target to tell them apart. The output is checked too: with
-    ``"none"`` the request asks for host outputs, overriding the cuda_ipc
-    transport the Tesseract was served with, and JAX moves them back on-device.
+    Both lowerings compute the same result, so the test inspects the lowered
+    program for the FFI target. With ``"none"`` the request asks for host outputs
+    despite the Tesseract's cuda_ipc transport, and JAX moves them back on-device.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
@@ -612,8 +611,8 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     """A single jitted graph can mix a GPU-direct and a host-callback dispatch.
 
     The GPU Tesseract runs via cuda_ipc (device-resident, residency-checked), and
-    its output feeds a CPU Tesseract dispatched over the host transport (no
-    gpu_transport), which takes the usual device->host->device round-trip. The
+    its output feeds a CPU Tesseract dispatched over the host transport (it is
+    served without one), which takes the usual device->host->device round-trip. The
     two lower to different custom calls and compose without interfering.
     """
     cpu_tess = served_vectoradd_tesseract

@@ -175,12 +175,11 @@ def _native_dispatch(
     """Invoked by the native FFI handler under the GIL.
 
     ``inputs`` is a sequence of ``(device_ptr, numpy_typestr, shape)`` for the
-    XLA input buffers (still on device). Returns a list of arrays whose bytes
-    the handler copies into the XLA output buffers: device arrays exposing
-    ``__cuda_array_interface__``, ``None`` for a placeholder slot, or host
-    arrays, which an in-process endpoint may return. The handler copies a host
-    array as one flat byte range, so those are made C-contiguous NumPy arrays
-    here.
+    XLA input buffers (still on device). Returns one entry per XLA output buffer
+    for the handler to copy from. Each is a device array exposing
+    ``__cuda_array_interface__``, a host array (an in-process endpoint may return
+    either), or ``None`` for a placeholder slot. Host arrays are made
+    C-contiguous here because the handler copies them as one flat byte range.
 
     The native shim marshals each entry across the nanobind boundary, where
     ``shape`` arrives as a Python ``list`` rather than a ``tuple``; the sequence

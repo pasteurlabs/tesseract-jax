@@ -520,8 +520,8 @@ def _build_dispatch_closure(
         if not isinstance(out, tuple):
             out = (out,)
         if gpu_transport == "none":
-            # An in-process endpoint may return device arrays whatever arrays it
-            # was given, and the host callback needs host ones.
+            # An in-process endpoint may return device arrays even when given
+            # host ones, and the host callback needs host arrays.
             out = tuple(_to_host(r) for r in out)
         return out
 
@@ -533,11 +533,7 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: run the dispatch closure via a host callback.
-
-    Array data crosses the host here regardless of the call's transport, so the
-    request asks for host outputs too, even from a Tesseract served with one.
-    """
+    """CPU lowering: run the dispatch closure via a host callback, with no transport."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
     dispatch = _build_dispatch_closure(params, "none")
@@ -1122,21 +1118,19 @@ def apply_tesseract(
             methods) ``False`` may be more efficient.
         gpu_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
-            ``"cuda_ipc"``). It only applies when the call is compiled for a CUDA
-            device. A served Tesseract must have been started with the matching
-            ``gpu_transport``, and for ``cuda_ipc`` both processes must share the
-            CUDA IPC namespace (Docker's ``--ipc=host``). A local (in-process)
-            client instead receives its GPU inputs directly, as objects exposing
-            ``__cuda_array_interface__`` that are only valid during the call. Its
-            outputs may be host or device arrays with any transport, and are
-            copied to wherever the call needs them. The default ``None`` uses
-            ``"cuda_ipc"`` if the Tesseract advertises it (see
-            ``Tesseract.supported_gpu_transports``), and a host round-trip
-            otherwise. A local client advertises none, so it takes the host
-            round-trip unless a transport is passed here. ``"none"`` forces GPU
-            arrays through the same host round-trip as CPU arrays, in both
-            directions, even if the Tesseract was created with a transport. This
-            is an experimental tesseract-core feature.
+            ``"cuda_ipc"``). Only applies when the call is compiled for a CUDA
+            device. The default ``None`` uses ``"cuda_ipc"`` if the Tesseract
+            advertises it (see ``Tesseract.supported_gpu_transports``) and a
+            host round-trip otherwise. ``"none"`` forces the host round-trip in
+            both directions, even for a Tesseract served with a transport. A
+            served Tesseract must have been started with the matching
+            ``gpu_transport``, and for ``cuda_ipc`` both processes must share
+            the CUDA IPC namespace (Docker's ``--ipc=host``). A local
+            (in-process) client advertises no transport, so passing one here is
+            how it receives GPU inputs directly, as objects exposing
+            ``__cuda_array_interface__`` that are only valid during the call.
+            Its endpoints may return host or device arrays either way. This is
+            an experimental tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from

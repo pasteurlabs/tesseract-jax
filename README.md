@@ -81,7 +81,7 @@ jax.grad(vector_sum)(x, y) # 🎉
    t = Tesseract.from_image("vectoradd_jax")
    ```
 
-   A Tesseract that is already running elsewhere is reached with `Tesseract.from_url(...)`. `apply_tesseract` works the same way with all three.
+   Use `Tesseract.from_url(...)` to reach a Tesseract that is already running elsewhere. `apply_tesseract` works the same way with all three.
 
 > [!TIP]
 > Now you're ready to jump into our [examples](https://github.com/pasteurlabs/tesseract-jax/tree/main/examples) for more ways to use Tesseract-JAX. For more on installing and serving Tesseracts, see the [Tesseract Core documentation](https://docs.pasteurlabs.ai/projects/tesseract-core/latest/).

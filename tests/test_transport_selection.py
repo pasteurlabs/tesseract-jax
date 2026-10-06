@@ -6,7 +6,7 @@
 These cover the transport-name plumbing that decides *which* on-device transport
 a call uses (and whether it uses one at all), since it gates the GPU (FFI)
 lowering and a wrong answer silently sends an unsupported ``Accept`` to the
-server. Most stub the client; the rest check that tesseract-core's real clients
+server. Most stub the client, and the rest check that tesseract-core's real clients
 behave the way the stubs assume, and that a client with a default transport stays
 usable from CPU-only JAX. The GPU-direct request/response encoding is exercised
 end-to-end by the GPU tests in ``test_gpu_direct.py``.
@@ -31,7 +31,7 @@ from tesseract_jax.tesseract_compat import (
     _to_host,
 )
 
-# Never contacted: the tests below only build clients for it, sending no requests.
+# The tests below build clients for this URL but never send requests to it.
 _UNREACHABLE_URL = "http://127.0.0.1:1"
 
 
@@ -121,9 +121,9 @@ def test_cast_return_keeps_results_on_the_calls_side():
     # dtype. Everything else is cast on the host: a device result on the host
     # path after a copy, and a host result on either path.
     device = _FakeDeviceArray(np.arange(3.0))
-    assert _cast_return(device, dtype=np.dtype("float32"), on_device=True) is device
-    for value, on_device in [(device, False), (np.arange(3.0), True)]:
-        cast = _cast_return(value, dtype=np.dtype("float32"), on_device=on_device)
+    assert _cast_return(device, dtype=np.dtype("float32"), ffi_path=True) is device
+    for value, ffi_path in [(device, False), (np.arange(3.0), True)]:
+        cast = _cast_return(value, dtype=np.dtype("float32"), ffi_path=ffi_path)
         assert isinstance(cast, np.ndarray)
         assert cast.dtype == np.float32
         np.testing.assert_array_equal(cast, np.arange(3.0))
@@ -186,8 +186,9 @@ def test_gpu_transport_encoding_drives_gpu_transport_and_accept(session_accept):
 
 
 def test_gpu_transport_encoding_none_overrides_client_transport():
-    # A client served with cuda_ipc sends no Accept on its own, so the server
-    # would reply over cuda_ipc. ``"none"`` must ask for host outputs instead.
+    # A client served with cuda_ipc names no transport in its Accept header, so
+    # the server would reply over cuda_ipc. ``"none"`` must ask for host outputs
+    # instead.
     c = _fake_client(("cuda_ipc",))
     c._client = HTTPClient(_UNREACHABLE_URL, gpu_transport="cuda_ipc")
     j = Jaxeract(c)
