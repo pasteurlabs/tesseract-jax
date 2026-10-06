@@ -11,7 +11,7 @@ the integer, floating and complex dtype classes respectively.
 
 from typing import Any
 
-import numpy as np
+import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import (
     Array,
@@ -52,14 +52,17 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     """Gather `weights` at `indices`, and count how often each index appears."""
-    return OutputSchema(
-        gathered=inputs.weights[inputs.indices],
-        count=np.bincount(inputs.indices, minlength=inputs.indices.shape[0])[
-            : inputs.indices.shape[0]
-        ].astype(np.int32),
-        magnitude=np.abs(inputs.weights[inputs.indices]).astype(np.float32),
-        phase=np.exp(1j * inputs.weights[inputs.indices]).astype(np.complex64),
-    )
+    # jnp (not np): under traceable=True, the inputs may be tracers.
+    # jnp.bincount needs a static `length` to stay jittable, unlike np.bincount.
+    gathered = inputs.weights[inputs.indices]
+    return {
+        "gathered": gathered,
+        "count": jnp.bincount(inputs.indices, length=inputs.indices.shape[0]).astype(
+            jnp.int32
+        ),
+        "magnitude": jnp.abs(gathered).astype(jnp.float32),
+        "phase": jnp.exp(1j * gathered).astype(jnp.complex64),
+    }
 
 
 def abstract_eval(abstract_inputs):
@@ -98,6 +101,6 @@ def vector_jacobian_product(
     `indices` is absent from the result, so the framework fills its gradient
     slot with a discarded integer placeholder.
     """
-    grad = np.zeros_like(inputs.weights)
-    np.add.at(grad, inputs.indices, cotangent_vector["gathered"])
+    grad = jnp.zeros_like(inputs.weights)
+    grad = grad.at[inputs.indices].add(cotangent_vector["gathered"])
     return {"weights": grad}

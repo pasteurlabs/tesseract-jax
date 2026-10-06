@@ -9,10 +9,13 @@ import time
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import requests
 from tesseract_core import Tesseract
+
+from tesseract_jax import apply_tesseract
 
 here = Path(__file__).parent
 
@@ -405,6 +408,45 @@ def drifting_static_tess() -> Tesseract:
 def zero_cotangent_tess() -> Tesseract:
     """Two differentiable outputs, one with a NaN gradient at x = 0."""
     return _load_tesseract("zero_cotangent_tesseract")
+
+
+@pytest.fixture
+def vectoradd_jax_tess() -> Tesseract:
+    """The flagship JAX-recipe example, loaded in-process from its own source.
+
+    Points at ``examples/simple/vectoradd_jax`` directly, so a change to the
+    documented recipe is exercised here too.
+    """
+    return Tesseract.from_tesseract_api(
+        str(here.parent / "examples" / "simple" / "vectoradd_jax" / "tesseract_api.py")
+    )
+
+
+@pytest.fixture
+def vectoradd_jax_ab() -> dict:
+    """``{"a": ..., "b": ...}`` inputs for ``vectoradd_jax_tess`` (no ``norm_ord``)."""
+    return {
+        "a": {
+            "v": jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32),
+            "s": jnp.float32(2.0),
+        },
+        "b": {
+            "v": jnp.array([4.0, 5.0, 6.0], dtype=jnp.float32),
+            "s": jnp.float32(0.5),
+        },
+    }
+
+
+@pytest.fixture
+def vectoradd_apply(vectoradd_jax_tess):
+    """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
+
+    def call(ab: dict, traceable: bool, norm_ord: int = 2) -> dict:
+        return apply_tesseract(
+            vectoradd_jax_tess, {**ab, "norm_ord": norm_ord}, traceable=traceable
+        )
+
+    return call
 
 
 # ---------------------------------------------------------------------------
