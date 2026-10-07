@@ -225,6 +225,8 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
+    if not any(d.platform == "gpu" for d in jax.devices()):
+        pytest.skip("no GPU backend for JAX")
     api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
     # Only the server is spawned without the GPU. The test process reads
     # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
