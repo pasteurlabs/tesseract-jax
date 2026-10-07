@@ -1,8 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import contextlib
-from collections.abc import Generator
+import copy
 from typing import TYPE_CHECKING
 
 import jax.tree
@@ -166,56 +165,13 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
 # learns to drive them.
 _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
-# The transport a call uses by default, when the Tesseract advertises it.
-_DEFAULT_GPU_TRANSPORT = "cuda_ipc"
-
-
-def _default_gpu_transport(tesseract_client: Tesseract) -> str:
-    """``_DEFAULT_GPU_TRANSPORT`` if the client advertises it, else ``"none"``."""
-    if _DEFAULT_GPU_TRANSPORT in tesseract_client.supported_gpu_transports:
-        return _DEFAULT_GPU_TRANSPORT
-    return "none"
-
-
-def _is_http_client(tesseract_client: Tesseract) -> bool:
-    """Whether the client is an ``HTTPClient``, detected by its ``_gpu_transport``.
-
-    Only an HTTP client has a request encoding to switch transports. An
-    in-process ``LocalClient`` encodes nothing and passes its endpoints whatever
-    arrays the lowering hands it.
-    """
-    client = getattr(tesseract_client, "_client", None)
-    return client is not None and hasattr(client, "_gpu_transport")
-
 
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
-    def __init__(
-        self,
-        tesseract_client: Tesseract,
-        *,
-        gpu_transport: str | None = None,
-    ) -> None:
-        """Initialize the Tesseract client.
-
-        ``gpu_transport`` is as in :func:`apply_tesseract`.
-        """
-        if gpu_transport is None:
-            gpu_transport = _default_gpu_transport(tesseract_client)
-        # Only transports the GPU (FFI) lowering actually implements end-to-end
-        # are accepted. The lowering is currently cuda_ipc-specific, so an
-        # unsupported name would otherwise route silently into that path and send
-        # an Accept the server has no backend for.
-        elif gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
-            raise ValueError(
-                f"Unsupported gpu_transport {gpu_transport!r}; "
-                f"supported: {['none', *sorted(_SUPPORTED_TRANSPORTS)]}."
-            )
-
+    def __init__(self, tesseract_client: Tesseract) -> None:
+        """Initialize the Tesseract client."""
         self.client = tesseract_client
-        # ``"none"`` for a host round-trip, else the device transport's name.
-        self._gpu_transport = gpu_transport
 
         self.tesseract_input_args = tuple(
             arg
@@ -251,77 +207,54 @@ class Jaxeract:
     # calls lower to custom calls that XLA cannot recognise as equal and therefore
     # cannot common up. Equality is delegated rather than based on the URL or schema
     # so that distinct Tesseracts stay distinct; if ``Tesseract`` ever gains value
-    # semantics of its own, this inherits them.
+    # semantics of its own, this inherits them. The GPU transport needs no part in
+    # it, since it follows from the Tesseract (see ``resolve_gpu_transport``).
     def __eq__(self, other: object) -> bool:
-        """Whether ``other`` wraps the same Tesseract in the same transport mode.
-
-        ``_gpu_transport`` participates: calls using different transports (or a
-        transport vs. the host round-trip) to the same Tesseract lower to
-        different custom calls, so they must not compare equal or XLA would common
-        them up.
-        """
+        """Whether ``other`` wraps the same Tesseract."""
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        return (
-            self.client == other.client and self._gpu_transport == other._gpu_transport
-        )
+        return self.client == other.client
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client, self._gpu_transport))
+        return hash((Jaxeract, self.client))
 
-    @contextlib.contextmanager
-    def gpu_transport_encoding(self, gpu_transport: str) -> Generator[None]:
-        """Temporarily make the HTTP client use ``gpu_transport``.
+    def resolve_gpu_transport(self) -> str:
+        """The GPU transport a call lowered for a CUDA device uses, or ``"none"``.
 
-        The GPU lowering wraps each dispatch in this with the call's transport,
-        and the host-callback lowering with ``"none"``. A device transport sends
-        GPU array *inputs* by reference and asks for *outputs* the same way.
-        ``"none"`` keeps both on the host, even for a Tesseract served with a
-        transport. GPU transport in tesseract-core is a separate axis from
-        ``output_format`` (which only governs CPU arrays), so two things must
-        change and be restored:
-
-        * ``_gpu_transport``, which drives how GPU array *inputs* are encoded, and
-        * an ``Accept`` header carrying the transport as a media-type parameter
-          (``application/<output_format>; gpu_transport=<transport>``), which is
-          how the server selects the *output* transport. The client never names a
-          transport in Accept on its own, so without this the response falls
-          back to the server's configured transport.
-
-        ``_output_format`` is left untouched and the ``Accept`` media type reuses
-        it, so the CPU leaves of a mixed response are unaffected.
-
-        Restored on exit so the shared client is not permanently mutated. A no-op
-        for non-HTTP clients (e.g. the in-process ``LocalClient``).
+        Whatever ``Tesseract.resolve_gpu_transport`` picks: the transport the
+        Tesseract requests, else ``cuda_ipc`` if the Tesseract offers it and it
+        works from this process.
         """
-        if not _is_http_client(self.client):
-            yield
-            return
-        client = self.client._client
-        prev_transport = client._gpu_transport
-        session = getattr(client, "_session", None)
-        had_accept = session is not None and "Accept" in session.headers
-        prev_accept = session.headers.get("Accept") if session is not None else None
-
-        # Keep the response's CPU-array format as the client's current one and
-        # carry the GPU transport as a media-type parameter on the same header.
-        output_format = getattr(client, "_output_format", "json+base64")
-
-        client._gpu_transport = gpu_transport
-        if session is not None:
-            session.headers["Accept"] = (
-                f"application/{output_format}; gpu_transport={gpu_transport}"
+        gpu_transport = self.client.resolve_gpu_transport()
+        if gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
+            raise ValueError(
+                f"The Tesseract requests gpu_transport={gpu_transport!r}, which "
+                f"tesseract-jax cannot drive (supported: "
+                f"{['none', *sorted(_SUPPORTED_TRANSPORTS)]}). Pass "
+                "tesseract.with_encoding(gpu_transport='none') to apply_tesseract "
+                "to copy GPU arrays to the host instead."
             )
-        try:
-            yield
-        finally:
-            client._gpu_transport = prev_transport
-            if session is not None:
-                if had_accept:
-                    session.headers["Accept"] = prev_accept
-                else:
-                    session.headers.pop("Accept", None)
+        return gpu_transport
+
+    def with_gpu_transport(self, gpu_transport: str) -> "Jaxeract":
+        """A wrapper whose calls exchange GPU arrays over ``gpu_transport``.
+
+        A device transport sends GPU array inputs by reference and asks for
+        outputs the same way; ``"none"`` keeps both on the host. This wrapper
+        itself if its Tesseract already requests that, else one around a view
+        of it. Built per call from the current Tesseract, so a compiled function
+        keeps working after the Tesseract is served again.
+        """
+        if self.client.server_capabilities is None:
+            # In-process, arrays are passed as they are, so there is no
+            # encoding to change.
+            return self
+        if (self.client.current_encoding.gpu_transport or "none") == gpu_transport:
+            return self
+        view = copy.copy(self)
+        view.client = self.client.with_encoding(gpu_transport=gpu_transport)
+        return view
 
     # The abstract_eval method is never called from a dispatch function,
     # hence its signature does not need to be identical to the one of apply,

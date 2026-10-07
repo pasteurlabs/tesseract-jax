@@ -129,11 +129,12 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) != object()
 
 
-def test_jaxeract_gpu_transport_breaks_equality(served_cuda_ipc_vectoradd_tesseract):
-    """A device-transport wrapper differs from a host one, so XLA won't common them up."""
+def test_jaxeract_views_are_distinct(served_cuda_ipc_vectoradd_tesseract):
+    """A view with its own encoding lowers separately from the Tesseract it views.
+
+    Each lowering resolves the GPU transport of its own Tesseract, so a view
+    requesting ``"none"`` must not be commoned up with one that uses cuda_ipc.
+    """
     tess = served_cuda_ipc_vectoradd_tesseract
-    on_device = Jaxeract(tess)
-    host = Jaxeract(tess, gpu_transport="none")
-    assert on_device != host
-    assert hash(on_device) != hash(host)
-    assert on_device == Jaxeract(tess, gpu_transport="cuda_ipc")
+    host = Jaxeract(tess.with_encoding(gpu_transport="none"))
+    assert Jaxeract(tess) != host

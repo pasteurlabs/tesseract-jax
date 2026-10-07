@@ -3,18 +3,17 @@
 
 """GPU-direct dispatch tests: the native FFI (CUDA) lowering of the primitive.
 
-On GPU, ``apply_tesseract(..., gpu_transport="cuda_ipc")`` lowers
-``tesseract_dispatch`` to a native XLA FFI custom call, keeping data on the
+On GPU, ``apply_tesseract`` lowers ``tesseract_dispatch`` to a native XLA FFI
+custom call when the Tesseract uses a device transport, keeping data on the
 device. There is no separate entry point: the ``cuda`` platform lowering routes
-through the FFI path when the call selected a device transport, and without one
-it falls back to the host-callback lowering (a device->host->device round-trip).
-The served fixtures are created with ``gpu_transport="cuda_ipc"``, which
-``apply_tesseract`` also uses when a call does not name a transport.
+through the FFI path when the Tesseract resolves to a device transport, and
+without one it falls back to the host-callback lowering (a device->host->device
+round-trip). The served fixtures are created with ``gpu_transport="cuda_ipc"``.
 
 Most of these use a served (subprocess) GPU Tesseract, since CUDA IPC is
 cross-process and cannot be self-opened. The ``local_*`` tests load the same
-Tesseract in-process, where a named transport hands the endpoints XLA's device
-buffers directly. The tests are marked ``gpu``, and the fixtures skip where
+Tesseract in-process, where one created with ``gpu_transport="cuda_ipc"`` hands
+the endpoints XLA's device buffers directly. The tests are marked ``gpu``, and the fixtures skip where
 CUDA / CuPy / a GPU-backed JAX are unavailable.
 """
 
@@ -22,11 +21,14 @@ from __future__ import annotations
 
 import contextlib
 import os
+import sys
+from pathlib import Path
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
@@ -86,9 +88,7 @@ def _apply_c(served_gpu_tesseract, n):
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32)
     f = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]
+        lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
     )
     return lambda: f(a, b).block_until_ready()
 
@@ -97,11 +97,9 @@ def _apply_c(served_gpu_tesseract, n):
 def test_apply_matches_analytic(served_gpu_tesseract, n):
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32) * 3.0
-    out = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )
-    )(a, b)
+    out = jax.jit(lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b}))(
+        a, b
+    )
     c = out["c"]
     assert _on_gpu(c)
     np.testing.assert_allclose(
@@ -119,9 +117,7 @@ def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
     """
     x = jnp.arange(64, dtype=jnp.float32)
     y = jax.jit(
-        lambda x: apply_tesseract(
-            served_gpu_mixed_dtype_tesseract, {"x": x}, gpu_transport="cuda_ipc"
-        )["y"]
+        lambda x: apply_tesseract(served_gpu_mixed_dtype_tesseract, {"x": x})["y"]
     )(x)
 
     assert _on_gpu(y)
@@ -179,9 +175,7 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
     b = jnp.linspace(10, -10, 257, dtype=jnp.float32)
 
     gpu = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]
+        lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
     )(a, b)
     with jax.default_device(jax.devices("cpu")[0]):
         a_cpu = jnp.asarray(np.asarray(a))
@@ -193,31 +187,72 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
 
 
 @pytest.mark.parametrize(
-    ("gpu_transport", "expect_ffi"),
-    [(None, True), ("cuda_ipc", True), ("none", False)],
+    ("client", "expect_ffi"),
+    [("served", True), ("from_url", True), ("host_view", False)],
 )
-def test_gpu_transport_selects_lowering(
-    served_gpu_tesseract, gpu_transport, expect_ffi
-):
-    """A cuda_ipc client lowers to the FFI call by default, and ``"none"`` opts out.
+def test_gpu_transport_selects_lowering(served_gpu_tesseract, client, expect_ffi):
+    """cuda_ipc lowers to the FFI call, and a view requesting ``"none"`` opts out.
 
-    Both lowerings compute the same result, so the test inspects the lowered
-    program for the FFI target. With ``"none"`` the request asks for host outputs
-    despite the Tesseract's cuda_ipc transport, and JAX moves them back on-device.
+    The served client requests cuda_ipc, and a ``from_url`` client of the same
+    server, which requests nothing, uses it once it checked that it works. Both
+    lowerings compute the same result, so the test inspects the lowered program
+    for the FFI target. The ``"none"`` view asks for host outputs despite the
+    Tesseract's cuda_ipc transport, and JAX moves them back on-device.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
+    tess = {
+        "served": served_gpu_tesseract,
+        "from_url": Tesseract.from_url(served_gpu_tesseract._client.url),
+        "host_view": served_gpu_tesseract.with_encoding(gpu_transport="none"),
+    }[client]
     a = jnp.ones(8, dtype=jnp.float32)
-    f = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport=gpu_transport
-        )["c"]
-    )
+    f = jax.jit(lambda a, b: apply_tesseract(tess, {"a": a, "b": b})["c"])
     assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
 
     c = f(a, a)
     assert _on_gpu(c)
     np.testing.assert_allclose(_to_np(c), np.full(8, 3.0, np.float32))
+
+
+def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
+    """A Tesseract offering cuda_ipc that does not work gets host copies, with a warning.
+
+    Hiding the GPU from the server stands in for every reason cuda_ipc can fail,
+    e.g. a server on another host. A ``from_url`` client, which requests no
+    transport, falls back to the host-callback lowering, while the client that
+    requested cuda_ipc gets an error instead of a silent host copy.
+    """
+    from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
+
+    api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
+    # Only the server is spawned without the GPU. The test process reads
+    # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
+    with monkeypatch.context() as m:
+        m.setenv("CUDA_VISIBLE_DEVICES", "")
+        served = Tesseract.from_source(
+            api_path, python_executable=sys.executable, gpu_transport="cuda_ipc"
+        )
+        served.serve()
+    try:
+        remote = Tesseract.from_url(served._client.url)
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        f = jax.jit(lambda a, b: apply_tesseract(remote, {"a": a, "b": b})["c"])
+        with pytest.warns(UserWarning, match="copied to the host instead"):
+            assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
+
+        c = f(a, b)
+        assert _on_gpu(c)
+        np.testing.assert_allclose(_to_np(c), np.arange(8) + 1.0)
+        g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
+        assert _on_gpu(g)
+        np.testing.assert_allclose(_to_np(g), np.ones(8))
+
+        with pytest.raises(RuntimeError, match="does not work between"):
+            jax.jit(lambda a, b: apply_tesseract(served, {"a": a, "b": b}))(a, b)
+    finally:
+        served.teardown()
 
 
 def test_grad_through_gpu_ffi(served_gpu_tesseract):
@@ -226,9 +261,7 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     b = jnp.ones(512, dtype=jnp.float32)
 
     def loss(a):
-        return apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"].sum()
+        return apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"].sum()
 
     g = jax.jit(jax.grad(loss))(a)
     assert _on_gpu(g)
@@ -263,24 +296,24 @@ def test_jax_tesseract_round_trip_stays_on_device(served_gpu_jax_tesseract):
     np.testing.assert_allclose(_to_np(grad_b), np.ones(64, np.float32))
 
 
-@pytest.mark.parametrize("gpu_transport", [None, "cuda_ipc"])
-def test_local_client_selects_lowering_by_explicit_transport(
-    local_gpu_tesseract, gpu_transport
+@pytest.mark.parametrize(
+    ("tess_fixture", "expect_ffi"),
+    [("local_gpu_tesseract", False), ("local_cuda_ipc_gpu_tesseract", True)],
+)
+def test_local_client_selects_lowering_by_its_transport(
+    request, tess_fixture, expect_ffi
 ):
-    """An in-process client lowers to the FFI call only when given a transport.
+    """An in-process client lowers to the FFI call only if created with a transport.
 
-    It advertises none, so the default takes the host callback. Both compute the
-    same result, so the lowered program is inspected for the FFI target.
+    Both compute the same result, so the lowered program is inspected for the
+    FFI target.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
+    tess = request.getfixturevalue(tess_fixture)
     a = jnp.arange(8, dtype=jnp.float32)
-    f = jax.jit(
-        lambda a, b: apply_tesseract(
-            local_gpu_tesseract, {"a": a, "b": b}, gpu_transport=gpu_transport
-        )["c"]
-    )
-    assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == (gpu_transport is not None)
+    f = jax.jit(lambda a, b: apply_tesseract(tess, {"a": a, "b": b})["c"])
+    assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
 
     c = f(a, a)
     assert _on_gpu(c)
@@ -317,7 +350,7 @@ def test_local_client_device_results_on_host_path(local_gpu_tesseract):
 
 
 @pytest.mark.parametrize(
-    "tess_fixture", ["served_gpu_tesseract", "local_gpu_tesseract"]
+    "tess_fixture", ["served_gpu_tesseract", "local_cuda_ipc_gpu_tesseract"]
 )
 @pytest.mark.parametrize("residency_check", [False, True])
 def test_host_results_on_ffi_path(request, monkeypatch, tess_fixture, residency_check):
@@ -338,9 +371,7 @@ def test_host_results_on_ffi_path(request, monkeypatch, tess_fixture, residency_
     b = jnp.ones(n, dtype=jnp.float32)
 
     def f(a):
-        return apply_tesseract(
-            tess, {"a": a, "b": b, "return_host": True}, gpu_transport="cuda_ipc"
-        )["c"]
+        return apply_tesseract(tess, {"a": a, "b": b, "return_host": True})["c"]
 
     if residency_check:
         with pytest.raises(
@@ -363,7 +394,7 @@ def test_host_results_on_ffi_path(request, monkeypatch, tess_fixture, residency_
 # its result is returned, so a copy that skipped synchronizing on the producer's
 # stream would read unfinished data.
 @pytest.mark.parametrize("n", [8, 10_000_000])
-def test_local_apply_stays_on_device(local_gpu_tesseract, n):
+def test_local_apply_stays_on_device(local_cuda_ipc_gpu_tesseract, n):
     """An in-process client receives and returns device arrays, host-copy free.
 
     The endpoint adopts XLA's input buffers through ``__cuda_array_interface__``
@@ -374,9 +405,7 @@ def test_local_apply_stays_on_device(local_gpu_tesseract, n):
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32) * 3.0
     out = jax.jit(
-        lambda a, b: apply_tesseract(
-            local_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )
+        lambda a, b: apply_tesseract(local_cuda_ipc_gpu_tesseract, {"a": a, "b": b})
     )(a, b)
 
     assert _on_gpu(out["c"])
@@ -385,7 +414,7 @@ def test_local_apply_stays_on_device(local_gpu_tesseract, n):
     np.testing.assert_allclose(_to_np(out["c_sum"]), [expected.sum()], rtol=1e-5)
 
 
-def test_local_derivatives_stay_on_device(local_gpu_tesseract):
+def test_local_derivatives_stay_on_device(local_cuda_ipc_gpu_tesseract):
     """vjp, jvp (with a placeholder slot) and a materialized jacobian, in-process."""
     n = 8
     a = jnp.arange(n, dtype=jnp.float32)
@@ -393,9 +422,8 @@ def test_local_derivatives_stay_on_device(local_gpu_tesseract):
 
     def f(a, b, materialize_jacobian=None):
         return apply_tesseract(
-            local_gpu_tesseract,
+            local_cuda_ipc_gpu_tesseract,
             {"a": a, "b": b},
-            gpu_transport="cuda_ipc",
             materialize_jacobian=materialize_jacobian,
         )
 
@@ -418,9 +446,7 @@ def test_local_derivatives_stay_on_device(local_gpu_tesseract):
 def test_serial_reuse_ring1(served_gpu_tesseract):
     """Back-to-back serial dispatches: exercises the ring-1 lifetime contract."""
     f = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]
+        lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
     )
     for i in range(20):
         a = jnp.full((512,), float(i), dtype=jnp.float32)
@@ -449,7 +475,6 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
             served_gpu_tesseract,
             {"a": a, "b": b},
             materialize_jacobian=True,
-            gpu_transport="cuda_ipc",
         )["c"]
 
     jac = jax.jit(jax.jacrev(f))(a)
@@ -478,7 +503,6 @@ def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
         out = apply_tesseract(
             served_gpu_tesseract,
             {"a": a, "b": b, "mask": mask},
-            gpu_transport="cuda_ipc",
         )
         return out["c"].sum()
 
@@ -504,9 +528,7 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
     tb = jnp.zeros(n, dtype=jnp.float32)
 
     def f(a, b):
-        return apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )
+        return apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})
 
     primal, tangent = jax.jit(lambda a, b, ta, tb: jax.jvp(f, (a, b), (ta, tb)))(
         a, b, ta, tb
@@ -664,9 +686,9 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
 
     def pipeline(a, b):
-        gpu_out = apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]  # a*2 + b, on-device
+        gpu_out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})[
+            "c"
+        ]  # a*2 + b, on-device
         return apply_tesseract(cpu_tess, {"a": gpu_out, "b": b})["c"]  # + b, host
 
     out = jax.jit(pipeline)(a, b)
@@ -694,9 +716,7 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
     b = jnp.ones(n, dtype=jnp.float32)
 
     f = jax.jit(
-        lambda a, b: apply_tesseract(
-            served_gpu_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]
+        lambda a, b: apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
     )
     # Warm up tracing/compilation so the timed loop measures steady-state latency.
     f(a, b).block_until_ready()

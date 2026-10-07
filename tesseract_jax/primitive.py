@@ -506,17 +506,16 @@ def _build_dispatch_closure(
 ) -> Callable[..., tuple]:
     """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
 
-    Returns ``dispatch(*args) -> tuple`` calling ``getattr(params.client,
-    params.eval_func)(args, params)`` with the client switched to
-    ``gpu_transport`` (see ``Jaxeract.gpu_transport_encoding``). The CPU
-    lowering runs it via a host callback and the GPU lowering via the native FFI
-    handler. Dispatching by ``eval_func`` keeps every endpoint
-    transport-agnostic.
+    Returns ``dispatch(*args) -> tuple`` calling ``getattr(client,
+    params.eval_func)(args, params)`` on a client that exchanges GPU arrays over
+    ``gpu_transport`` (see ``Jaxeract.with_gpu_transport``). The CPU lowering
+    runs it via a host callback and the GPU lowering via the native FFI handler.
+    Dispatching by ``eval_func`` keeps every endpoint transport-agnostic.
     """
 
     def dispatch(*args: TransportArray) -> tuple:
-        with params.client.gpu_transport_encoding(gpu_transport):
-            out = getattr(params.client, params.eval_func)(args, params)
+        client = params.client.with_gpu_transport(gpu_transport)
+        out = getattr(client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
             out = (out,)
         if gpu_transport == "none":
@@ -568,24 +567,26 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering when the call's transport
-    (``client._gpu_transport``) is ``"none"``, so a host-transport call behaves
-    exactly as on CPU. When it has one but the native shim is unavailable (e.g. a
-    CPU-only install where it wasn't compiled), this raises instead of silently
-    falling back, even when the transport was picked by default.
+    Uses the GPU transport the Tesseract resolves to (see
+    ``Jaxeract.resolve_gpu_transport``), which may check with the Tesseract
+    that it works. Falls back to the host-callback lowering when that is
+    ``"none"``, so a host-transport call behaves exactly as on CPU. When there is
+    a transport but the native shim is unavailable (e.g. a CPU-only install where
+    it wasn't compiled), this raises instead of silently falling back.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
+    gpu_transport = client.resolve_gpu_transport()
 
-    if client._gpu_transport == "none":
+    if gpu_transport == "none":
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
-    selected = (
-        f"gpu_transport={client._gpu_transport!r} is selected (passed explicitly "
-        "or taken from the Tesseract's supported_gpu_transports) but"
+    selected = f"The Tesseract uses gpu_transport={gpu_transport!r}, but"
+    opt_out = (
+        "pass tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
+        "copy GPU arrays to the host instead."
     )
-    opt_out = "pass gpu_transport='none' to use the host-callback transport."
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
@@ -610,7 +611,7 @@ def tesseract_dispatch_gpu_lowering(
 
     _raise_if_unimplemented(params.eval_func, client)
 
-    dispatch = _build_dispatch_closure(params, client._gpu_transport)
+    dispatch = _build_dispatch_closure(params, gpu_transport)
 
     target = gpu_ffi.ensure_registered()
     # The token must outlive lowering (the FFI call reads it at execution time),
@@ -1006,7 +1007,6 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    gpu_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
@@ -1019,6 +1019,17 @@ def apply_tesseract(
     ``__array__`` protocol are automatically converted to JAX arrays where the
     Tesseract's input schema expects arrays. Python sequences (lists, tuples) are
     rejected with a ``TypeError`` — convert them explicitly via ``jnp.array()``.
+
+    When the call is compiled for a CUDA device, GPU arrays stay on the device
+    whenever the Tesseract offers a GPU transport that works from this process,
+    and are copied to the host otherwise (see
+    ``Tesseract.resolve_gpu_transport``). Pass
+    ``tesseract_client.with_encoding(gpu_transport="none")`` to always copy them
+    to the host. An in-process Tesseract receives GPU inputs as they are only if
+    it was created with ``Tesseract.from_tesseract_api(..., gpu_transport="cuda_ipc")``,
+    as objects exposing ``__cuda_array_interface__`` that are only valid during
+    the call. Its endpoints may return host or device arrays either way. GPU
+    transports are an experimental tesseract-core feature.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -1116,21 +1127,6 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
-        gpu_transport: Name of the on-device transport used to exchange GPU
-            arrays with the Tesseract instead of a host round-trip (currently
-            ``"cuda_ipc"``). Only applies when the call is compiled for a CUDA
-            device. The default ``None`` uses ``"cuda_ipc"`` if the Tesseract
-            advertises it (see ``Tesseract.supported_gpu_transports``) and a
-            host round-trip otherwise. ``"none"`` forces the host round-trip in
-            both directions, even for a Tesseract served with a transport. A
-            served Tesseract must have been started with the matching
-            ``gpu_transport``, and for ``cuda_ipc`` both processes must share
-            the CUDA IPC namespace (Docker's ``--ipc=host``). A local
-            (in-process) client advertises no transport, so passing one here is
-            how it receives GPU inputs directly, as objects exposing
-            ``__cuda_array_interface__`` that are only valid during the call.
-            Its endpoints may return host or device arrays either way. This is
-            an experimental tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
@@ -1171,7 +1167,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(tesseract_client, gpu_transport=gpu_transport)
+    client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine

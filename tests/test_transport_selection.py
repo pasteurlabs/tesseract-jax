@@ -1,19 +1,19 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-free tests for device-transport selection on the Jaxeract wrapper.
+"""GPU-free tests for GPU transport selection on the Jaxeract wrapper.
 
-These cover the transport-name plumbing that decides *which* on-device transport
-a call uses (and whether it uses one at all), since it gates the GPU (FFI)
-lowering and a wrong answer silently sends an unsupported ``Accept`` to the
-server. Most stub the client, and the rest check that tesseract-core's real clients
-behave the way the stubs assume, and that a client with a default transport stays
-usable from CPU-only JAX. The GPU-direct request/response encoding is exercised
-end-to-end by the GPU tests in ``test_gpu_direct.py``.
+Which transport a call uses gates the GPU (FFI) lowering, so these check that
+only the ``cuda`` lowering asks the Tesseract for one, that the CPU lowering
+always requests host outputs, and that a transport the FFI path cannot drive is
+rejected. Whether a transport works is tesseract-core's to find out (see
+``Tesseract.resolve_gpu_transport``); the GPU tests in ``test_gpu_direct.py``
+exercise the transport end to end.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import jax
@@ -21,23 +21,16 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from tesseract_core import Tesseract
-from tesseract_core.sdk.tesseract import HTTPClient
 
-from tesseract_jax import apply_tesseract, gpu_ffi
-from tesseract_jax.tesseract_compat import (
-    Jaxeract,
-    _cast_return,
-    _default_gpu_transport,
-    _to_host,
-)
+from tesseract_jax import apply_tesseract
+from tesseract_jax.tesseract_compat import Jaxeract, _cast_return, _to_host
 
-# The tests below build clients for this URL but never send requests to it.
-_UNREACHABLE_URL = "http://127.0.0.1:1"
+here = Path(__file__).parent
 
 
-def _fake_client(supported_gpu_transports: tuple[str, ...] = ()) -> MagicMock:
+def _fake_client(gpu_transport: str = "none") -> MagicMock:
     c = MagicMock()
-    c.supported_gpu_transports = supported_gpu_transports
+    c.resolve_gpu_transport.return_value = gpu_transport
     c.openapi_schema = {
         "components": {
             "schemas": {
@@ -52,46 +45,20 @@ def _fake_client(supported_gpu_transports: tuple[str, ...] = ()) -> MagicMock:
     return c
 
 
-def test_gpu_transport_name_selects_transport():
-    # A plain ``from_url`` client advertises no transport, so naming one per call
-    # must work without it.
-    j = Jaxeract(_fake_client(), gpu_transport="cuda_ipc")
-    assert j._gpu_transport == "cuda_ipc"
+def test_transport_is_the_one_the_tesseract_resolves_to():
+    for gpu_transport in ("none", "cuda_ipc"):
+        assert Jaxeract(_fake_client(gpu_transport)).resolve_gpu_transport() == (
+            gpu_transport
+        )
 
 
-def test_default_is_host_roundtrip():
-    j = Jaxeract(_fake_client())
-    assert j._gpu_transport == "none"
-
-
-def test_default_uses_client_transport():
-    j = Jaxeract(_fake_client(("cuda_ipc",)))
-    assert j._gpu_transport == "cuda_ipc"
-
-
-def test_default_ignores_transports_the_lowering_lacks():
-    j = Jaxeract(_fake_client(("nixl",)))
-    assert j._gpu_transport == "none"
-
-
-def test_default_does_not_depend_on_shim(monkeypatch):
-    # Without the shim, a selected transport fails at lowering time (see
-    # test_gpu_ffi.py) instead of silently falling back to the host.
-    monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
-    j = Jaxeract(_fake_client(("cuda_ipc",)))
-    assert j._gpu_transport == "cuda_ipc"
-
-
-def test_none_forces_host_roundtrip():
-    j = Jaxeract(_fake_client(("cuda_ipc",)), gpu_transport="none")
-    assert j._gpu_transport == "none"
-
-
-def test_named_transport_is_kept_for_local_client(vectoradd_tess):
-    # An in-process client advertises no transport, so naming one per call is how
-    # it opts into receiving GPU arrays directly.
-    j = Jaxeract(vectoradd_tess, gpu_transport="cuda_ipc")
-    assert j._gpu_transport == "cuda_ipc"
+def test_in_process_transport_is_the_one_it_was_created_with():
+    api = here / "vectoradd_tesseract" / "tesseract_api.py"
+    assert Jaxeract(Tesseract.from_tesseract_api(api)).resolve_gpu_transport() == (
+        "none"
+    )
+    enabled = Tesseract.from_tesseract_api(api, gpu_transport="cuda_ipc")
+    assert Jaxeract(enabled).resolve_gpu_transport() == "cuda_ipc"
 
 
 class _FakeDeviceArray:
@@ -130,97 +97,27 @@ def test_cast_return_keeps_results_on_the_calls_side():
 
 
 def test_unsupported_transport_is_rejected():
-    # An unsupported name must not be silently accepted: it would route into the
-    # cuda_ipc-specific GPU lowering and send an Accept the server has no backend
-    # for.
-    with pytest.raises(ValueError, match="Unsupported gpu_transport"):
-        Jaxeract(_fake_client(), gpu_transport="nixl")
+    # A transport the FFI path cannot drive must not route into the
+    # cuda_ipc-specific GPU lowering.
+    with pytest.raises(ValueError, match="tesseract-jax cannot drive"):
+        Jaxeract(_fake_client("nixl")).resolve_gpu_transport()
 
 
-def test_equality_and_hash_key_on_transport():
+def test_equality_and_hash_key_on_the_tesseract():
     c = _fake_client()
-    a = Jaxeract(c, gpu_transport="cuda_ipc")
-    b = Jaxeract(c, gpu_transport="cuda_ipc")
-    host = Jaxeract(c)
-    # Same client + same transport -> interchangeable (so XLA may common them up);
-    # different transport -> must not compare equal.
+    a, b = Jaxeract(c), Jaxeract(c)
+    # Same Tesseract -> interchangeable, so XLA may common them up.
     assert a == b and hash(a) == hash(b)
-    assert a != host
+    assert a != Jaxeract(_fake_client())
 
 
-def _client_with_http() -> MagicMock:
-    c = _fake_client()
-    # A real HTTPClient, so the private attributes the context manager writes are
-    # the ones tesseract-core reads when encoding a request.
-    c._client = HTTPClient(_UNREACHABLE_URL)
-    return c
+def test_cuda_ipc_tesseract_runs_on_cpu(served_cuda_ipc_vectoradd_tesseract):
+    """A Tesseract served with cuda_ipc stays usable from CPU-only JAX.
 
-
-# requests sends ``Accept: */*`` unless the session's default is removed.
-@pytest.mark.parametrize("session_accept", ["*/*", None])
-def test_gpu_transport_encoding_drives_gpu_transport_and_accept(session_accept):
-    # tesseract-core keeps CPU encoding (``_output_format``) and GPU transport
-    # (``_gpu_transport``) on separate axes: selecting a device transport must set
-    # ``_gpu_transport`` and negotiate the server's GPU output transport via an
-    # Accept media-type parameter, without disturbing ``_output_format``.
-    c = _client_with_http()
-    j = Jaxeract(c, gpu_transport="cuda_ipc")
-    http = c._client
-    if session_accept is None:
-        http._session.headers.pop("Accept", None)
-    else:
-        http._session.headers["Accept"] = session_accept
-
-    with j.gpu_transport_encoding("cuda_ipc"):
-        assert http._gpu_transport == "cuda_ipc"
-        assert http._output_format == "json+base64"
-        assert (
-            http._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=cuda_ipc"
-        )
-
-    # Fully restored on exit: the shared client must not leak the transport onto
-    # host-callback / CPU uses.
-    assert http._gpu_transport == "none"
-    assert http._session.headers.get("Accept") == session_accept
-
-
-def test_gpu_transport_encoding_none_overrides_client_transport():
-    # A client served with cuda_ipc names no transport in its Accept header, so
-    # the server would reply over cuda_ipc. ``"none"`` must ask for host outputs
-    # instead.
-    c = _fake_client(("cuda_ipc",))
-    c._client = HTTPClient(_UNREACHABLE_URL, gpu_transport="cuda_ipc")
-    j = Jaxeract(c)
-    http = c._client
-
-    with j.gpu_transport_encoding("none"):
-        assert http._gpu_transport == "none"
-        assert (
-            http._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=none"
-        )
-
-    assert http._gpu_transport == "cuda_ipc"
-
-
-def test_default_on_real_clients_without_transport(vectoradd_tess):
-    # The tests above stub ``supported_gpu_transports``. These are the clients
-    # tesseract-core builds without a transport: one reached by URL and an
-    # in-process one.
-    assert _default_gpu_transport(Tesseract.from_url(_UNREACHABLE_URL)) == "none"
-    assert _default_gpu_transport(vectoradd_tess) == "none"
-
-
-def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesseract):
-    """A client served with cuda_ipc stays usable from CPU-only JAX.
-
-    The default selects cuda_ipc for it, but only the ``cuda`` lowering acts on
-    the transport, so CPU arrays take the host callback instead of failing for
-    lack of a CUDA device.
+    Only the ``cuda`` lowering acts on the transport, so CPU arrays take the host
+    callback instead of failing for lack of a CUDA device.
     """
     tess = served_cuda_ipc_vectoradd_tesseract
-    assert _default_gpu_transport(tess) == "cuda_ipc"
 
     def f(a, b):
         return apply_tesseract(tess, {"a": a, "b": b})["c"]
@@ -235,17 +132,18 @@ def test_default_transport_client_runs_on_cpu(served_cuda_ipc_vectoradd_tesserac
     np.testing.assert_array_equal(grad_a, np.ones(8))
 
 
-def test_local_client_with_named_transport_runs_on_cpu(vectoradd_tess):
-    """An in-process client given a transport stays usable from CPU-only JAX.
+def test_cuda_ipc_local_client_runs_on_cpu():
+    """An in-process client created with a transport stays usable from CPU-only JAX.
 
     Only the ``cuda`` lowering acts on the transport, so CPU arrays reach the
     endpoint through the host callback as usual.
     """
+    tess = Tesseract.from_tesseract_api(
+        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
 
     def f(a, b):
-        return apply_tesseract(
-            vectoradd_tess, {"a": a, "b": b}, gpu_transport="cuda_ipc"
-        )["c"]
+        return apply_tesseract(tess, {"a": a, "b": b})["c"]
 
     with jax.default_device(jax.devices("cpu")[0]):
         a = jnp.arange(8, dtype=jnp.float32)
@@ -257,32 +155,40 @@ def test_local_client_with_named_transport_runs_on_cpu(vectoradd_tess):
     np.testing.assert_array_equal(grad_a, np.ones(8))
 
 
-@pytest.mark.parametrize("gpu_transport", [None, "none"])
+@pytest.mark.parametrize("client", ["served", "from_url"])
 def test_host_lowering_requests_host_outputs(
-    served_cuda_ipc_vectoradd_tesseract, monkeypatch, gpu_transport
+    served_cuda_ipc_vectoradd_tesseract, monkeypatch, client
 ):
-    """Compiled for CPU, each dispatch sends ``gpu_transport=none``.
+    """Compiled for CPU, no dispatch asks for GPU arrays by reference.
 
-    That holds even when the default selects cuda_ipc, since the host callback
-    moves the arrays through the host anyway.
+    The client that requests cuda_ipc asks for ``gpu_transport=none`` instead,
+    and a ``from_url`` client asks for nothing, which the server answers with
+    host arrays. The host callback moves the arrays through the host anyway.
+    Neither checks whether cuda_ipc works, which would need a GPU.
     """
     tess = served_cuda_ipc_vectoradd_tesseract
+    if client == "from_url":
+        tess = Tesseract.from_url(tess._client.url)
     http = tess._client
     sent: list[tuple[str, str | None]] = []
     send = http._send
 
-    def recording_send(url, *args, **kwargs):
-        sent.append((url, http._session.headers.get("Accept")))
-        return send(url, *args, **kwargs)
+    def recording_send(url, method, data, params, headers=None):
+        sent.append((url, (headers or {}).get("Accept")))
+        return send(url, method, data, params, headers)
 
     monkeypatch.setattr(http, "_send", recording_send)
 
     with jax.default_device(jax.devices("cpu")[0]):
         a = jnp.arange(8, dtype=jnp.float32)
         b = jnp.ones(8, dtype=jnp.float32)
-        c = apply_tesseract(tess, {"a": a, "b": b}, gpu_transport=gpu_transport)["c"]
+        c = apply_tesseract(tess, {"a": a, "b": b})["c"]
 
     np.testing.assert_array_equal(c, np.arange(8) + 1.0)
     apply_accepts = [accept for url, accept in sent if url.endswith("/apply")]
-    assert apply_accepts
-    assert all(accept.endswith("; gpu_transport=none") for accept in apply_accepts)
+    assert len(apply_accepts) == 1
+    if client == "served":
+        assert apply_accepts[0].endswith("; gpu_transport=none")
+    else:
+        assert apply_accepts == [None]
+    assert not any(url.endswith("/check_gpu_transport") for url, _ in sent)

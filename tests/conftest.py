@@ -124,6 +124,18 @@ def local_gpu_tesseract():
     return _load_tesseract("gpu_tesseract")
 
 
+@pytest.fixture(scope="module")
+def local_cuda_ipc_gpu_tesseract():
+    """The GPU Tesseract in-process, created to take GPU arrays as they are.
+
+    Skips without a GPU/CuPy.
+    """
+    _skip_without_gpu(needs_cupy=True)
+    return Tesseract.from_tesseract_api(
+        here / "gpu_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parametrised transport fixture (host vs cuda_ipc)
 # ---------------------------------------------------------------------------
@@ -137,8 +149,7 @@ def local_gpu_tesseract():
 #   * "host"     -> no GPU transport: numpy compute, device->host->device
 #   * "cuda_ipc" -> cuda_ipc GPU transport: cupy compute, GPU-direct FFI path
 #
-# Tests call ``apply_tesseract`` without ``gpu_transport``, so the cuda_ipc leg
-# also covers the default transport selection. The cuda_ipc leg skips where a
+# The cuda_ipc leg skips where a
 # GPU / CuPy / GPU-backed JAX is unavailable, via the same guards as the
 # standalone GPU fixtures.
 
@@ -186,10 +197,7 @@ def served_vectoradd_tesseract():
 
 @pytest.fixture(scope="session")
 def served_cuda_ipc_vectoradd_tesseract():
-    """The vectoradd Tesseract served with cuda_ipc, which works without a GPU.
-
-    Its client advertises cuda_ipc, so ``apply_tesseract`` selects it by default.
-    """
+    """The vectoradd Tesseract served with cuda_ipc, which serves without a GPU."""
     yield from _serve_tesseract(
         here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
     )
