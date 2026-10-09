@@ -40,3 +40,5 @@ tess = Tesseract.from_tesseract_api("tesseract_api.py", gpu_transport="cuda_ipc"
 ```
 
 Its endpoints may return host or device arrays either way.
+
+The endpoints must not modify these input arrays in place. They are JAX's own buffers, which hold the caller's arrays and may be read again by later operations, so an in-place change such as `x -= x.mean()` silently changes the caller's values. Compute into a new array instead (`x = x - x.mean()`). A served Tesseract is not affected, since it receives its own copy of each input.

@@ -84,12 +84,14 @@ def test_to_host_copies_device_arrays_only():
 
 
 def test_cast_return_keeps_results_on_the_calls_side():
-    # On the FFI path a device result is left for the shim, which checks its
-    # dtype. Everything else is cast on the host: a device result on the host
-    # path after a copy, and a host result on either path.
+    # On the FFI path a device result of the right dtype is left for the shim.
+    # Everything else is cast on the host: a device result of another dtype, a
+    # device result on the host path after a copy, and a host result on either
+    # path.
+    device32 = _FakeDeviceArray(np.arange(3.0, dtype=np.float32))
+    assert _cast_return(device32, dtype=np.dtype("float32"), ffi_path=True) is device32
     device = _FakeDeviceArray(np.arange(3.0))
-    assert _cast_return(device, dtype=np.dtype("float32"), ffi_path=True) is device
-    for value, ffi_path in [(device, False), (np.arange(3.0), True)]:
+    for value, ffi_path in [(device, True), (device, False), (np.arange(3.0), True)]:
         cast = _cast_return(value, dtype=np.dtype("float32"), ffi_path=ffi_path)
         assert isinstance(cast, np.ndarray)
         assert cast.dtype == np.float32

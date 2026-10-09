@@ -487,6 +487,60 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
     )
 
 
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac):
+    """``jacfwd`` / ``jacrev`` return the endpoint's float32 Jacobian bit for bit.
+
+    The materialized path contracts the Jacobian with one-hot (co)tangents in
+    XLA, which on recent NVIDIA GPUs runs float32 matmuls in TF32 by default,
+    rounding the entries to 10 mantissa bits. A random ``mask`` makes the
+    entries use the full float32 mantissa.
+    """
+    n = 64
+    rng = np.random.default_rng(0)
+    a = jnp.asarray(rng.normal(size=n), dtype=jnp.float32)
+    b = jnp.ones(n, dtype=jnp.float32)
+    mask = jnp.asarray(rng.normal(size=n), dtype=jnp.float32)
+
+    def f(a):
+        return apply_tesseract(
+            served_gpu_tesseract,
+            {"a": a, "b": b, "mask": mask},
+            vmap_method="sequential",
+        )["c"]
+
+    got = jax.jit(jac(f))(a)
+    # c = (a*scale + b)*mask with default scale=2, so dc/da = diag(2*mask).
+    np.testing.assert_array_equal(_to_np(got), np.diag(2.0 * np.asarray(mask)))
+
+
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_materialized_jacobian_mixed_dtype(
+    served_gpu_mixed_dtype_tesseract, jac, monkeypatch
+):
+    """A jacobian endpoint returning another dtype gives the host path's result.
+
+    The endpoint always returns float64, while ``jacrev`` wants the input's
+    float32. The mismatching block is cast through the host, so the residency
+    check, which rejects that host copy, is disarmed here.
+    """
+    monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
+    x = jnp.arange(5, dtype=jnp.float32)
+
+    def f(x):
+        return apply_tesseract(
+            served_gpu_mixed_dtype_tesseract, {"x": x}, vmap_method="sequential"
+        )["y"]
+
+    host = served_gpu_mixed_dtype_tesseract.with_encoding(gpu_transport="none")
+    expected = jac(
+        lambda x: apply_tesseract(host, {"x": x}, vmap_method="sequential")["y"]
+    )(x)
+    got = jax.jit(jac(f))(x)
+    assert got.dtype == expected.dtype
+    np.testing.assert_array_equal(_to_np(got), np.asarray(expected))
+
+
 def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
     """A non-differentiable array input must not force a host copy on the vjp path.
 

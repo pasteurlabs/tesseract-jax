@@ -12,8 +12,9 @@ the bind params (including the Jaxeract client) must compare equal.
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tesseract_core import Tesseract
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, primitive
 from tesseract_jax.tesseract_compat import Jaxeract
 
 
@@ -138,3 +139,45 @@ def test_jaxeract_views_are_distinct(served_cuda_ipc_vectoradd_tesseract):
     tess = served_cuda_ipc_vectoradd_tesseract
     host = Jaxeract(tess.with_encoding(gpu_transport="none"))
     assert Jaxeract(tess) != host
+
+
+def test_jaxeract_views_with_one_encoding_compare_equal(
+    served_cuda_ipc_vectoradd_tesseract,
+):
+    """Two views requesting the same encoding wrap interchangeable Tesseracts.
+
+    ``with_encoding`` returns a new object every time, so a caller that builds a
+    view per call would otherwise lower (and on GPU, register) every call anew.
+    """
+    tess = served_cuda_ipc_vectoradd_tesseract
+    view1 = Jaxeract(tess.with_encoding(gpu_transport="none"))
+    view2 = Jaxeract(tess.with_encoding(gpu_transport="none"))
+    assert view1 == view2
+    assert hash(view1) == hash(view2)
+
+
+def test_jaxeract_separate_tesseracts_are_distinct(vectoradd_tess):
+    """Tesseracts loaded separately stay distinct, even from the same API."""
+    other = Tesseract.from_tesseract_api("tests/vectoradd_tesseract/tesseract_api.py")
+    assert Jaxeract(vectoradd_tess) != Jaxeract(other)
+
+
+def test_fresh_view_per_call_lowers_once(vectoradd_tess, monkeypatch):
+    """Eager calls through a fresh ``with_encoding`` view reuse one compilation."""
+    lowerings = []
+    build = primitive._build_dispatch_closure
+
+    def counting_build(*args, **kwargs):
+        lowerings.append(args)
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(primitive, "_build_dispatch_closure", counting_build)
+
+    a = jnp.array([1.0, 2.0, 3.0], dtype="float32")
+    b = jnp.array([0.5, 0.5, 0.5], dtype="float32")
+    for _ in range(3):
+        view = vectoradd_tess.with_encoding(gpu_transport="none")
+        out = apply_tesseract(view, dict(a=a, b=b))["c"]
+        np.testing.assert_allclose(out, a + b, atol=1e-6)
+
+    assert len(lowerings) == 1

@@ -804,8 +804,8 @@ def _batched_via_jacobian(
     ) -> tuple:
         """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
 
-        Non-diff output tangents are NaN so the batched JVP matches the
-        sequential one (see ``_discarded_slot``).
+        Non-diff output tangents are NaN (zero for dtypes without a NaN) so the
+        batched JVP matches the sequential one (see ``_discarded_slot``).
         """
         out, k = [], 0
         for item, diff in zip(full_order, is_diff, strict=True):
@@ -813,9 +813,8 @@ def _batched_via_jacobian(
                 out.append(diff_results[k])
                 k += 1
             else:
-                out.append(
-                    jnp.full((batch_size, *item.shape), jnp.nan, dtype=item.dtype)
-                )
+                fill = jnp.nan if jnp.issubdtype(item.dtype, jnp.inexact) else 0
+                out.append(jnp.full((batch_size, *item.shape), fill, dtype=item.dtype))
         return tuple(out)
 
     # Using ``diff_avals`` / ``diff_primals`` as the first arg to
@@ -875,16 +874,29 @@ def _batched_via_jacobian(
     return grads, (0,) * len(grads)
 
 
+# Both contractions run at the highest precision, so that jacfwd / jacrev, which
+# contract the Jacobian with one-hot (co)tangents, return the endpoint's Jacobian
+# unchanged. At the default precision XLA may run float32 matmuls in reduced
+# precision instead (TF32 on Ampere and later NVIDIA GPUs).
 def _matmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract ``matrix``'s trailing axes against each row of ``batched_vector``."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jax.vmap(lambda v: jnp.tensordot(matrix, v, axes=v.ndim))(batched_vector)
+    return jax.vmap(
+        lambda v: jnp.tensordot(
+            matrix, v, axes=v.ndim, precision=jax.lax.Precision.HIGHEST
+        )
+    )(batched_vector)
 
 
 def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract each row of ``batched_vector`` against ``matrix``'s leading axes."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jnp.tensordot(batched_vector, matrix, axes=batched_vector.ndim - 1)
+    return jnp.tensordot(
+        batched_vector,
+        matrix,
+        axes=batched_vector.ndim - 1,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching

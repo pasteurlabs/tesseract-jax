@@ -64,14 +64,18 @@ def _cast_return(
 ) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype``.
 
-    On the GPU FFI path (``ffi_path``) a device ``value`` is returned as is,
-    since casting it would force a device->host round-trip. tesseract-core does
-    not pin a jacobian endpoint's output dtype, so the native shim checks the
-    result's dtype and shape against XLA's output buffer instead and raises on a
-    mismatch (see ``_cuda_shim.cc``). Every other ``value`` is copied to the host
-    if needed and cast there.
+    On the GPU FFI path (``ffi_path``) a device ``value`` that already has
+    ``dtype`` is returned as is, for the native shim to copy into XLA's output
+    buffer. Every other ``value`` is copied to the host if needed and cast
+    there, since the shim only copies bytes and JAX cannot run inside the FFI
+    callback. tesseract-core does not pin a jacobian endpoint's output dtype, so
+    this host round-trip happens whenever the endpoint returns a different one.
     """
-    if ffi_path and _on_device([value]):
+    if (
+        ffi_path
+        and _on_device([value])
+        and np.dtype(value.__cuda_array_interface__["typestr"]) == dtype
+    ):
         return value
     return np.asarray(_to_host(value), dtype=dtype)
 
@@ -166,6 +170,17 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
 _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
 
+def _identity(tesseract: Tesseract) -> tuple:
+    """What two Tesseracts share when calls through them are interchangeable.
+
+    Their connection (the one a Tesseract shares with its ``with_encoding``
+    views) and the encoding they request. Taken once, when a wrapper is built,
+    so that its hash stays fixed even if the Tesseract is torn down or served
+    again later.
+    """
+    return tesseract._client, tesseract.current_encoding
+
+
 class Jaxeract:
     """A wrapper around a Tesseract client to make its signature compatible with JAX primitives."""
 
@@ -200,24 +215,30 @@ class Jaxeract:
 
         self.available_methods = self.client.available_endpoints
 
+        self._identity = _identity(self.client)
+
     # Every attribute above is derived from ``self.client``, so two wrappers around
     # the same Tesseract are interchangeable. Saying so matters: this object is a
     # parameter of ``tesseract_dispatch_p``, and ``apply_tesseract`` builds a fresh
     # one per call, so with the inherited identity semantics two otherwise identical
     # calls lower to custom calls that XLA cannot recognise as equal and therefore
-    # cannot common up. Equality is delegated rather than based on the URL or schema
-    # so that distinct Tesseracts stay distinct; if ``Tesseract`` ever gains value
-    # semantics of its own, this inherits them. The GPU transport needs no part in
-    # it, since it follows from the Tesseract (see ``resolve_gpu_transport``).
+    # cannot common up. Equality goes by the connection and the encoding (see
+    # ``_identity``) rather than the URL or schema, so that distinct Tesseracts stay
+    # distinct while ``with_encoding`` views that request the same encoding, such
+    # as one built afresh for every call, compare equal. The GPU transport needs no
+    # part in it, since it follows from the encoding (see ``resolve_gpu_transport``).
     def __eq__(self, other: object) -> bool:
-        """Whether ``other`` wraps the same Tesseract."""
+        """Whether ``other`` wraps an equivalent Tesseract."""
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        return self.client == other.client
+        client, encoding = self._identity
+        other_client, other_encoding = other._identity
+        return client is other_client and encoding == other_encoding
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        return hash((Jaxeract, self.client))
+        client, encoding = self._identity
+        return hash((Jaxeract, id(client), encoding))
 
     def resolve_gpu_transport(self) -> str:
         """The GPU transport a call lowered for a CUDA device uses, or ``"none"``.
@@ -254,6 +275,7 @@ class Jaxeract:
             return self
         view = copy.copy(self)
         view.client = self.client.with_encoding(gpu_transport=gpu_transport)
+        view._identity = _identity(view.client)
         return view
 
     # The abstract_eval method is never called from a dispatch function,

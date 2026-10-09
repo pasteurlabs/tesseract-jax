@@ -144,9 +144,12 @@ class _DeviceArrayView:
     ``cupy.asarray``).
 
     The view owns nothing: the memory is XLA's input buffer, valid for the
-    duration of the dispatch. ``data``'s read-only flag is ``False`` because the
-    encoder may read it via an on-GPU copy. There is no ``stream`` key, since the
-    handler synchronizes XLA's stream before the dispatch runs.
+    duration of the dispatch, and XLA may pass the same buffer to the caller's
+    other operations, so an in-process endpoint must not write to it. The
+    view still leaves ``data``'s read-only flag ``False``: setting it would make
+    ``torch.as_tensor`` reject the view, while CuPy ignores the flag, so it would
+    break PyTorch endpoints without protecting CuPy ones. There is no ``stream``
+    key, since the handler synchronizes XLA's stream before the dispatch runs.
     """
 
     def __init__(self, ptr: int, typestr: str, shape: tuple[int, ...]) -> None:
