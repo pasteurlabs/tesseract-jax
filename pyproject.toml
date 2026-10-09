@@ -10,7 +10,7 @@ requires-python = ">=3.12,<4"
 dependencies = [
     "jax>=0.7.0",
     "packaging",
-    "tesseract-core>=1.13.0",
+    "tesseract-core>=1.14.0",
 ]
 dynamic = ["version"]
 
@@ -36,7 +36,6 @@ dev = [
     "pytest-cov",
     "pytest-timeout",
     "typeguard",
-    "requests",
     "equinox",
     "tesseract-core[runtime]",
     "tesseract-jax[docs]",
@@ -124,3 +123,8 @@ ignore_errors = true
 omit = [
     "tesseract_jax/_version.py",
 ]
+
+# Pins the unreleased tesseract-core commit this depends on (pasteurlabs/tesseract-core#829).
+# Drop once tesseract-core 1.15 is released, and raise the floor above to >=1.15.0.
+[tool.uv.sources]
+tesseract-core = { git = "https://github.com/pasteurlabs/tesseract-core", rev = "87b97fe3e11eb6776c511243b7ef932755403bcd" }

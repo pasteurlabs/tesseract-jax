@@ -79,7 +79,7 @@ $ pre-commit install
 
 Tesseract-JAX ships an optional native shim (`tesseract_jax/_cuda_shim.cc`) that
 enables the GPU-direct (`cuda_ipc`) transport, exchanging device arrays with a
-served Tesseract without a host round-trip. The published wheels bundle it, but a
+Tesseract without a host round-trip. The published wheels bundle it, but a
 source install (`pip install -e .`) has to compile it. The shim needs:
 
 - A C++17 compiler (`c++` by default; override with the `CXX` environment
@@ -139,9 +139,10 @@ Behaviours that must match between the host and GPU-direct transports (dtype
 handling, discarded-slot fills, non-differentiable inputs/outputs, jacobian
 fwd/bwd, batching) are written once in `tests/test_transport_parity.py` and run on
 both via the parametrised `transport` fixture, which serves the array-agnostic
-`tests/transport_tesseract` with `numpy` or `cupy` compute to match. Tests that
-have no host analogue (FFI-boundary fault injection, on-device residency checks)
-stay in `tests/test_gpu_direct.py`.
+`tests/transport_tesseract` with or without the `cuda_ipc` GPU transport
+(computing with `numpy` or `cupy` to match). Tests that have no host analogue
+(FFI-boundary fault injection, on-device residency checks) stay in
+`tests/test_gpu_direct.py`.
 
 ### GitHub workflow
 

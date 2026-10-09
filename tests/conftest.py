@@ -2,16 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
-import os
-import socket
-import subprocess
-import time
+import sys
 from pathlib import Path
 
 import jax
 import numpy as np
 import pytest
-import requests
 from tesseract_core import Tesseract
 
 here = Path(__file__).parent
@@ -26,13 +22,6 @@ def pytest_configure(config):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _find_free_port():
-    """Find a free port to use for the test server."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("localhost", 0))
-        return s.getsockname()[1]
 
 
 def _strip_functions_from_api(source: str, func_names: set[str]) -> str:
@@ -59,75 +48,15 @@ def _strip_functions_from_api(source: str, func_names: set[str]) -> str:
     return "".join(keep)
 
 
-def _serve_tesseract(
-    tmp_path_factory, api_path: str | Path, *, name: str, extra_env: dict | None = None
-):
-    """Start a tesseract-runtime server and yield its URL.
+def _serve_tesseract(api_path: str | Path, **kwargs):
+    """Yield a client for a test Tesseract served in a subprocess on this interpreter.
 
-    ``extra_env`` merges additional environment variables into the server
-    process (e.g. ``TESSERACT_OUTPUT_FORMAT`` / the cuda_ipc opt-in for the GPU
-    fixture).
+    The subprocess shares the test environment's packages but not its JAX runtime.
     """
-    port = _find_free_port()
-    timeout = 10
-
-    output_dir = tmp_path_factory.mktemp(f"tesseract_output_{name}")
-
-    env = os.environ.copy()
-    env["TESSERACT_API_PATH"] = str(api_path)
-    env["TESSERACT_OUTPUT_PATH"] = str(output_dir)
-    if extra_env:
-        env.update(extra_env)
-
-    process = subprocess.Popen(
-        [
-            "tesseract-runtime",
-            "serve",
-            "--host",
-            "localhost",
-            "--port",
-            str(port),
-        ],
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    def _server_output() -> str:
-        """Collect whatever the server process has printed so far."""
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            stdout, stderr = process.communicate()
-        return (
-            f"--- {name} server stdout ---\n{stdout.decode(errors='replace')}\n"
-            f"--- {name} server stderr ---\n{stderr.decode(errors='replace')}"
-        )
-
-    try:
-        start_time = time.time()
-        while True:
-            # Fail fast (and surface the reason) if the server already crashed.
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"Tesseract {name!r} server exited early with code "
-                    f"{process.returncode}\n{_server_output()}"
-                )
-            try:
-                requests.get(f"http://localhost:{port}/health")
-                break
-            except requests.exceptions.ConnectionError as exc:
-                if time.time() - start_time > timeout:
-                    raise TimeoutError(
-                        f"Tesseract {name!r} did not start in time\n{_server_output()}"
-                    ) from exc
-                time.sleep(0.1)
-
-        yield f"http://localhost:{port}"
-    finally:
-        process.terminate()
-        process.communicate()
+    with Tesseract.from_source(
+        api_path, python_executable=sys.executable, **kwargs
+    ) as tess:
+        yield tess
 
 
 def _load_tesseract(folder_name: str) -> Tesseract:
@@ -141,9 +70,7 @@ def _load_tesseract(folder_name: str) -> Tesseract:
 #
 # Cross-process CUDA IPC needs the Tesseract (producer) and the test process
 # (consumer) to be *separate* processes sharing the GPU -- a process cannot open
-# an IPC handle it exported itself. This reuses the same ``_serve_tesseract``
-# helper as every other served fixture (``tesseract-runtime serve``), just with
-# the cuda_ipc GPU transport and output format passed as extra env.
+# an IPC handle it exported itself. ``from_source`` provides that separate process.
 
 
 def _gpu_available() -> bool:
@@ -153,48 +80,59 @@ def _gpu_available() -> bool:
         return False
 
 
-def serve_gpu_tesseract(
-    tmp_path_factory, folder: str, name: str, *, output_format: str = "json+base64"
-):
-    """Serve a GPU test Tesseract with the cuda_ipc transport; yield its URL."""
+def _skip_without_gpu(*, needs_cupy: bool) -> None:
+    if not _gpu_available():
+        pytest.skip("no GPU backend for JAX")
+    if needs_cupy:
+        # CuPy is required by the *test Tesseract's* compute (its apply runs on
+        # cupy), not by tesseract-jax's transport, which is CUDA-array-library-free.
+        pytest.importorskip("cupy")
+
+
+def _served_gpu_tesseract(folder: str, *, needs_cupy: bool = True):
+    """Skip-or-serve helper shared by the GPU Tesseract fixtures."""
+    _skip_without_gpu(needs_cupy=needs_cupy)
     yield from _serve_tesseract(
-        tmp_path_factory,
         here / folder / "tesseract_api.py",
-        name=name,
-        extra_env={
-            "TESSERACT_OUTPUT_FORMAT": output_format,
-            # cuda_ipc GPU transport is an experimental opt-in in tesseract-core.
-            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
-        },
+        # cuda_ipc GPU transport is an experimental opt-in in tesseract-core.
+        gpu_transport="cuda_ipc",
     )
 
 
-def _served_gpu_tesseract(tmp_path_factory, folder: str, name: str):
-    """Skip-or-serve helper shared by the GPU Tesseract fixtures."""
-    if not _gpu_available():
-        pytest.skip("no GPU backend for JAX")
-    # CuPy is required by the *test Tesseract's* compute (its apply runs on cupy),
-    # not by tesseract-jax's transport, which is CUDA-array-library-free.
-    pytest.importorskip("cupy")
-    gen = serve_gpu_tesseract(tmp_path_factory, folder, name)
-    url = next(gen)
-    try:
-        yield Tesseract.from_url(url)
-    finally:
-        gen.close()
-
-
 @pytest.fixture(scope="module")
-def served_gpu_tesseract(tmp_path_factory):
+def served_gpu_tesseract():
     """A served all-float32 GPU Tesseract. Skips without a GPU/CuPy."""
-    yield from _served_gpu_tesseract(tmp_path_factory, "gpu_tesseract", "gpu")
+    yield from _served_gpu_tesseract("gpu_tesseract")
 
 
 @pytest.fixture(scope="module")
-def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
+def served_gpu_mixed_dtype_tesseract():
     """A served GPU Tesseract with float32 in / float64 out. Skips without a GPU/CuPy."""
-    yield from _served_gpu_tesseract(
-        tmp_path_factory, "gpu_mixed_dtype_tesseract", "gpu_mixed_dtype"
+    yield from _served_gpu_tesseract("gpu_mixed_dtype_tesseract")
+
+
+@pytest.fixture(scope="module")
+def served_gpu_jax_tesseract():
+    """A served GPU Tesseract that computes with JAX. Skips without a GPU."""
+    yield from _served_gpu_tesseract("gpu_jax_tesseract", needs_cupy=False)
+
+
+@pytest.fixture(scope="module")
+def local_gpu_tesseract():
+    """The all-float32 GPU Tesseract, loaded in-process. Skips without a GPU/CuPy."""
+    _skip_without_gpu(needs_cupy=True)
+    return _load_tesseract("gpu_tesseract")
+
+
+@pytest.fixture(scope="module")
+def local_cuda_ipc_gpu_tesseract():
+    """The GPU Tesseract in-process, created to take GPU arrays as they are.
+
+    Skips without a GPU/CuPy.
+    """
+    _skip_without_gpu(needs_cupy=True)
+    return Tesseract.from_tesseract_api(
+        here / "gpu_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
     )
 
 
@@ -206,11 +144,10 @@ def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
 # non-differentiable inputs/outputs, jacobian fwd/bwd, batching -- must agree
 # between the two dispatch lowerings. Rather than duplicate each test, this
 # fixture serves the *array-module-agnostic* ``transport_tesseract`` in one of two
-# modes and yields the client together with the ``apply_tesseract`` kwargs that
-# select the transport, so a single test body runs on both:
+# modes, so a single test body runs on both:
 #
-#   * "host"     -> numpy compute, no gpu_transport (device->host->device)
-#   * "cuda_ipc" -> cupy compute + cuda_ipc opt-in, gpu_transport="cuda_ipc"
+#   * "host"     -> no GPU transport: numpy compute, device->host->device
+#   * "cuda_ipc" -> cuda_ipc GPU transport: cupy compute, GPU-direct FFI path
 #
 # The cuda_ipc leg skips where a GPU / CuPy / GPU-backed JAX is unavailable, via
 # the same guards as the standalone GPU fixtures.
@@ -225,89 +162,54 @@ def served_gpu_mixed_dtype_tesseract(tmp_path_factory):
         pytest.param("cuda_ipc", marks=pytest.mark.gpu),
     ]
 )
-def transport(request, tmp_path_factory):
-    """Yield ``(client, apply_kwargs)`` for one dispatch transport.
+def transport(request):
+    """Yield a served ``transport_tesseract`` client for one dispatch transport.
 
     Parametrised over ``"host"`` and ``"cuda_ipc"``; the cuda_ipc leg is skipped
-    when no GPU backend is available. Serves the array-agnostic
-    ``transport_tesseract`` with the matching array module.
+    when no GPU backend is available.
     """
-    mode = request.param
-    if mode == "cuda_ipc":
-        if not _gpu_available():
-            pytest.skip("no GPU backend for JAX")
-        pytest.importorskip("cupy")
-        extra_env = {
-            "TESSERACT_JAX_TEST_XP": "cupy",
-            "TESSERACT_OUTPUT_FORMAT": "json+base64",
-            "TESSERACT_GPU_TRANSPORT": "cuda_ipc",
-        }
-        apply_kwargs = {"gpu_transport": "cuda_ipc"}
+    if request.param == "cuda_ipc":
+        yield from _served_gpu_tesseract("transport_tesseract")
     else:
-        extra_env = {"TESSERACT_JAX_TEST_XP": "numpy"}
-        apply_kwargs = {}
-
-    gen = _serve_tesseract(
-        tmp_path_factory,
-        here / "transport_tesseract" / "tesseract_api.py",
-        name=f"transport_{mode}",
-        extra_env=extra_env,
-    )
-    url = next(gen)
-    try:
-        yield Tesseract.from_url(url), apply_kwargs
-    finally:
-        gen.close()
+        yield from _serve_tesseract(here / "transport_tesseract" / "tesseract_api.py")
 
 
 # ---------------------------------------------------------------------------
-# Served fixtures  (session-scoped, start a tesseract-runtime process)
+# Served fixtures  (session-scoped, each serves a Tesseract in its own process)
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture(scope="session")
-def served_univariate_tesseract_raw(tmp_path_factory):
+def served_univariate_tesseract():
+    yield from _serve_tesseract(here / "univariate_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="session")
+def served_nested_tesseract():
+    yield from _serve_tesseract(here / "nested_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="session")
+def served_vectoradd_tesseract():
+    yield from _serve_tesseract(here / "vectoradd_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="session")
+def served_cuda_ipc_vectoradd_tesseract():
+    """The vectoradd Tesseract served with cuda_ipc, which needs no GPU to serve."""
     yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "univariate_tesseract" / "tesseract_api.py",
-        name="univariate",
+        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
     )
 
 
 @pytest.fixture(scope="session")
-def served_nested_tesseract_raw(tmp_path_factory):
-    yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "nested_tesseract" / "tesseract_api.py",
-        name="nested",
-    )
+def served_pytree_tesseract():
+    yield from _serve_tesseract(here / "pytree_tesseract" / "tesseract_api.py")
 
 
 @pytest.fixture(scope="session")
-def served_vectoradd_tesseract(tmp_path_factory):
-    yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "vectoradd_tesseract" / "tesseract_api.py",
-        name="vectoradd",
-    )
-
-
-@pytest.fixture(scope="session")
-def served_pytree_tesseract(tmp_path_factory):
-    yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "pytree_tesseract" / "tesseract_api.py",
-        name="pytree",
-    )
-
-
-@pytest.fixture(scope="session")
-def served_batched_tesseract(tmp_path_factory):
-    yield from _serve_tesseract(
-        tmp_path_factory,
-        here / "batched_tesseract" / "tesseract_api.py",
-        name="batched",
-    )
+def served_batched_tesseract():
+    yield from _serve_tesseract(here / "batched_tesseract" / "tesseract_api.py")
 
 
 # Tesseracts with specific endpoints removed — generated dynamically from
@@ -320,7 +222,7 @@ def served_tesseract_no_jvp(tmp_path_factory):
     stripped = _strip_functions_from_api(source, {"jacobian_vector_product"})
     api_file = tmp_path_factory.mktemp("univariate_no_jvp") / "tesseract_api.py"
     api_file.write_text(stripped)
-    yield from _serve_tesseract(tmp_path_factory, api_file, name="univariate_no_jvp")
+    yield from _serve_tesseract(api_file)
 
 
 @pytest.fixture(scope="session")
@@ -329,7 +231,7 @@ def served_tesseract_no_vjp(tmp_path_factory):
     stripped = _strip_functions_from_api(source, {"vector_jacobian_product"})
     api_file = tmp_path_factory.mktemp("univariate_no_vjp") / "tesseract_api.py"
     api_file.write_text(stripped)
-    yield from _serve_tesseract(tmp_path_factory, api_file, name="univariate_no_vjp")
+    yield from _serve_tesseract(api_file)
 
 
 # ---------------------------------------------------------------------------

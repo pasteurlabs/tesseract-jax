@@ -3223,8 +3223,8 @@ wheels = [
 
 [[package]]
 name = "tesseract-core"
-version = "1.14.0"
-source = { registry = "https://pypi.org/simple" }
+version = "1.14.1.dev39+g87b97fe3e"
+source = { git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd#87b97fe3e11eb6776c511243b7ef932755403bcd" }
 dependencies = [
     { name = "jinja2" },
     { name = "numpy" },
@@ -3237,10 +3237,6 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "typer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/12/32/7d4343e51651bec82950653615755f36dcafee0c41ddf1fa84293ff8c637/tesseract_core-1.14.0.tar.gz", hash = "sha256:86dd2d0dae6f6ef285ecdf4816527bd643e857868702440dc1c39f9f9d52b62c", size = 1441951, upload-time = "2026-09-25T14:47:32.045Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6b/88/ec0d30e3921565ebfd127b275f75361569c9af71e7c729ada8abd3cb5446/tesseract_core-1.14.0-py3-none-any.whl", hash = "sha256:1da1d8fb1772157c5049887c2df34d7bd9556bbe5ef71256060702d9d885981c", size = 241542, upload-time = "2026-09-25T14:47:30.067Z" },
 ]
 
 [package.optional-dependencies]
@@ -3279,7 +3275,6 @@ dev = [
     { name = "pytest-benchmark" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
-    { name = "requests" },
     { name = "sphinx" },
     { name = "sphinx-autodoc-typehints" },
     { name = "sphinx-copybutton" },
@@ -3313,7 +3308,6 @@ requires-dist = [
     { name = "pytest-benchmark", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-timeout", marker = "extra == 'dev'" },
-    { name = "requests", marker = "extra == 'dev'" },
     { name = "sphinx", marker = "extra == 'dev'" },
     { name = "sphinx", marker = "extra == 'docs'" },
     { name = "sphinx-autodoc-typehints", marker = "extra == 'dev'" },
@@ -3324,9 +3318,9 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
-    { name = "tesseract-core", specifier = ">=1.13.0" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
+    { name = "tesseract-core", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
     { name = "typeguard", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "docs"]

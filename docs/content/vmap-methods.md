@@ -83,7 +83,7 @@ Scalar arrays (0-d) are treated as regular array args. Under `"expand_dims"`, a 
 All methods enable `jax.vmap` to be fully compatible with `jax.grad`, `jax.jvp`, and `jax.vjp` but sometimes involve additional broadcasting or sequential calls to the Tesseract.
 
 - **Forward-mode** (`jax.jvp`/`jax.linearize`/`jax.jacfwd`): Tesseracts require dimensions of tangent vectors to match their corresponding inputs. Therefore, all methods (except `"sequential"`) perform broadcasting to ensure batch dimensions of tangent vectors and their corresponding inputs match.
-- **Reverse-mode** (`jax.vjp`/`jax.grad`/`jax.jacrev`): If cotangent vectors are directly batched (e.g. by `jax.jacrev`), all methods fall back to `"sequential"` for that VJP call, since Tesseract VJP endpoints do not support batched cotangent vectors.
+- **Reverse-mode** (`jax.vjp`/`jax.grad`/`jax.jacrev`): If cotangent vectors are directly batched (e.g. by `jax.jacrev`), all methods fall back to `"sequential"` for that VJP call, since Tesseract VJP endpoints do not support batched cotangent vectors. Otherwise, the vectorized methods broadcast the cotangent vectors to `(batch, ...)`, along with every unbatched input that the gradient is taken with respect to, so that the Tesseract returns one gradient per batch element.
 
 ### Example: `vmap(grad(f))` — per-element gradients
 

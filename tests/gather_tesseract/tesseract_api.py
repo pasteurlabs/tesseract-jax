@@ -101,3 +101,18 @@ def vector_jacobian_product(
     grad = np.zeros_like(inputs.weights)
     np.add.at(grad, inputs.indices, cotangent_vector["gathered"])
     return {"weights": grad}
+
+
+def jacobian(
+    inputs: InputSchema,
+    jac_inputs: set[str],
+    jac_outputs: set[str],
+):
+    """d(gathered)/d(weights): one one-hot row per gathered index.
+
+    Lets ``jax.jacfwd`` take the materialized-Jacobian path, which assembles the
+    tangents of the non-differentiable outputs itself.
+    """
+    n = inputs.weights.shape[0]
+    jac = np.eye(n, dtype=np.float32)[inputs.indices]
+    return {"gathered": {"weights": jac}}

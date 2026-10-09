@@ -1,26 +1,36 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-free tests for device-transport selection on the Jaxeract wrapper.
+"""GPU-free tests for GPU transport selection on the Jaxeract wrapper.
 
-These cover the transport-name plumbing that decides *which* on-device transport
-a call uses (and whether it uses one at all). The request/response encoding is
-exercised end-to-end by the GPU tests in ``test_gpu_direct.py``. Only the
-selection logic is unit-tested here, since it gates the GPU (FFI) lowering and a
-wrong answer silently sends an unsupported ``Accept`` to the server.
+Which transport a call uses gates the GPU (FFI) lowering, so these check that
+only the ``cuda`` lowering asks the Tesseract for one, that the CPU lowering
+always requests host outputs, and that a transport the FFI path cannot drive is
+rejected. Whether a transport works is tesseract-core's to find out (see
+``Tesseract.resolve_gpu_transport``), and the GPU tests in ``test_gpu_direct.py``
+exercise the transport end to end.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import jax
+import jax.numpy as jnp
+import numpy as np
 import pytest
+from tesseract_core import Tesseract
 
-from tesseract_jax.tesseract_compat import Jaxeract
+from tesseract_jax import apply_tesseract
+from tesseract_jax.tesseract_compat import Jaxeract, _cast_return, _to_host
+
+here = Path(__file__).parent
 
 
-def _fake_client() -> MagicMock:
+def _fake_client(gpu_transport: str = "none") -> MagicMock:
     c = MagicMock()
+    c.resolve_gpu_transport.return_value = gpu_transport
     c.openapi_schema = {
         "components": {
             "schemas": {
@@ -35,73 +45,135 @@ def _fake_client() -> MagicMock:
     return c
 
 
-def test_gpu_transport_name_selects_transport():
-    j = Jaxeract(_fake_client(), gpu_transport="cuda_ipc")
-    assert j._gpu_transport == "cuda_ipc"
+def test_transport_is_the_one_the_tesseract_resolves_to():
+    for gpu_transport in ("none", "cuda_ipc"):
+        assert Jaxeract(_fake_client(gpu_transport)).resolve_gpu_transport() == (
+            gpu_transport
+        )
 
 
-def test_default_is_host_roundtrip():
-    j = Jaxeract(_fake_client())
-    assert j._gpu_transport is None
+def test_in_process_transport_is_the_one_it_was_created_with():
+    api = here / "vectoradd_tesseract" / "tesseract_api.py"
+    assert Jaxeract(Tesseract.from_tesseract_api(api)).resolve_gpu_transport() == (
+        "none"
+    )
+    enabled = Tesseract.from_tesseract_api(api, gpu_transport="cuda_ipc")
+    assert Jaxeract(enabled).resolve_gpu_transport() == "cuda_ipc"
+
+
+class _FakeDeviceArray:
+    """Looks like a CuPy array: ``__cuda_array_interface__`` plus ``.get()``."""
+
+    def __init__(self, host: np.ndarray) -> None:
+        self._host = host
+        self.__cuda_array_interface__ = {
+            "shape": host.shape,
+            "typestr": host.dtype.str,
+            "data": (0x1000, False),
+            "version": 3,
+        }
+
+    def get(self) -> np.ndarray:
+        return self._host
+
+
+def test_to_host_copies_device_arrays_only():
+    host = np.arange(3.0)
+    np.testing.assert_array_equal(_to_host(_FakeDeviceArray(host)), host)
+    assert _to_host(host) is host
+
+
+def test_cast_return_keeps_results_on_the_calls_side():
+    # On the FFI path a device result of the right dtype is left for the shim.
+    # Everything else is cast on the host: a device result of another dtype, a
+    # device result on the host path after a copy, and a host result on either
+    # path.
+    device32 = _FakeDeviceArray(np.arange(3.0, dtype=np.float32))
+    assert _cast_return(device32, dtype=np.dtype("float32"), ffi_path=True) is device32
+    device = _FakeDeviceArray(np.arange(3.0))
+    for value, ffi_path in [(device, True), (device, False), (np.arange(3.0), True)]:
+        cast = _cast_return(value, dtype=np.dtype("float32"), ffi_path=ffi_path)
+        assert isinstance(cast, np.ndarray)
+        assert cast.dtype == np.float32
+        np.testing.assert_array_equal(cast, np.arange(3.0))
 
 
 def test_unsupported_transport_is_rejected():
-    # An unsupported name must not be silently accepted: it would route into the
-    # cuda_ipc-specific GPU lowering and send an Accept the server has no backend
-    # for.
-    with pytest.raises(ValueError, match="Unsupported gpu_transport"):
-        Jaxeract(_fake_client(), gpu_transport="nixl")
+    # A transport the FFI path cannot drive must not route into the
+    # cuda_ipc-specific GPU lowering.
+    with pytest.raises(ValueError, match="tesseract-jax cannot drive"):
+        Jaxeract(_fake_client("nixl")).resolve_gpu_transport()
 
 
-def test_equality_and_hash_key_on_transport():
+def test_equality_and_hash_key_on_the_tesseract():
     c = _fake_client()
-    a = Jaxeract(c, gpu_transport="cuda_ipc")
-    b = Jaxeract(c, gpu_transport="cuda_ipc")
-    host = Jaxeract(c)
-    # Same client + same transport -> interchangeable (so XLA may common them up);
-    # different transport -> must not compare equal.
+    a, b = Jaxeract(c), Jaxeract(c)
+    # Same Tesseract -> interchangeable, so XLA may common them up.
     assert a == b and hash(a) == hash(b)
-    assert a != host
+    assert a != Jaxeract(_fake_client())
 
 
-class _FakeSession:
-    def __init__(self) -> None:
-        self.headers: dict[str, str] = {}
+@pytest.mark.parametrize("client", ["served", "in_process"])
+def test_cuda_ipc_tesseract_runs_on_cpu(request, client):
+    """A Tesseract created with cuda_ipc stays usable from CPU-only JAX.
 
-
-class _FakeHTTPClient:
-    """Stand-in for tesseract-core's HTTPClient with the attrs the CM touches."""
-
-    def __init__(self) -> None:
-        self._gpu_transport = "none"
-        self._output_format = "json+base64"
-        self._session = _FakeSession()
-
-
-def _client_with_http() -> MagicMock:
-    c = _fake_client()
-    c._client = _FakeHTTPClient()
-    return c
-
-
-def test_gpu_transport_encoding_drives_gpu_transport_and_accept():
-    # tesseract-core keeps CPU encoding (``_output_format``) and GPU transport
-    # (``_gpu_transport``) on separate axes: selecting a device transport must set
-    # ``_gpu_transport`` and negotiate the server's GPU output transport via an
-    # Accept media-type parameter, without disturbing ``_output_format``.
-    c = _client_with_http()
-    j = Jaxeract(c, gpu_transport="cuda_ipc")
-    http = c._client
-
-    with j.gpu_transport_encoding():
-        assert http._gpu_transport == "cuda_ipc"
-        assert http._output_format == "json+base64"
-        assert (
-            http._session.headers["Accept"]
-            == "application/json+base64; gpu_transport=cuda_ipc"
+    Only the ``cuda`` lowering acts on the transport, so CPU arrays take the host
+    callback instead of failing for lack of a CUDA device.
+    """
+    if client == "served":
+        tess = request.getfixturevalue("served_cuda_ipc_vectoradd_tesseract")
+    else:
+        tess = Tesseract.from_tesseract_api(
+            here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
         )
 
-    # Fully restored on exit: the shared client must not leak the transport onto
-    # host-callback / CPU uses.
-    assert http._gpu_transport == "none"
-    assert "Accept" not in http._session.headers
+    def f(a, b):
+        return apply_tesseract(tess, {"a": a, "b": b})["c"]
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        c = jax.jit(f)(a, b)
+        grad_a = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
+
+    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
+    np.testing.assert_array_equal(grad_a, np.ones(8))
+
+
+@pytest.mark.parametrize("client", ["served", "from_url"])
+def test_host_lowering_requests_host_outputs(
+    served_cuda_ipc_vectoradd_tesseract, monkeypatch, client
+):
+    """Compiled for CPU, no dispatch asks for GPU arrays by reference.
+
+    The client that requests cuda_ipc asks for ``gpu_transport=none`` instead,
+    and a ``from_url`` client asks for nothing, which the server answers with
+    host arrays. The host callback moves the arrays through the host anyway.
+    Neither checks whether cuda_ipc works, which would need a GPU.
+    """
+    tess = served_cuda_ipc_vectoradd_tesseract
+    if client == "from_url":
+        tess = Tesseract.from_url(tess._client.url)
+    http = tess._client
+    sent: list[tuple[str, str | None]] = []
+    send = http._send
+
+    def recording_send(url, method, data, params, headers=None):
+        sent.append((url, (headers or {}).get("Accept")))
+        return send(url, method, data, params, headers)
+
+    monkeypatch.setattr(http, "_send", recording_send)
+
+    with jax.default_device(jax.devices("cpu")[0]):
+        a = jnp.arange(8, dtype=jnp.float32)
+        b = jnp.ones(8, dtype=jnp.float32)
+        c = apply_tesseract(tess, {"a": a, "b": b})["c"]
+
+    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
+    apply_accepts = [accept for url, accept in sent if url.endswith("/apply")]
+    assert len(apply_accepts) == 1
+    if client == "served":
+        assert apply_accepts[0].endswith("; gpu_transport=none")
+    else:
+        assert apply_accepts == [None]
+    assert not any(url.endswith("/check_gpu_transport") for url, _ in sent)

@@ -16,12 +16,15 @@ JAX still expects a (placeholder) gradient.
 
 The ``jacobian`` endpoint returns dense CuPy device arrays, so it exercises the
 GPU-direct (cuda_ipc) return path for a materialized Jacobian.
+
+``return_host`` makes ``apply`` and ``vector_jacobian_product`` return host
+NumPy arrays instead, for a Tesseract whose results end up on the host whatever
+it computes on.
 """
 
 from typing import Any
 
 import cupy
-import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 
@@ -29,10 +32,13 @@ from tesseract_core.runtime import Array, Differentiable, Float32
 class InputSchema(BaseModel):
     a: Differentiable[Array[(None,), Float32]] = Field(description="Vector a")
     b: Differentiable[Array[(None,), Float32]] = Field(description="Vector b")
-    scale: Float32 = Field(default=np.float32(2.0), description="Scalar scale")
+    scale: Float32 = Field(default=2.0, description="Scalar scale")
     mask: Array[(None,), Float32] | None = Field(
         default=None,
         description="Non-differentiable elementwise mask; defaults to all-ones.",
+    )
+    return_host: bool = Field(
+        default=False, description="Return host NumPy arrays instead of CuPy ones."
     )
 
 
@@ -58,12 +64,19 @@ def _compute_c(inputs):
     return c * mask
 
 
+def _maybe_to_host(x, inputs):
+    return cupy.asnumpy(x) if inputs.return_host else x
+
+
 def apply(inputs: InputSchema) -> OutputSchema:
     c = _compute_c(inputs)
     # c_sum is a non-differentiable output: it makes the derivative endpoints
     # emit a placeholder for it, exercising the GPU-direct return path for a
     # non-differentiable output slot.
-    return OutputSchema(c=c, c_sum=c.sum().reshape(1))
+    return OutputSchema(
+        c=_maybe_to_host(c, inputs),
+        c_sum=_maybe_to_host(c.sum().reshape(1), inputs),
+    )
 
 
 def abstract_eval(abstract_inputs):
@@ -108,9 +121,9 @@ def vector_jacobian_product(
     ct = _to_cupy(cotangent_vector["c"]) * mask
     out = {}
     if "a" in vjp_inputs:
-        out["a"] = ct * scale
+        out["a"] = _maybe_to_host(ct * scale, inputs)
     if "b" in vjp_inputs:
-        out["b"] = ct
+        out["b"] = _maybe_to_host(ct, inputs)
     return out
 
 

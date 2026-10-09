@@ -60,6 +60,20 @@ def _dispatch_vectorized(
                     new_args[i], new_args[i + n_primals]
                 )
 
+    # VJP (only reached with unbatched cotangents): the outputs are batched, so
+    # each cotangent must be too, and a differentiated primal needs one row per
+    # batch element to receive per-example gradients rather than their sum.
+    if params.eval_func == "vector_jacobian_product":
+        needs_batch = [*params.has_tangent, *(True,) * (len(new_args) - n_primals)]
+        new_args = [
+            jnp.broadcast_to(arg, (batch_size, *arg.shape[1:]))
+            if needed and not batched
+            else arg
+            for arg, needed, batched in zip(
+                new_args, needs_batch, is_batched_mask, strict=True
+            )
+        ]
+
     batched_output_avals = tuple(
         ShapeDtypeStruct(shape=(batch_size, *aval.shape), dtype=aval.dtype)
         for aval in params.output_avals

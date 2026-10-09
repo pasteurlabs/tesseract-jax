@@ -3,6 +3,7 @@
 
 import operator
 import os
+import warnings
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
@@ -23,7 +24,7 @@ from tesseract_core import Tesseract
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
 from tesseract_jax.dispatch_params import DispatchParams
-from tesseract_jax.tesseract_compat import Jaxeract
+from tesseract_jax.tesseract_compat import Jaxeract, _to_host
 from tesseract_jax.tree_util import (
     TransportArray,
     combine_args,
@@ -501,19 +502,27 @@ def _raise_if_unimplemented(eval_func: str, client: Jaxeract) -> None:
 tesseract_dispatch_p.def_impl(partial(dispatch.apply_primitive, tesseract_dispatch_p))
 
 
-def _build_dispatch_closure(params: DispatchParams) -> Callable[..., tuple]:
+def _build_dispatch_closure(
+    params: DispatchParams, gpu_transport: str
+) -> Callable[..., tuple]:
     """Build the endpoint dispatch closure shared by the CPU and GPU lowerings.
 
-    Returns ``dispatch(*args) -> tuple`` calling ``getattr(params.client,
-    params.eval_func)(args, params)``. The CPU lowering runs it via a host
-    callback; the GPU lowering runs it via the native FFI handler. Dispatching by
-    ``eval_func`` keeps every endpoint transport-agnostic.
+    Returns ``dispatch(*args) -> tuple`` calling ``getattr(client,
+    params.eval_func)(args, params)`` on a client that exchanges GPU arrays over
+    ``gpu_transport`` (see ``Jaxeract.with_gpu_transport``). The CPU lowering
+    runs it via a host callback and the GPU lowering via the native FFI handler.
+    Dispatching by ``eval_func`` keeps every endpoint transport-agnostic.
     """
 
     def dispatch(*args: TransportArray) -> tuple:
-        out = getattr(params.client, params.eval_func)(args, params)
+        client = params.client.with_gpu_transport(gpu_transport)
+        out = getattr(client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
             out = (out,)
+        if gpu_transport == "none":
+            # An in-process endpoint may return device arrays even when given
+            # host ones, and the host callback needs host arrays.
+            out = tuple(_to_host(r) for r in out)
         return out
 
     return dispatch
@@ -524,10 +533,10 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: run the dispatch closure via a host callback."""
+    """CPU lowering: run the dispatch closure via a host callback, with no transport."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
-    dispatch = _build_dispatch_closure(params)
+    dispatch = _build_dispatch_closure(params, "none")
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -559,52 +568,63 @@ def tesseract_dispatch_gpu_lowering(
 ) -> Any:
     """GPU lowering: run the dispatch closure via the native FFI handler.
 
-    Falls back to the host-callback lowering when the caller did not select a
-    device transport (``client._gpu_transport``), so a host-transport call
-    behaves exactly as on CPU. When the caller did select one but the native shim
-    is unavailable (e.g. a CPU-only install where it wasn't compiled), this raises
-    rather than silently falling back, since ``gpu_transport`` is an explicit
-    opt-in to the GPU-direct path.
+    Uses the GPU transport the Tesseract resolves to (see
+    ``Jaxeract.resolve_gpu_transport``), which may check with the Tesseract
+    that it works. Falls back to the host-callback lowering when that is
+    ``"none"``, so a host-transport call behaves exactly as on CPU. Without the
+    native shim (e.g. a CPU-only install where it wasn't compiled), a Tesseract
+    that requests no transport takes the host-callback lowering with a warning,
+    and one that requests a transport raises.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
-
-    if client._gpu_transport is None:
+    if (
+        not gpu_ffi.is_available()
+        and client.client.current_encoding.gpu_transport is None
+    ):
+        warnings.warn(
+            "tesseract-jax's native GPU FFI shim is unavailable, so GPU arrays are "
+            "copied to the host. Reinstall tesseract-jax with the shim built to keep "
+            "them on the device.",
+            stacklevel=2,
+        )
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
+    gpu_transport = client.resolve_gpu_transport()
+
+    if gpu_transport == "none":
+        return tesseract_dispatch_lowering(ctx, *array_args, params=params)
+
+    uses_transport = f"The Tesseract uses gpu_transport={gpu_transport!r}, but"
+    opt_out = (
+        "pass tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
+        "copy GPU arrays to the host instead."
+    )
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
-            f"gpu_transport={client._gpu_transport!r} was requested but "
-            "the native GPU FFI shim is unavailable (not compiled or failed to "
-            "import), so GPU-direct dispatch cannot run. Reinstall tesseract-jax "
-            "with the shim built (a source install compiles it via the hatch "
-            "build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build failure "
-            "fatal), or drop gpu_transport to use the host-callback transport."
+            f"{uses_transport} the native GPU FFI shim is unavailable (not compiled or "
+            "failed to import), so GPU-direct dispatch cannot run. Reinstall "
+            "tesseract-jax with the shim built (a source install compiles it via "
+            "the hatch build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build "
+            f"failure fatal), or {opt_out}"
         )
 
     # Every supported device transport is CUDA-based, so this lowering cannot run
-    # without a CUDA device. Reaching here means the caller selected a transport
-    # and the program is being lowered for the GPU, so a missing device is a
+    # without a CUDA device. Reaching here means the call has a transport and
+    # the program is being lowered for the GPU, so a missing device is a
     # misconfiguration worth raising over rather than the (much slower) host path.
     try:
         jax.devices("cuda")
     except RuntimeError as exc:
         raise RuntimeError(
-            f"gpu_transport={client._gpu_transport!r} was requested but "
-            "JAX sees no CUDA device. Install a CUDA-enabled jaxlib and run on a "
-            "GPU host, or drop gpu_transport to use the host-callback transport."
+            f"{uses_transport} JAX sees no CUDA device. Install a CUDA-enabled jaxlib and "
+            f"run on a GPU host, or {opt_out}"
         ) from exc
 
     _raise_if_unimplemented(params.eval_func, client)
 
-    inner = _build_dispatch_closure(params)
-
-    # Run the dispatch with the client in device-transport mode, so GPU inputs
-    # are exported by reference and outputs come back on-device.
-    def gpu_dispatch(args: tuple) -> tuple:
-        with client.gpu_transport_encoding():
-            return inner(*args)
+    dispatch = _build_dispatch_closure(params, gpu_transport)
 
     target = gpu_ffi.ensure_registered()
     # The token must outlive lowering (the FFI call reads it at execution time),
@@ -612,7 +632,7 @@ def tesseract_dispatch_gpu_lowering(
     # DispatchParams -- means re-lowering the same dispatch (a re-trace, cache
     # eviction, or fresh jit) reuses one entry instead of leaking a fresh closure
     # (and the Jaxeract/client/session it pins) each time.
-    token = gpu_ffi.register_dispatch(gpu_dispatch, key=params)
+    token = gpu_ffi.register_dispatch(lambda args: dispatch(*args), key=params)
 
     rule = jax.ffi.ffi_lowering(target)
     return rule(ctx, *array_args, token=np.int64(token))
@@ -797,8 +817,8 @@ def _batched_via_jacobian(
     ) -> tuple:
         """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
 
-        Non-diff output tangents are NaN so the batched JVP matches the
-        sequential one (see ``_discarded_slot``).
+        Non-diff output tangents are NaN (zero for dtypes without a NaN) so the
+        batched JVP matches the sequential one (see ``_discarded_slot``).
         """
         out, k = [], 0
         for item, diff in zip(full_order, is_diff, strict=True):
@@ -806,9 +826,8 @@ def _batched_via_jacobian(
                 out.append(diff_results[k])
                 k += 1
             else:
-                out.append(
-                    jnp.full((batch_size, *item.shape), jnp.nan, dtype=item.dtype)
-                )
+                fill = jnp.nan if jnp.issubdtype(item.dtype, jnp.inexact) else 0
+                out.append(jnp.full((batch_size, *item.shape), fill, dtype=item.dtype))
         return tuple(out)
 
     # Using ``diff_avals`` / ``diff_primals`` as the first arg to
@@ -868,16 +887,29 @@ def _batched_via_jacobian(
     return grads, (0,) * len(grads)
 
 
+# Both contractions run at the highest precision, so that jacfwd / jacrev, which
+# contract the Jacobian with one-hot (co)tangents, return the endpoint's Jacobian
+# unchanged. At the default precision XLA may run float32 matmuls in reduced
+# precision instead (TF32 on Ampere and later NVIDIA GPUs).
 def _matmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract ``matrix``'s trailing axes against each row of ``batched_vector``."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jax.vmap(lambda v: jnp.tensordot(matrix, v, axes=v.ndim))(batched_vector)
+    return jax.vmap(
+        lambda v: jnp.tensordot(
+            matrix, v, axes=v.ndim, precision=jax.lax.Precision.HIGHEST
+        )
+    )(batched_vector)
 
 
 def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract each row of ``batched_vector`` against ``matrix``'s leading axes."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jnp.tensordot(batched_vector, matrix, axes=batched_vector.ndim - 1)
+    return jnp.tensordot(
+        batched_vector,
+        matrix,
+        axes=batched_vector.ndim - 1,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
@@ -1000,7 +1032,6 @@ def apply_tesseract(
     *,
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
-    gpu_transport: str | None = None,
     check_static_outputs: bool | None = None,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
@@ -1013,6 +1044,13 @@ def apply_tesseract(
     ``__array__`` protocol are automatically converted to JAX arrays where the
     Tesseract's input schema expects arrays. Python sequences (lists, tuples) are
     rejected with a ``TypeError`` — convert them explicitly via ``jnp.array()``.
+
+    When the call is compiled for a CUDA device, GPU arrays stay on the device
+    if the Tesseract has a GPU transport that works from this process, and are
+    copied through the host otherwise. Pass
+    ``tesseract_client.with_encoding(gpu_transport="none")`` to always copy
+    them. See :doc:`/content/gpu-arrays` for how the transport is picked and
+    what an in-process Tesseract receives.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -1110,16 +1148,6 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
-        gpu_transport: Name of the on-device transport used to exchange GPU
-            arrays with the Tesseract instead of a host round-trip (currently
-            ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
-            with the matching ``gpu_transport`` in its ``runtime_config`` and a
-            GPU-backed JAX (arrays on a ``cuda`` device); has no effect on CPU
-            arrays or a local (in-process) client, which already shares memory.
-            For ``cuda_ipc`` both processes must share the CUDA IPC namespace
-            (Docker's ``--ipc=host``). When ``None`` (default), GPU arrays take
-            the same host round-trip as CPU arrays. This is an experimental
-            tesseract-core feature.
         check_static_outputs: Whether to compare the non-array outputs ``apply``
             returns against the ones ``abstract_eval`` reported, and warn on any
             that differ. The value the caller gets is the one from
@@ -1160,7 +1188,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    client = Jaxeract(tesseract_client, gpu_transport=gpu_transport)
+    client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
     # Arrays -- concrete or traced -- are operands of the primitive; only genuine
