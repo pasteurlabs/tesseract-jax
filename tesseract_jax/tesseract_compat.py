@@ -28,11 +28,10 @@ if TYPE_CHECKING:
 
 
 def _on_device(values: "list | tuple") -> bool:
-    """Whether ``values`` are cuda_ipc device arrays (vs host NumPy arrays).
+    """Whether any of ``values`` is a GPU array exposing ``__cuda_array_interface__``.
 
-    The endpoint methods are transport-agnostic; this distinguishes the GPU FFI
-    lowering (bare ``__cuda_array_interface__`` device views / ``IpcDeviceArray``
-    results) from the CPU host-callback lowering (real NumPy arrays).
+    Applied to a dispatch's arguments, this tells the GPU FFI lowering (device
+    views) from the CPU host-callback lowering (NumPy arrays).
 
     The ``cuda`` import is deliberately lazy, not at module scope: eagerly
     importing ``tesseract_core.runtime.cuda.ipc`` perturbs schema/typeguard state
@@ -64,12 +63,11 @@ def _cast_return(
 ) -> TransportArray:
     """Coerce a dispatch result to the return ``dtype``.
 
-    On the GPU FFI path (``ffi_path``) a device ``value`` that already has
-    ``dtype`` is returned as is, for the native shim to copy into XLA's output
-    buffer. Every other ``value`` is copied to the host if needed and cast
-    there, since the shim only copies bytes and JAX cannot run inside the FFI
-    callback. tesseract-core does not pin a jacobian endpoint's output dtype, so
-    this host round-trip happens whenever the endpoint returns a different one.
+    On the GPU FFI path (``ffi_path``), a device ``value`` that already has
+    ``dtype`` is returned as is for the native shim to copy. Anything else is
+    cast on the host, since the shim only copies bytes and JAX cannot run inside
+    the FFI callback. tesseract-core does not pin a jacobian endpoint's output
+    dtype, so an endpoint that returns another dtype costs a host round-trip.
     """
     if (
         ffi_path
@@ -170,7 +168,7 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
 _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
 
-def _identity(tesseract: Tesseract) -> tuple:
+def _equality_key(tesseract: Tesseract) -> tuple:
     """What two Tesseracts share when calls through them are interchangeable.
 
     Their connection (the one a Tesseract shares with its ``with_encoding``
@@ -215,7 +213,7 @@ class Jaxeract:
 
         self.available_methods = self.client.available_endpoints
 
-        self._identity = _identity(self.client)
+        self._equality_key = _equality_key(self.client)
 
     # Every attribute above is derived from ``self.client``, so two wrappers around
     # the same Tesseract are interchangeable. Saying so matters: this object is a
@@ -223,29 +221,28 @@ class Jaxeract:
     # one per call, so with the inherited identity semantics two otherwise identical
     # calls lower to custom calls that XLA cannot recognise as equal and therefore
     # cannot common up. Equality goes by the connection and the encoding (see
-    # ``_identity``) rather than the URL or schema, so that distinct Tesseracts stay
+    # ``_equality_key``) rather than the URL or schema, so that distinct Tesseracts stay
     # distinct while ``with_encoding`` views that request the same encoding, such
-    # as one built afresh for every call, compare equal. The GPU transport needs no
-    # part in it, since it follows from the encoding (see ``resolve_gpu_transport``).
+    # as one built afresh for every call, compare equal. The GPU transport is not
+    # compared, since it follows from these two (see ``resolve_gpu_transport``).
     def __eq__(self, other: object) -> bool:
         """Whether ``other`` wraps an equivalent Tesseract."""
         if not isinstance(other, Jaxeract):
             return NotImplemented
-        client, encoding = self._identity
-        other_client, other_encoding = other._identity
+        client, encoding = self._equality_key
+        other_client, other_encoding = other._equality_key
         return client is other_client and encoding == other_encoding
 
     def __hash__(self) -> int:
         """Hash consistently with ``__eq__``."""
-        client, encoding = self._identity
+        client, encoding = self._equality_key
         return hash((Jaxeract, id(client), encoding))
 
     def resolve_gpu_transport(self) -> str:
         """The GPU transport a call lowered for a CUDA device uses, or ``"none"``.
 
-        Whatever ``Tesseract.resolve_gpu_transport`` picks: the transport the
-        Tesseract requests, else ``cuda_ipc`` if the Tesseract offers it and it
-        works from this process.
+        Delegates to ``Tesseract.resolve_gpu_transport`` and rejects a transport
+        the GPU (FFI) lowering cannot drive.
         """
         gpu_transport = self.client.resolve_gpu_transport()
         if gpu_transport != "none" and gpu_transport not in _SUPPORTED_TRANSPORTS:
@@ -261,11 +258,11 @@ class Jaxeract:
     def with_gpu_transport(self, gpu_transport: str) -> "Jaxeract":
         """A wrapper whose calls exchange GPU arrays over ``gpu_transport``.
 
-        A device transport sends GPU array inputs by reference and asks for
-        outputs the same way; ``"none"`` keeps both on the host. This wrapper
-        itself if its Tesseract already requests that, else one around a view
-        of it. Built per call from the current Tesseract, so a compiled function
-        keeps working after the Tesseract is served again.
+        A device transport passes GPU arrays by reference in both directions, and
+        ``"none"`` copies them to the host. Returns ``self`` if the Tesseract
+        already requests ``gpu_transport`` or runs in-process, else a wrapper
+        around a ``with_encoding`` view. Called on every dispatch, so a compiled
+        function keeps working after the Tesseract is served again.
         """
         if self.client.server_capabilities is None:
             # In-process, arrays are passed as they are, so there is no
@@ -275,7 +272,7 @@ class Jaxeract:
             return self
         view = copy.copy(self)
         view.client = self.client.with_encoding(gpu_transport=gpu_transport)
-        view._identity = _identity(view.client)
+        view._equality_key = _equality_key(view.client)
         return view
 
     # The abstract_eval method is never called from a dispatch function,

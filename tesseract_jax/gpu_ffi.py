@@ -143,12 +143,11 @@ class _DeviceArrayView:
     the view itself, and adopts it through the same protocol (e.g.
     ``cupy.asarray``).
 
-    The view owns nothing: the memory is XLA's input buffer, valid for the
+    The view owns nothing. The memory is XLA's input buffer, valid for the
     duration of the dispatch, and XLA may pass the same buffer to the caller's
     other operations, so an in-process endpoint must not write to it. The
-    view still leaves ``data``'s read-only flag ``False``: setting it would make
-    ``torch.as_tensor`` reject the view, while CuPy ignores the flag, so it would
-    break PyTorch endpoints without protecting CuPy ones. There is no ``stream``
+    read-only flag in ``data`` is still ``False``, because ``torch.as_tensor``
+    rejects read-only views and CuPy ignores the flag. There is no ``stream``
     key, since the handler synchronizes XLA's stream before the dispatch runs.
     """
 
@@ -179,10 +178,10 @@ def _native_dispatch(
 
     ``inputs`` is a sequence of ``(device_ptr, numpy_typestr, shape)`` for the
     XLA input buffers (still on device). Returns one entry per XLA output buffer
-    for the handler to copy from. Each is a device array exposing
-    ``__cuda_array_interface__``, a host array (an in-process endpoint may return
-    either), or ``None`` for a placeholder slot. Host arrays are made
-    C-contiguous here because the handler copies them as one flat byte range.
+    for the handler to copy from: a device array exposing
+    ``__cuda_array_interface__``, a host array, or ``None`` for a placeholder
+    slot. Host arrays are made C-contiguous here because the handler copies them
+    as one flat byte range.
 
     The native shim marshals each entry across the nanobind boundary, where
     ``shape`` arrives as a Python ``list`` rather than a ``tuple``; the sequence

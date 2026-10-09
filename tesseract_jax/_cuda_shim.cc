@@ -24,8 +24,8 @@
 //   so one abi3 wheel per platform serves every supported CPython version.
 // * The registered Python callback returns the result arrays and the shim
 //   copies them into XLA's output buffers, device->device for objects exposing
-//   __cuda_array_interface__ and host->device for C-contiguous NumPy arrays (an
-//   in-process endpoint may return either).
+//   __cuda_array_interface__ and host->device for C-contiguous NumPy arrays (a
+//   Tesseract may return either).
 
 #include <algorithm>
 #include <cstdint>
@@ -542,7 +542,7 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
         // This is the check that matters: a host copy on a derivative return path
         // (np.asarray/np.full materializing a host array) surfaces here as a host
         // pointer, and we fail instead of copying it host->device. That includes
-        // host arrays an in-process endpoint returns, which are otherwise valid.
+        // host arrays a Tesseract returns, which are otherwise valid.
         if (check_ptrs) {
           if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
                                          "result " + std::to_string(i));

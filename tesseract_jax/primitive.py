@@ -3,6 +3,7 @@
 
 import operator
 import os
+import warnings
 from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
@@ -570,19 +571,31 @@ def tesseract_dispatch_gpu_lowering(
     Uses the GPU transport the Tesseract resolves to (see
     ``Jaxeract.resolve_gpu_transport``), which may check with the Tesseract
     that it works. Falls back to the host-callback lowering when that is
-    ``"none"``, so a host-transport call behaves exactly as on CPU. When there is
-    a transport but the native shim is unavailable (e.g. a CPU-only install where
-    it wasn't compiled), this raises instead of silently falling back.
+    ``"none"``, so a host-transport call behaves exactly as on CPU. Without the
+    native shim (e.g. a CPU-only install where it wasn't compiled), a Tesseract
+    that requests no transport takes the host-callback lowering with a warning,
+    and one that requests a transport raises.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
+    if (
+        not gpu_ffi.is_available()
+        and client.client.current_encoding.gpu_transport is None
+    ):
+        warnings.warn(
+            "tesseract-jax's native GPU FFI shim is unavailable, so GPU arrays are "
+            "copied to the host. Reinstall tesseract-jax with the shim built to keep "
+            "them on the device.",
+            stacklevel=2,
+        )
+        return tesseract_dispatch_lowering(ctx, *array_args, params=params)
     gpu_transport = client.resolve_gpu_transport()
 
     if gpu_transport == "none":
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
-    selected = f"The Tesseract uses gpu_transport={gpu_transport!r}, but"
+    uses_transport = f"The Tesseract uses gpu_transport={gpu_transport!r}, but"
     opt_out = (
         "pass tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
         "copy GPU arrays to the host instead."
@@ -590,7 +603,7 @@ def tesseract_dispatch_gpu_lowering(
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
-            f"{selected} the native GPU FFI shim is unavailable (not compiled or "
+            f"{uses_transport} the native GPU FFI shim is unavailable (not compiled or "
             "failed to import), so GPU-direct dispatch cannot run. Reinstall "
             "tesseract-jax with the shim built (a source install compiles it via "
             "the hatch build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build "
@@ -605,7 +618,7 @@ def tesseract_dispatch_gpu_lowering(
         jax.devices("cuda")
     except RuntimeError as exc:
         raise RuntimeError(
-            f"{selected} JAX sees no CUDA device. Install a CUDA-enabled jaxlib and "
+            f"{uses_transport} JAX sees no CUDA device. Install a CUDA-enabled jaxlib and "
             f"run on a GPU host, or {opt_out}"
         ) from exc
 
@@ -1033,15 +1046,11 @@ def apply_tesseract(
     rejected with a ``TypeError`` — convert them explicitly via ``jnp.array()``.
 
     When the call is compiled for a CUDA device, GPU arrays stay on the device
-    whenever the Tesseract offers a GPU transport that works from this process,
-    and are copied to the host otherwise (see
-    ``Tesseract.resolve_gpu_transport``). Pass
-    ``tesseract_client.with_encoding(gpu_transport="none")`` to always copy them
-    to the host. An in-process Tesseract receives GPU inputs as they are only if
-    it was created with ``Tesseract.from_tesseract_api(..., gpu_transport="cuda_ipc")``,
-    as objects exposing ``__cuda_array_interface__`` that are only valid during
-    the call. Its endpoints may return host or device arrays either way. GPU
-    transports are an experimental tesseract-core feature.
+    if the Tesseract has a GPU transport that works from this process, and are
+    copied through the host otherwise. Pass
+    ``tesseract_client.with_encoding(gpu_transport="none")`` to always copy
+    them. See :doc:`/content/gpu-arrays` for how the transport is picked and
+    what an in-process Tesseract receives.
 
     Example:
         >>> from tesseract_core import Tesseract

@@ -26,7 +26,7 @@ jax.grad(vector_sum)(x, y) # 🎉
 ## Quick start
 
 > [!NOTE]
-> You need Python 3.10+ and [uv](https://docs.astral.sh/uv/getting-started/installation/), which Tesseract uses to build a separate virtual environment for each Tesseract. Docker is only needed to build container images.
+> You need Python 3.12+ and [uv](https://docs.astral.sh/uv/getting-started/installation/), which Tesseract uses to build a separate virtual environment for each Tesseract. Docker is only needed to build container images.
 
 1. Install Tesseract-JAX and get the example Tesseracts:
 

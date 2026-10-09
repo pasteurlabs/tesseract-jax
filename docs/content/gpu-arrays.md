@@ -1,6 +1,6 @@
 # GPU arrays
 
-When a call is compiled for a CUDA device, `apply_tesseract` keeps GPU arrays on the device whenever it can, and copies them through the host otherwise. Either way the results are the same, so you do not need to change any code; only the speed differs. GPU transports are an experimental tesseract-core feature.
+When a call is compiled for a CUDA device, `apply_tesseract` keeps GPU arrays on the device whenever it can, and copies them through the host otherwise. Either way the results are the same, so no code changes are needed. Only the speed differs. GPU transports are an experimental tesseract-core feature.
 
 ## Serving a Tesseract with `cuda_ipc`
 

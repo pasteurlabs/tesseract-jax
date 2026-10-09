@@ -13,8 +13,8 @@ round-trip). The served fixtures are created with ``gpu_transport="cuda_ipc"``.
 Most of these use a served (subprocess) GPU Tesseract, since CUDA IPC is
 cross-process and cannot be self-opened. The ``local_*`` tests load the same
 Tesseract in-process, where one created with ``gpu_transport="cuda_ipc"`` hands
-the endpoints XLA's device buffers directly. The tests are marked ``gpu``, and the fixtures skip where
-CUDA / CuPy / a GPU-backed JAX are unavailable.
+the endpoints XLA's device buffers directly. The tests are marked ``gpu``, and
+the fixtures skip where CUDA / CuPy / a GPU-backed JAX are unavailable.
 """
 
 from __future__ import annotations
@@ -685,7 +685,7 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
 
 @pytest.mark.parametrize("contiguous", [True, False])
 def test_result_strides_at_ffi_boundary(served_gpu_tesseract, contiguous):
-    """A strided result must raise; explicit row-major strides are accepted.
+    """A strided result must raise, while explicit row-major strides are accepted.
 
     The handler copies each result as one flat byte range, so a strided array
     (which an in-process endpoint can hand over, unlike cuda_ipc, which rejects
@@ -732,9 +732,9 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     """A single jitted graph can mix a GPU-direct and a host-callback dispatch.
 
     The GPU Tesseract runs via cuda_ipc (device-resident, residency-checked), and
-    its output feeds a CPU Tesseract dispatched over the host transport (it is
-    served without one), which takes the usual device->host->device round-trip. The
-    two lower to different custom calls and compose without interfering.
+    its output feeds a CPU Tesseract served without a GPU transport, which takes
+    the usual device->host->device round-trip. The two lower to different custom
+    calls and compose without interfering.
     """
     cpu_tess = served_vectoradd_tesseract
 
@@ -742,9 +742,8 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
 
     def pipeline(a, b):
-        gpu_out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})[
-            "c"
-        ]  # a*2 + b, on-device
+        # a*2 + b, on-device
+        gpu_out = apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"]
         return apply_tesseract(cpu_tess, {"a": gpu_out, "b": b})["c"]  # + b, host
 
     out = jax.jit(pipeline)(a, b)

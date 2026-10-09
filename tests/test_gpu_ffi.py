@@ -15,6 +15,8 @@ guard it on the CPU test runner rather than only implicitly on GPU CI.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -116,18 +118,19 @@ def test_cudart_candidates_uses_core_discovery(monkeypatch):
 
 
 class _StubClient:
-    """Minimal stand-in for a Jaxeract: these guards only resolve the transport."""
+    """Minimal stand-in for a Jaxeract whose Tesseract requests cuda_ipc."""
+
+    client = SimpleNamespace(current_encoding=SimpleNamespace(gpu_transport="cuda_ipc"))
 
     def resolve_gpu_transport(self) -> str:
         return "cuda_ipc"
 
 
 def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
-    """A device transport with an unavailable shim is a hard error, not a fallback.
+    """A requested device transport with an unavailable shim is a hard error.
 
-    A selected device transport, whether passed explicitly or taken from the
-    client, must not silently degrade to the slow host path. The lowering raises
-    before touching ctx/array_args.
+    A call whose Tesseract asks for a device transport must not silently degrade
+    to the slow host path. The lowering raises before touching ctx/array_args.
     """
     from types import SimpleNamespace
 
@@ -383,3 +386,38 @@ def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
         assert out.shape == ()
         assert out.flags.c_contiguous
         assert out == expected
+
+
+def test_gpu_lowering_falls_back_to_host_without_shim_or_requested_transport(
+    monkeypatch,
+):
+    """Without the shim, a Tesseract that requests no transport takes the host path.
+
+    It warns, and does not ask the Tesseract for a transport it could not use.
+    """
+    from types import SimpleNamespace
+
+    import typeguard
+
+    from tesseract_jax import primitive
+
+    class _UnrequestedClient:
+        client = SimpleNamespace(current_encoding=SimpleNamespace(gpu_transport=None))
+
+        def resolve_gpu_transport(self) -> str:
+            raise AssertionError("resolved a transport the shim cannot drive")
+
+    sentinel = object()
+    monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
+    monkeypatch.setattr(
+        primitive, "tesseract_dispatch_lowering", lambda ctx, *a, params: sentinel
+    )
+    params = SimpleNamespace(client=_UnrequestedClient())
+
+    with (
+        typeguard.suppress_type_checks(),
+        pytest.warns(UserWarning, match="FFI shim is unavailable"),
+    ):
+        assert (
+            primitive.tesseract_dispatch_gpu_lowering("ctx", params=params) is sentinel
+        )

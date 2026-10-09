@@ -7,7 +7,7 @@ Which transport a call uses gates the GPU (FFI) lowering, so these check that
 only the ``cuda`` lowering asks the Tesseract for one, that the CPU lowering
 always requests host outputs, and that a transport the FFI path cannot drive is
 rejected. Whether a transport works is tesseract-core's to find out (see
-``Tesseract.resolve_gpu_transport``); the GPU tests in ``test_gpu_direct.py``
+``Tesseract.resolve_gpu_transport``), and the GPU tests in ``test_gpu_direct.py``
 exercise the transport end to end.
 """
 
@@ -113,36 +113,19 @@ def test_equality_and_hash_key_on_the_tesseract():
     assert a != Jaxeract(_fake_client())
 
 
-def test_cuda_ipc_tesseract_runs_on_cpu(served_cuda_ipc_vectoradd_tesseract):
-    """A Tesseract served with cuda_ipc stays usable from CPU-only JAX.
+@pytest.mark.parametrize("client", ["served", "in_process"])
+def test_cuda_ipc_tesseract_runs_on_cpu(request, client):
+    """A Tesseract created with cuda_ipc stays usable from CPU-only JAX.
 
     Only the ``cuda`` lowering acts on the transport, so CPU arrays take the host
     callback instead of failing for lack of a CUDA device.
     """
-    tess = served_cuda_ipc_vectoradd_tesseract
-
-    def f(a, b):
-        return apply_tesseract(tess, {"a": a, "b": b})["c"]
-
-    with jax.default_device(jax.devices("cpu")[0]):
-        a = jnp.arange(8, dtype=jnp.float32)
-        b = jnp.ones(8, dtype=jnp.float32)
-        c = jax.jit(f)(a, b)
-        grad_a = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
-
-    np.testing.assert_array_equal(c, np.arange(8) + 1.0)
-    np.testing.assert_array_equal(grad_a, np.ones(8))
-
-
-def test_cuda_ipc_local_client_runs_on_cpu():
-    """An in-process client created with a transport stays usable from CPU-only JAX.
-
-    Only the ``cuda`` lowering acts on the transport, so CPU arrays reach the
-    endpoint through the host callback as usual.
-    """
-    tess = Tesseract.from_tesseract_api(
-        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
-    )
+    if client == "served":
+        tess = request.getfixturevalue("served_cuda_ipc_vectoradd_tesseract")
+    else:
+        tess = Tesseract.from_tesseract_api(
+            here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+        )
 
     def f(a, b):
         return apply_tesseract(tess, {"a": a, "b": b})["c"]

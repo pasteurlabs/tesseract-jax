@@ -29,7 +29,7 @@ from tesseract_core.runtime.config import get_config
 
 
 def _xp():
-    """The array module to compute with. CuPy is imported lazily for the host leg."""
+    """The array module to compute with, importing CuPy only for the cuda_ipc leg."""
     if get_config().gpu_transport == "cuda_ipc":
         import cupy
 

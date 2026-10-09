@@ -149,9 +149,8 @@ def local_cuda_ipc_gpu_tesseract():
 #   * "host"     -> no GPU transport: numpy compute, device->host->device
 #   * "cuda_ipc" -> cuda_ipc GPU transport: cupy compute, GPU-direct FFI path
 #
-# The cuda_ipc leg skips where a
-# GPU / CuPy / GPU-backed JAX is unavailable, via the same guards as the
-# standalone GPU fixtures.
+# The cuda_ipc leg skips where a GPU / CuPy / GPU-backed JAX is unavailable, via
+# the same guards as the standalone GPU fixtures.
 
 
 @pytest.fixture(
@@ -197,7 +196,7 @@ def served_vectoradd_tesseract():
 
 @pytest.fixture(scope="session")
 def served_cuda_ipc_vectoradd_tesseract():
-    """The vectoradd Tesseract served with cuda_ipc, which serves without a GPU."""
+    """The vectoradd Tesseract served with cuda_ipc, which needs no GPU to serve."""
     yield from _serve_tesseract(
         here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
     )
