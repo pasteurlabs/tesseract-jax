@@ -67,7 +67,7 @@ scipy==1.18.1
     #   jaxlib
 shellingham==1.5.4
     # via typer
-tesseract-core @ git+https://github.com/pasteurlabs/tesseract-core@8439ec281588ccab702e8c48c336030766d4253c
+tesseract-core @ git+https://github.com/pasteurlabs/tesseract-core@b973729195f5b0299865a5f2377f8d05116731e6
     # via tesseract-jax
 typer==0.27.2
     # via tesseract-core

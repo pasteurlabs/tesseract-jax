@@ -127,4 +127,4 @@ omit = [
 # Pins the unreleased tesseract-core commit this depends on (pasteurlabs/tesseract-core#829).
 # Drop once tesseract-core 1.15 is released, and raise the floor above to >=1.15.0.
 [tool.uv.sources]
-tesseract-core = { git = "https://github.com/pasteurlabs/tesseract-core", rev = "8439ec281588ccab702e8c48c336030766d4253c" }
+tesseract-core = { git = "https://github.com/pasteurlabs/tesseract-core", rev = "b973729195f5b0299865a5f2377f8d05116731e6" }
