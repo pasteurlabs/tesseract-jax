@@ -38,8 +38,8 @@ def _arm_residency_check():
 
     ``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS`` makes the native handler reject any
     buffer that crosses the FFI boundary in host memory. The shim reads the flag
-    once on its first dispatch, so it must be set before this module runs. With
-    it armed, every assertion below (apply / grad / jvp / vjp / jacobian) also
+    on every dispatch, so a test can disarm it with ``monkeypatch``. With it
+    armed, every assertion below (apply / grad / jvp / vjp / jacobian) also
     guards against a host copy sneaking back onto a dispatch path.
     """
     os.environ["TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS"] = "1"
@@ -207,6 +207,46 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     np.testing.assert_allclose(_to_np(g), np.full((512,), 2.0), rtol=1e-6)
 
 
+@pytest.mark.parametrize("residency_check", [False, True])
+def test_host_results_on_ffi_path(served_gpu_tesseract, monkeypatch, residency_check):
+    """Host arrays reaching the FFI handler are copied host->device.
+
+    The endpoint computes on the device but returns host arrays, which a served
+    Tesseract sends over the host encoding even under cuda_ipc. The handler
+    copies them into XLA's output buffers, unless the residency check is armed,
+    which rejects any host buffer at the FFI boundary.
+    """
+    if not residency_check:
+        monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
+
+    n = 64
+    a = jnp.arange(n, dtype=jnp.float32)
+    b = jnp.ones(n, dtype=jnp.float32)
+
+    def f(a):
+        return apply_tesseract(
+            served_gpu_tesseract,
+            {"a": a, "b": b, "return_host": True},
+            gpu_transport="cuda_ipc",
+        )["c"]
+
+    if residency_check:
+        with pytest.raises(
+            jax.errors.JaxRuntimeError, match=r"not device-resident|host"
+        ):
+            jax.jit(f)(a).block_until_ready()
+        _assert_interpreter_alive()
+        return
+
+    c = jax.jit(f)(a)
+    assert _on_gpu(c)
+    np.testing.assert_allclose(_to_np(c), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
+
+    g = jax.jit(jax.grad(lambda a: f(a).sum()))(a)
+    assert _on_gpu(g)
+    np.testing.assert_allclose(_to_np(g), np.full(n, 2.0), rtol=1e-6)
+
+
 def test_serial_reuse_ring1(served_gpu_tesseract):
     """Back-to-back serial dispatches: exercises the ring-1 lifetime contract."""
     f = jax.jit(
@@ -250,6 +290,61 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
     np.testing.assert_allclose(
         _to_np(jac), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
     )
+
+
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac):
+    """``jacfwd`` / ``jacrev`` return the endpoint's float32 Jacobian bit for bit.
+
+    The materialized path contracts the Jacobian with one-hot (co)tangents in
+    XLA, which on recent NVIDIA GPUs runs float32 matmuls in TF32 by default,
+    rounding the entries to 10 mantissa bits. A random ``mask`` makes the
+    entries use the full float32 mantissa.
+    """
+    n = 64
+    rng = np.random.default_rng(0)
+    a = jnp.asarray(rng.normal(size=n), dtype=jnp.float32)
+    b = jnp.ones(n, dtype=jnp.float32)
+    mask = jnp.asarray(rng.normal(size=n), dtype=jnp.float32)
+
+    def f(a):
+        return apply_tesseract(
+            served_gpu_tesseract,
+            {"a": a, "b": b, "mask": mask},
+            vmap_method="sequential",
+            gpu_transport="cuda_ipc",
+        )["c"]
+
+    got = jax.jit(jac(f))(a)
+    # c = (a*scale + b)*mask with default scale=2, so dc/da = diag(2*mask).
+    np.testing.assert_array_equal(_to_np(got), np.diag(2.0 * np.asarray(mask)))
+
+
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_materialized_jacobian_mixed_dtype(
+    served_gpu_mixed_dtype_tesseract, jac, monkeypatch
+):
+    """A jacobian endpoint returning another dtype is cast to the expected one.
+
+    The endpoint always returns float64, while ``jacrev`` wants the input's
+    float32. The mismatching block is cast through the host, so the residency
+    check, which rejects that host copy, is disarmed here.
+    """
+    monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
+    x = jnp.arange(5, dtype=jnp.float32)
+
+    def f(x):
+        return apply_tesseract(
+            served_gpu_mixed_dtype_tesseract,
+            {"x": x},
+            vmap_method="sequential",
+            gpu_transport="cuda_ipc",
+        )["y"]
+
+    expected = jac(lambda x: (2.0 * x).astype(jnp.float64))(x)
+    got = jax.jit(jac(f))(x)
+    assert got.dtype == expected.dtype
+    np.testing.assert_array_equal(_to_np(got), np.asarray(expected))
 
 
 def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):

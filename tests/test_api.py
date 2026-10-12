@@ -836,6 +836,28 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     assert count.shape == (3,)
 
 
+def test_materialized_jacfwd_with_integer_output(gather_tess):
+    """``jacfwd`` through the ``jacobian`` endpoint fills integer tangents cleanly.
+
+    The materialized path builds the discarded tangent of every
+    non-differentiable output itself. Filling an integer one with NaN would
+    emit a RuntimeWarning while the call is traced, which
+    ``filterwarnings = ["error"]`` turns into a failure.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def gathered(weights):
+        return apply_tesseract(
+            gather_tess,
+            inputs=dict(weights=weights, indices=indices),
+            vmap_method="sequential",
+        )["gathered"]
+
+    jac = jax.jit(jax.jacfwd(gathered))(weights)
+    np.testing.assert_array_equal(jac, np.eye(3, dtype="float32")[indices])
+
+
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_integer_output_feeds_integer_input(gather_tess, use_jit):
     """An integer output can be chained into another call's integer input.

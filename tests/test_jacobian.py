@@ -387,6 +387,32 @@ def test_vmap_of_jacfwd_agrees_across_vmap_methods(batched_tess, vmap_method):
     np.testing.assert_allclose(got, expected, rtol=1e-6)
 
 
+@pytest.mark.parametrize("vmap_method", ALL_VMAP_METHODS)
+def test_vmap_of_grad_agrees_across_vmap_methods(batched_tess, vmap_method):
+    """Per-example gradients must agree with the unbatched gradient.
+
+    Under ``vmap(grad(f))`` the vjp bind gets batched primals but an unbatched
+    cotangent, which the vectorized strategies must send with the batch size
+    of the outputs it belongs to. ``y`` is unbatched yet differentiated, so it
+    needs a batch dimension too to get one gradient per example rather than
+    their sum.
+    """
+
+    def loss(x, y):
+        out = apply_tesseract(batched_tess, {"x": x, "y": y}, vmap_method=vmap_method)
+        return out["result"].sum()
+
+    grad = jax.grad(loss, argnums=(0, 1))
+    xs = jnp.stack([jnp.arange(3.0) * s for s in (1.0, 2.0)])
+    y = jnp.linspace(0.5, 1.5, 3)
+    got = jax.vmap(grad, in_axes=(0, None))(xs, y)
+    expected = [jnp.stack(g) for g in zip(*(grad(x, y) for x in xs), strict=True)]
+
+    for g, e in zip(got, expected, strict=True):
+        assert g.shape == e.shape
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
 @pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
 def test_vmap_of_jacfwd_with_explicit_vmap_method(univariate_tess, vmap_method):
     """``vmap(jacfwd(f))`` works when a vmap_method is supplied.

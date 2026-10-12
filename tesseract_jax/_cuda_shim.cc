@@ -22,9 +22,10 @@
 //   (Py_LIMITED_API): the module's entire Python surface is three entry points
 //   marshalling ints/strings/lists/tuples/objects, well inside the Limited API,
 //   so one abi3 wheel per platform serves every supported CPython version.
-// * The registered Python callback returns the result arrays (as objects
-//   exposing __cuda_array_interface__) and the shim copies them device->device
-//   into XLA's output buffers.
+// * The registered Python callback returns the result arrays and the shim
+//   copies them into XLA's output buffers, device->device for objects exposing
+//   __cuda_array_interface__ and host->device for C-contiguous NumPy arrays (a
+//   Tesseract may return either).
 
 #include <cstdint>
 #include <cstdio>
@@ -56,6 +57,7 @@ using cudaError_t = int;
 // lets us avoid including the CUDA headers (we dlopen the runtime instead).
 using cudaStream_t = void*;
 constexpr int cudaSuccess = 0;
+constexpr int cudaMemcpyHostToDevice = 1;
 constexpr int cudaMemcpyDeviceToDevice = 3;
 
 // cudaMemoryType values (stable across CUDA 10-13). Device and Managed memory
@@ -168,12 +170,10 @@ std::string cuda_err(cudaError_t e) {
 // results) is asserted to live in device (or managed) memory, so an accidental
 // host round-trip -- e.g. a np.asarray/np.full slipping onto a dispatch return
 // path -- fails loudly at the boundary instead of silently copying through host.
+// Read on every dispatch, so a test can arm or disarm it around a single call.
 bool debug_check_device_ptrs() {
-  static const bool on = [] {
-    const char* v = std::getenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS");
-    return v != nullptr && v[0] != '\0' && std::string(v) != "0";
-  }();
-  return on;
+  const char* v = std::getenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS");
+  return v != nullptr && v[0] != '\0' && std::string(v) != "0";
 }
 
 const char* memory_type_name(int t) {
@@ -302,6 +302,7 @@ struct BufferDesc {
   std::vector<int64_t> shape;
   size_t nbytes;
   bool inexact = false;  // dtype has a NaN to spell (F16/F32/F64/BF16/C64/C128)
+  bool host = false;     // result lives in host memory (copied host->device)
 };
 
 BufferDesc describe(ffi::AnyBuffer buf) {
@@ -422,7 +423,8 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
       rt.GetLastError();
     }
 
-    // Expect a list of objects exposing __cuda_array_interface__. Reading their
+    // Expect a list of objects exposing __cuda_array_interface__, or NumPy
+    // arrays (which the Python side makes C-contiguous). Reading their
     // pointer/dtype/shape drives arbitrary Python (attribute access, casts,
     // __getitem__), any of which may raise -- and a nanobind exception must not
     // unwind across the C-ABI FFI boundary into XLA. Convert any throw into an
@@ -450,7 +452,11 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
           result_descs.push_back(rd);
           continue;
         }
-        nb::object cai = item.attr("__cuda_array_interface__");
+        // Both protocols describe the buffer with the same data / typestr /
+        // shape keys, so only the copy direction differs.
+        rd.host = !nb::hasattr(item, "__cuda_array_interface__");
+        nb::object cai = item.attr(rd.host ? "__array_interface__"
+                                           : "__cuda_array_interface__");
         nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
         rd.ptr = nb::cast<uintptr_t>(data[0]);
         // XLA sized this output buffer from tesseract-jax's declared avals, but
@@ -475,7 +481,8 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
         // Debug: the dispatch's returned buffers must be device-resident.
         // This is the check that matters: a host copy on a derivative return path
         // (np.asarray/np.full materializing a host array) surfaces here as a host
-        // pointer, and we fail instead of silently copying host->"device".
+        // pointer, and we fail instead of copying it host->device. That includes
+        // host arrays a Tesseract returns, which are otherwise valid.
         if (check_ptrs) {
           if (auto e = assert_device_ptr(reinterpret_cast<void*>(rd.ptr),
                                          "result " + std::to_string(i));
@@ -504,7 +511,7 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
   // value (or, for bool/PRED, the out-of-range byte 0xff), so those are
   // zero-filled to stay consistent with the host's 0/0 result. This leaves no
   // output buffer undefined without allocating a source buffer. Every other slot
-  // is a real device result we copy device->device.
+  // is a real result, copied device->device or host->device.
   for (size_t i = 0; i < out_descs.size(); ++i) {
     if (result_descs[i].ptr == 0) {
       const int pattern = out_descs[i].inexact ? 0xff : 0x00;
@@ -519,7 +526,9 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
     if (cudaError_t e = rt.MemcpyAsync(
             reinterpret_cast<void*>(out_descs[i].ptr),
             reinterpret_cast<void*>(result_descs[i].ptr), out_descs[i].nbytes,
-            cudaMemcpyDeviceToDevice, stream);
+            result_descs[i].host ? cudaMemcpyHostToDevice
+                                 : cudaMemcpyDeviceToDevice,
+            stream);
         e != cudaSuccess) {
       return ffi::Error::Internal("cudaMemcpyAsync(result) failed: " +
                                   cuda_err(e));

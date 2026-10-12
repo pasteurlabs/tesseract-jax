@@ -17,9 +17,9 @@ class TransportArray(Protocol):
     The endpoint methods are transport-agnostic: the CPU host-callback lowering
     passes real NumPy arrays, while the GPU FFI lowering passes bare
     ``__cuda_array_interface__`` device views (see
-    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
-    ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
-    ``dtype``, so this protocol captures exactly that surface.
+    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back device or host
+    arrays. All the dispatch code reads off them is ``shape`` and ``dtype``, so
+    this protocol captures exactly that surface.
     """
 
     @property
