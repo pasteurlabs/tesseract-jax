@@ -25,7 +25,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
@@ -205,6 +204,35 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     assert _on_gpu(g)
     # d/da sum(a*2 + b) = 2
     np.testing.assert_allclose(_to_np(g), np.full((512,), 2.0), rtol=1e-6)
+
+
+def test_jax_tesseract_round_trip_stays_on_device(served_gpu_jax_tesseract):
+    """A Tesseract computing with JAX exchanges arrays over cuda_ipc, host-copy free.
+
+    The Tesseract adopts its inputs through DLPack and returns arrays allocated by
+    XLA, unlike the CuPy-based GPU Tesseracts. It rejects inputs that reach it in
+    host memory, and the residency check armed for this module rejects results
+    that reach the FFI boundary in host memory, so passing rules out a host copy
+    in either direction, for both apply and the vjp behind ``jax.grad``.
+    """
+    a = jnp.arange(64, dtype=jnp.float32)
+    b = jnp.ones(64, dtype=jnp.float32) * 3.0
+
+    def f(a, b):
+        return apply_tesseract(
+            served_gpu_jax_tesseract, {"a": a, "b": b}, gpu_transport="cuda_ipc"
+        )["c"]
+
+    c = jax.jit(f)(a, b)
+    assert _on_gpu(c)
+    np.testing.assert_allclose(
+        _to_np(c), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
+    )
+
+    grad_a, grad_b = jax.jit(jax.grad(lambda a, b: f(a, b).sum(), argnums=(0, 1)))(a, b)
+    assert _on_gpu(grad_a) and _on_gpu(grad_b)
+    np.testing.assert_allclose(_to_np(grad_a), np.full(64, 2.0, np.float32))
+    np.testing.assert_allclose(_to_np(grad_b), np.ones(64, np.float32))
 
 
 def test_serial_reuse_ring1(served_gpu_tesseract):
@@ -407,7 +435,7 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     gpu_transport), which takes the usual device->host->device round-trip. The
     two lower to different custom calls and compose without interfering.
     """
-    cpu_tess = Tesseract.from_url(served_vectoradd_tesseract)
+    cpu_tess = served_vectoradd_tesseract
 
     a = jnp.arange(64, dtype=jnp.float32)
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
