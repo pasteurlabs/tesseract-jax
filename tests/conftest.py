@@ -117,6 +117,25 @@ def served_gpu_jax_tesseract():
     yield from _served_gpu_tesseract("gpu_jax_tesseract", needs_cupy=False)
 
 
+@pytest.fixture(scope="module")
+def local_gpu_tesseract():
+    """The all-float32 GPU Tesseract, loaded in-process. Skips without a GPU/CuPy."""
+    _skip_without_gpu(needs_cupy=True)
+    return _load_tesseract("gpu_tesseract")
+
+
+@pytest.fixture(scope="module")
+def local_cuda_ipc_gpu_tesseract():
+    """The GPU Tesseract in-process, created to take GPU arrays as they are.
+
+    Skips without a GPU/CuPy.
+    """
+    _skip_without_gpu(needs_cupy=True)
+    return Tesseract.from_tesseract_api(
+        here / "gpu_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parametrised transport fixture (host vs cuda_ipc)
 # ---------------------------------------------------------------------------
@@ -125,11 +144,10 @@ def served_gpu_jax_tesseract():
 # non-differentiable inputs/outputs, jacobian fwd/bwd, batching -- must agree
 # between the two dispatch lowerings. Rather than duplicate each test, this
 # fixture serves the *array-module-agnostic* ``transport_tesseract`` in one of two
-# modes and yields the client together with the ``apply_tesseract`` kwargs that
-# select the transport, so a single test body runs on both:
+# modes, so a single test body runs on both:
 #
 #   * "host"     -> no GPU transport: numpy compute, device->host->device
-#   * "cuda_ipc" -> cuda_ipc GPU transport: cupy compute, gpu_transport="cuda_ipc"
+#   * "cuda_ipc" -> cuda_ipc GPU transport: cupy compute, GPU-direct FFI path
 #
 # The cuda_ipc leg skips where a GPU / CuPy / GPU-backed JAX is unavailable, via
 # the same guards as the standalone GPU fixtures.
@@ -145,19 +163,15 @@ def served_gpu_jax_tesseract():
     ]
 )
 def transport(request):
-    """Yield ``(client, apply_kwargs)`` for one dispatch transport.
+    """Yield a served ``transport_tesseract`` client for one dispatch transport.
 
     Parametrised over ``"host"`` and ``"cuda_ipc"``; the cuda_ipc leg is skipped
     when no GPU backend is available.
     """
     if request.param == "cuda_ipc":
-        for client in _served_gpu_tesseract("transport_tesseract"):
-            yield client, {"gpu_transport": "cuda_ipc"}
+        yield from _served_gpu_tesseract("transport_tesseract")
     else:
-        for client in _serve_tesseract(
-            here / "transport_tesseract" / "tesseract_api.py"
-        ):
-            yield client, {}
+        yield from _serve_tesseract(here / "transport_tesseract" / "tesseract_api.py")
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +192,14 @@ def served_nested_tesseract():
 @pytest.fixture(scope="session")
 def served_vectoradd_tesseract():
     yield from _serve_tesseract(here / "vectoradd_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="session")
+def served_cuda_ipc_vectoradd_tesseract():
+    """The vectoradd Tesseract served with cuda_ipc, which needs no GPU to serve."""
+    yield from _serve_tesseract(
+        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
 
 
 @pytest.fixture(scope="session")

@@ -1,0 +1,8 @@
+name: "tesseract-jax-gpu-container"
+version: "0.1.0"
+description: "Computes 2a + b on the GPU if it sees one, for the container GPU tests."
+
+build_config:
+  # libcudart comes from the CuPy wheel, and the GPU driver is injected by the
+  # container runtime, so the default base image is enough.
+  target_platform: "native"

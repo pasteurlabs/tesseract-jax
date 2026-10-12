@@ -5,10 +5,10 @@
 
 Each test here runs on both dispatch lowerings via the ``transport`` fixture
 (``tests/conftest.py``): the host callback (device->host->device) and the
-GPU-direct cuda_ipc FFI path. The fixture yields ``(client, apply_kwargs)`` and
-serves the array-agnostic ``transport_tesseract`` with numpy or cupy compute to
-match, so one body pins that the two paths compute -- and, crucially, handle their
-edge cases -- identically.
+GPU-direct cuda_ipc FFI path. The fixture serves the array-agnostic
+``transport_tesseract`` with or without the cuda_ipc GPU transport, so one body
+pins that the two paths compute the same results and handle edge cases the same
+way.
 
 The cuda_ipc parameter is ``gpu``-marked and skips without a GPU, so on the CPU
 runner only the host leg executes; the GPU CI job runs both.
@@ -35,15 +35,10 @@ def _to_np(x):
     return get() if callable(get) else np.asarray(x)
 
 
-def _apply(transport, inputs, **kwargs):
-    client, apply_kwargs = transport
-    return apply_tesseract(client, inputs, **apply_kwargs, **kwargs)
-
-
 def test_apply_matches_analytic(transport):
     a = jnp.arange(64, dtype=jnp.float32)
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
-    out = jax.jit(lambda a, b: _apply(transport, {"a": a, "b": b})["c"])(a, b)
+    out = jax.jit(lambda a, b: apply_tesseract(transport, {"a": a, "b": b})["c"])(a, b)
     np.testing.assert_allclose(
         _to_np(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
@@ -54,9 +49,12 @@ def test_mask_nondiff_array_input(transport):
     a = jnp.arange(32, dtype=jnp.float32)
     b = jnp.ones(32, dtype=jnp.float32)
     mask = jnp.full((32,), 3.0, dtype=jnp.float32)
-    out = jax.jit(
-        lambda a, b, mask: _apply(transport, {"a": a, "b": b, "mask": mask})["c"]
-    )(a, b, mask)
+
+    def f(a, b, mask):
+        out = apply_tesseract(transport, {"a": a, "b": b, "mask": mask})
+        return out["c"]
+
+    out = jax.jit(f)(a, b, mask)
     np.testing.assert_allclose(
         _to_np(out), (np.asarray(a) * 2.0 + np.asarray(b)) * 3.0, rtol=1e-6
     )
@@ -75,7 +73,7 @@ def test_grad_with_nondiff_array_input(transport):
     mask = jnp.full((n,), 3.0, dtype=jnp.float32)
 
     def loss(a, mask):
-        return _apply(transport, {"a": a, "b": b, "mask": mask})["c"].sum()
+        return apply_tesseract(transport, {"a": a, "b": b, "mask": mask})["c"].sum()
 
     g = jax.jit(jax.grad(loss, argnums=0))(a, mask)
     # c = (a*scale + b)*mask, scale=2 => d/da sum(c) = 2*mask.
@@ -96,7 +94,7 @@ def test_jvp_nondiff_output_placeholder_is_nan(transport):
     tb = jnp.zeros(n, dtype=jnp.float32)
 
     def f(a, b):
-        return _apply(transport, {"a": a, "b": b})
+        return apply_tesseract(transport, {"a": a, "b": b})
 
     primal, tangent = jax.jit(lambda a, b, ta, tb: jax.jvp(f, (a, b), (ta, tb)))(
         a, b, ta, tb
@@ -124,7 +122,8 @@ def test_materialized_jacobian_modes(transport, jac):
     b = jnp.ones(n, dtype=jnp.float32)
 
     def f(a):
-        return _apply(transport, {"a": a, "b": b}, materialize_jacobian=True)["c"]
+        out = apply_tesseract(transport, {"a": a, "b": b}, materialize_jacobian=True)
+        return out["c"]
 
     out = jax.jit(jac(f))(a)
     # c = a*scale + b, scale=2 => dc/da = 2*I.
@@ -140,7 +139,8 @@ def test_vmap_batching(transport):
     b = jnp.ones((batch, n), dtype=jnp.float32) * 3.0
 
     def f(a, b):
-        return _apply(transport, {"a": a, "b": b}, vmap_method="sequential")["c"]
+        out = apply_tesseract(transport, {"a": a, "b": b}, vmap_method="sequential")
+        return out["c"]
 
     out = jax.jit(jax.vmap(f))(a, b)
     np.testing.assert_allclose(
