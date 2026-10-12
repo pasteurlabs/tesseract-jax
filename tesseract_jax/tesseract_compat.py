@@ -45,21 +45,38 @@ def _on_device(values: "list | tuple") -> bool:
     return any(has_cuda_array_interface(v) for v in values)
 
 
-def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
-    """Coerce a dispatch result to the return ``dtype`` without leaving the device.
+def _to_host(value: TransportArray) -> TransportArray:
+    """Copy a GPU array to a host NumPy array, and return anything else as is.
 
-    On the host path ``value`` is a NumPy array, cast to ``dtype`` here. On the
-    cuda_ipc (GPU FFI) path ``value`` is a device array whose bytes the FFI
-    handler copies straight into XLA's output buffer, so casting here would force
-    a device->host round-trip; it is returned untouched. Since that does not
-    guarantee the device array already has ``dtype`` (tesseract-core does not pin
-    a jacobian endpoint's output dtype), the native shim checks each result's
-    dtype and shape against the XLA output buffer and raises on a mismatch rather
-    than reinterpreting bytes (see ``_cuda_shim.cc``).
+    Lazy import for the same reason as in :func:`_on_device`.
     """
-    if _on_device([value]):
+    from tesseract_core.runtime.cuda.ipc import (
+        cuda_array_to_host,
+        has_cuda_array_interface,
+    )
+
+    if has_cuda_array_interface(value):
+        return cuda_array_to_host(value)
+    return value
+
+
+def _cast_return(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+    """Coerce a dispatch result to the return ``dtype``.
+
+    A device ``value`` that already has ``dtype`` is returned as is: on the
+    cuda_ipc (GPU FFI) path the FFI handler copies its bytes straight into XLA's
+    output buffer, so casting here would force a device->host round-trip.
+    Anything else is cast on the host, since the shim only copies bytes and JAX
+    cannot run inside the FFI callback. tesseract-core does not pin a jacobian
+    endpoint's output dtype, so an endpoint that returns another dtype costs a
+    host round-trip.
+    """
+    if (
+        _on_device([value])
+        and np.dtype(value.__cuda_array_interface__["typestr"]) == dtype
+    ):
         return value
-    return np.asarray(value, dtype=dtype)
+    return np.asarray(_to_host(value), dtype=dtype)
 
 
 def _placeholder(
