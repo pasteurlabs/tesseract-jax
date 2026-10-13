@@ -1,0 +1,9 @@
+name: "gpu_mixed_dtype"
+version: "0.1.0"
+description: |
+  Unit tesseract with float32 inputs and float64 outputs on the GPU, computing with JAX or CuPy
+
+# The test process's JAX already preallocates most of the GPU's memory, so a
+# Tesseract computing with JAX must allocate on demand to fit alongside it.
+env:
+  XLA_PYTHON_CLIENT_PREALLOCATE: "false"
