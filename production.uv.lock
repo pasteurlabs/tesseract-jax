@@ -3265,8 +3265,8 @@ wheels = [
 
 [[package]]
 name = "tesseract-core"
-version = "1.14.1.dev39+g87b97fe3e"
-source = { git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd#87b97fe3e11eb6776c511243b7ef932755403bcd" }
+version = "1.14.1.dev56+g7be73a362"
+source = { git = "https://github.com/pasteurlabs/tesseract-core?rev=7be73a3621c4a3257b998b950af08592a896d7ea#7be73a3621c4a3257b998b950af08592a896d7ea" }
 dependencies = [
     { name = "jinja2" },
     { name = "numpy" },
@@ -3360,9 +3360,9 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
-    { name = "tesseract-core", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'", git = "https://github.com/pasteurlabs/tesseract-core?rev=87b97fe3e11eb6776c511243b7ef932755403bcd" },
+    { name = "tesseract-core", git = "https://github.com/pasteurlabs/tesseract-core?rev=7be73a3621c4a3257b998b950af08592a896d7ea" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'", git = "https://github.com/pasteurlabs/tesseract-core?rev=7be73a3621c4a3257b998b950af08592a896d7ea" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'", git = "https://github.com/pasteurlabs/tesseract-core?rev=7be73a3621c4a3257b998b950af08592a896d7ea" },
     { name = "typeguard", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "docs"]
