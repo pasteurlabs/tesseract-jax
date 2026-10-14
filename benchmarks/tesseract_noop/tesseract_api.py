@@ -14,8 +14,13 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    """Identity function - returns input unchanged."""
-    return OutputSchema(result=inputs.data)
+    """Identity function - returns input unchanged.
+
+    Returns a plain dict, not ``OutputSchema(...)``: the validating
+    constructor calls ``np.asarray`` on its arguments, which raises on a
+    tracer under ``apply_tesseract(..., traceable=True)``.
+    """
+    return {"result": inputs.data}
 
 
 def abstract_eval(abstract_inputs):

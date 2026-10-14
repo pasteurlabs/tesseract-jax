@@ -29,7 +29,7 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return OutputSchema(y=inputs.x * 2.0, backend="reference", converged=True)
+    return {"y": inputs.x * 2.0, "backend": "reference", "converged": True}
 
 
 def abstract_eval(abstract_inputs: Any) -> dict:

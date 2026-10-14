@@ -10,6 +10,18 @@ T = TypeVar("T")
 type PyTree = Any
 
 
+def to_shape_dtype_pytree(pytree: PyTree) -> PyTree:
+    """Replace each array leaf with ``{"shape": ..., "dtype": ...}``; other leaves pass through."""
+    return jax.tree.map(
+        lambda x: (
+            {"shape": x.shape, "dtype": x.dtype.name}
+            if isinstance(x, (jax.Array, np.ndarray))
+            else x
+        ),
+        pytree,
+    )
+
+
 @runtime_checkable
 class TransportArray(Protocol):
     """Structural type for an array crossing the dispatch boundary.
