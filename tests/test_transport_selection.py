@@ -109,10 +109,9 @@ def test_host_lowering_requests_host_outputs(
 ):
     """Compiled for CPU, no dispatch asks for GPU arrays by reference.
 
-    The client that requests cuda_ipc asks for ``gpu_transport=none`` instead,
-    and a ``from_url`` client asks for nothing, which the server answers with
-    host arrays. The host callback moves the arrays through the host anyway.
-    Neither checks whether cuda_ipc works, which would need a GPU.
+    Both the client that requests cuda_ipc and a ``from_url`` client ask for
+    ``gpu_transport=none``. The host callback moves the arrays through the host
+    anyway. Neither checks whether cuda_ipc works, which would need a GPU.
     """
     tess = served_cuda_ipc_vectoradd_tesseract
     if client == "from_url":
@@ -135,8 +134,5 @@ def test_host_lowering_requests_host_outputs(
     np.testing.assert_array_equal(c, np.arange(8) + 1.0)
     apply_accepts = [accept for url, accept in sent if url.endswith("/apply")]
     assert len(apply_accepts) == 1
-    if client == "served":
-        assert apply_accepts[0].endswith("; gpu_transport=none")
-    else:
-        assert apply_accepts == [None]
+    assert apply_accepts[0].endswith("; gpu_transport=none")
     assert not any(url.endswith("/check_gpu_transport") for url, _ in sent)
