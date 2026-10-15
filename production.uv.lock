@@ -3265,8 +3265,8 @@ wheels = [
 
 [[package]]
 name = "tesseract-core"
-version = "1.14.1.dev41+g75eacec68"
-source = { git = "https://github.com/pasteurlabs/tesseract-core?rev=75eacec68229d3167564cd75699ff1489dbd68cc#75eacec68229d3167564cd75699ff1489dbd68cc" }
+version = "1.15.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jinja2" },
     { name = "numpy" },
@@ -3279,6 +3279,10 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/dc/35a2535f21ab001b30c91f64c24e4786363859565110d8b8263a968598cc/tesseract_core-1.15.0.tar.gz", hash = "sha256:5d6d6dedaeac0a4c39c7b732fd139746dce5f8e8a2802cd5fb5ea013e76b9ab3", size = 1465673, upload-time = "2026-10-15T18:43:38.22Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/0f/c28747f9b8be4b8af45ca7056d6c9bb9394829c2bea98f5b645ae2f28393/tesseract_core-1.15.0-py3-none-any.whl", hash = "sha256:890e188236f5f06fd463e5655706d14c6a79ed022a08716a35b00865d1313a73", size = 263317, upload-time = "2026-10-15T18:43:36.338Z" },
 ]
 
 [package.optional-dependencies]
@@ -3360,9 +3364,9 @@ requires-dist = [
     { name = "sphinx-design", marker = "extra == 'docs'" },
     { name = "sphinxext-opengraph", marker = "extra == 'dev'" },
     { name = "sphinxext-opengraph", marker = "extra == 'docs'" },
-    { name = "tesseract-core", git = "https://github.com/pasteurlabs/tesseract-core?rev=75eacec68229d3167564cd75699ff1489dbd68cc" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'", git = "https://github.com/pasteurlabs/tesseract-core?rev=75eacec68229d3167564cd75699ff1489dbd68cc" },
-    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'", git = "https://github.com/pasteurlabs/tesseract-core?rev=75eacec68229d3167564cd75699ff1489dbd68cc" },
+    { name = "tesseract-core", specifier = ">=1.15.0" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'dev'" },
+    { name = "tesseract-core", extras = ["runtime"], marker = "extra == 'docs'" },
     { name = "typeguard", marker = "extra == 'dev'" },
 ]
 provides-extras = ["dev", "docs"]
