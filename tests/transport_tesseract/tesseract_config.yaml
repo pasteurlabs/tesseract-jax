@@ -1,0 +1,10 @@
+name: "transport"
+version: "0.1.0"
+description: |
+  Unit tesseract that computes with NumPy, JAX or CuPy, for exercising every dispatch transport
+
+build_config:
+  # Built into an image only by the container GPU tests, which compute with CuPy.
+  # libcudart comes from the CuPy wheel, and the GPU driver is injected by the
+  # container runtime, so the default base image is enough.
+  target_platform: "native"

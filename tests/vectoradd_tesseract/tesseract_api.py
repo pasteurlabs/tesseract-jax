@@ -4,9 +4,10 @@
 
 from typing import Any
 
-import numpy as np
+import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 
 class InputSchema(BaseModel):
@@ -23,7 +24,7 @@ class OutputSchema(BaseModel):
 def apply(inputs: InputSchema) -> OutputSchema:
     """Adds two vectors `a` and `b`."""
     return OutputSchema(
-        c=inputs.a + inputs.b,
+        c=as_jax_array(inputs.a) + as_jax_array(inputs.b),
     )
 
 
@@ -44,9 +45,9 @@ def jacobian_vector_product(
 
     Since dc/da = 1 and b is not differentiable, the JVP is just the tangent of a.
     """
-    return {
-        "c": tangent_vector.get("a", np.zeros_like(inputs.a)),
-    }
+    if "a" not in tangent_vector:
+        return {"c": jnp.zeros(inputs.a.shape, dtype=inputs.a.dtype)}
+    return {"c": as_jax_array(tangent_vector["a"])}
 
 
 def jacobian(
@@ -56,7 +57,7 @@ def jacobian(
 ):
     """Full Jacobian for c = a + b: dc/da = I; b is non-differentiable."""
     n = inputs.a.shape[0]
-    eye = np.eye(n, dtype=np.float32)
+    eye = jnp.eye(n, dtype=jnp.float32)
     return {dy: {dx: eye for dx in jac_inputs} for dy in jac_outputs}
 
 
@@ -66,6 +67,4 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ):
-    return {
-        "a": cotangent_vector["c"],
-    }
+    return {"a": as_jax_array(cotangent_vector["c"])}

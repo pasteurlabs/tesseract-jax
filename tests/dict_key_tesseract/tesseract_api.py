@@ -8,9 +8,10 @@ A state dict is the obvious thing to put in one, and its keys carry dots.
 
 from typing import Any
 
-import numpy as np
+import jax.numpy as jnp
 from pydantic import BaseModel
 from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime.jax_recipes import as_jax_array, as_jax_arrays
 
 
 class InputSchema(BaseModel):
@@ -22,8 +23,8 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    p = inputs.model_dump()["params"]
-    return {"result": sum(2.0 * np.asarray(v, np.float32) for v in p.values())}
+    p = as_jax_arrays(inputs.model_dump()["params"])
+    return {"result": sum(2.0 * v.astype(jnp.float32) for v in p.values())}
 
 
 def vector_jacobian_product(
@@ -32,7 +33,7 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector: dict[str, Any],
 ) -> dict[str, Any]:
-    ct = np.asarray(cotangent_vector["result"], np.float32)
+    ct = as_jax_array(cotangent_vector["result"]).astype(jnp.float32)
     return {k: 2.0 * ct for k in vjp_inputs}
 
 

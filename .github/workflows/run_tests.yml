@@ -126,9 +126,9 @@ jobs:
           uv sync --python ${{ matrix.cuda.python-version }} --extra dev --frozen
 
       # cupy and jax with CUDA support are not declared dependencies (cupy is
-      # only needed to *produce* GPU arrays in the test Tesseract's compute, and
-      # jax needs a CUDA backend to place arrays on-device); install builds for
-      # the matrix CUDA major version into the same environment here. The floor
+      # only needed to *produce* GPU arrays in the CuPy-producer tests, and jax
+      # needs a CUDA backend to place arrays on-device); install builds for the
+      # matrix CUDA major version into the same environment here. The floor
       # leg pins jax to its declared minimum; latest legs leave it unconstrained.
       - name: Install GPU array frameworks
         run: |
@@ -146,7 +146,11 @@ jobs:
           uv run --no-sync python -c "import jax; print('jax', jax.__version__, 'devices', jax.devices())"
           uv run --no-sync python -c "import tesseract_jax.gpu_ffi as g; print('shim available:', g.is_available())"
 
+      # TESSERACT_JAX_GPU_REQUIRED=1 turns a missing GPU or CuPy into a test
+      # failure, so no GPU test can pass here by skipping.
       - name: Run GPU test suite
+        env:
+          TESSERACT_JAX_GPU_REQUIRED: "1"
         run: |
           set -o pipefail
           uv run --no-sync pytest \
@@ -159,7 +163,7 @@ jobs:
             --cov-branch
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v7.0.0
+        uses: codecov/codecov-action@v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: pasteurlabs/tesseract-jax

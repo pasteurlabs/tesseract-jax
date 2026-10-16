@@ -75,7 +75,7 @@ jobs:
 
       - name: Build native wheel
         # cibuildwheel publishes no floating major tag; pin a full version.
-        uses: pypa/cibuildwheel@v4.2.1
+        uses: pypa/cibuildwheel@v4.3.0
         env:
           # abi3: build once on 3.12; the wheel is tagged cp312-abi3 by the hook.
           CIBW_BUILD: "cp312-*"

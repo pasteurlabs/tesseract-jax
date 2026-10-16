@@ -17,9 +17,9 @@ class TransportArray(Protocol):
     The endpoint methods are transport-agnostic: the CPU host-callback lowering
     passes real NumPy arrays, while the GPU FFI lowering passes bare
     ``__cuda_array_interface__`` device views (see
-    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back the runtime's
-    ``IpcDeviceArray``. All the dispatch code reads off them is ``shape`` and
-    ``dtype``, so this protocol captures exactly that surface.
+    :class:`tesseract_jax.gpu_ffi._DeviceArrayView`) and gets back device or host
+    arrays. All the dispatch code reads off them is ``shape`` and ``dtype``, so
+    this protocol captures exactly that surface.
     """
 
     @property
@@ -100,12 +100,18 @@ def _split_path(path: str) -> list[str]:
     """Split a path on the dots that separate segments.
 
     A dot inside ``{...}`` belongs to the key, so ``a.{b.c}`` is two segments
-    rather than three.
+    rather than three. A backslash-escaped character is kept as it is, so an
+    escaped brace in a key does not end it.
     """
     parts: list[str] = []
     buf: list[str] = []
     depth = 0
-    for char in path:
+    chars = iter(path)
+    for char in chars:
+        if char == "\\":
+            buf.append(char)
+            buf.append(next(chars, ""))
+            continue
         if char == "{":
             depth += 1
         elif char == "}":
@@ -119,26 +125,43 @@ def _split_path(path: str) -> list[str]:
     return parts
 
 
+def _brace_dict_key(key: str) -> str:
+    r"""A dict key as a path segment, ``{key}``.
+
+    ``{``, ``}`` and ``\`` in the key are escaped with a backslash, which is
+    how tesseract-core tells them from the braces around it.
+    """
+    escaped = "".join("\\" + c if c in "{}\\" else c for c in key)
+    return "{" + escaped + "}"
+
+
 def _merge_path(
     explicit_path: str | Sequence[str], array_paths: Iterable[str]
 ) -> tuple[str, str | None]:
-    """Merges and formats explicit path with array paths containing templates.
+    r"""Merges and formats explicit path with array paths containing templates.
 
     Returns a tuple of (formatted_path, matched_template) where matched_template
     is the template string that matched, or None if no template matched.
 
-    ``explicit_path`` may be given as the already-joined string or as the
-    segments it was built from. A dict key is free to contain dots, so passing
-    the segments is the only way to say where one ends; joining first and
-    splitting again cannot tell ``{"a": {"b.c": v}}`` from ``{"a": {"b": {"c": v}}}``.
+    ``explicit_path`` may be given as the segments a pytree path was built
+    from, with dict keys as they are, or as a joined path in Tesseract format,
+    such as one this function returned. A dict key is free to contain dots, so
+    passing the segments is the only way to say where one ends, since joining
+    first and splitting again cannot tell ``{"a": {"b.c": v}}`` from
+    ``{"a": {"b": {"c": v}}}``.
 
     Examples:
         _merge_path('alpha.beta.x', ['alpha.beta.{}']) -> ('alpha.beta.{x}', 'alpha.beta.{}')
         _merge_path('delta.[2]', ['delta.[]']) -> ('delta.[2]', 'delta.[]')
         _merge_path('epsilon.k', ['alpha.{}']) -> ('epsilon.k', None)
         _merge_path(['params', 'a.b'], ['params.{}']) -> ('params.{a.b}', 'params.{}')
+        _merge_path(['params', '{x}'], ['params.{}']) -> ('params.{\{x\}}', 'params.{}')
     """
-    if isinstance(explicit_path, str):
+    # Only a joined path can hold segments that are braced already, since
+    # batching re-merges paths this function produced. A segment is a raw key,
+    # however it is spelled.
+    joined = isinstance(explicit_path, str)
+    if joined:
         explicit_parts = _split_path(explicit_path)
     else:
         explicit_parts = list(explicit_path)
@@ -151,14 +174,13 @@ def _merge_path(
         result_parts = []
         matched = True
         for tp, ep in zip(template_parts, explicit_parts, strict=True):
-            if tp == ep:
-                result_parts.append(ep)
-            elif tp == "{}":
-                # Idempotent: batching re-merges paths this function produced.
-                already = ep.startswith("{") and ep.endswith("}")
-                result_parts.append(ep if already else f"{{{ep}}}")
+            if tp == "{}":
+                braced = joined and ep.startswith("{") and ep.endswith("}")
+                result_parts.append(ep if braced else _brace_dict_key(ep))
             elif tp == "[]":
                 result_parts.append(ep)  # already "[n]"
+            elif tp == ep:
+                result_parts.append(ep)
             else:
                 matched = False
                 break
