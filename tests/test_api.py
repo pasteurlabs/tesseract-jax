@@ -687,6 +687,34 @@ def test_vjp_with_static_input_between_arrays(static_input_tess):
     np.testing.assert_allclose(grad, grad_raw, rtol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_agrees_across_vmap_methods(batched_tess, vmap_method):
+    """Per-example gradients must agree with the unbatched gradient.
+
+    Under ``vmap(grad(f))`` the vjp bind gets batched primals but an unbatched
+    cotangent, which the vectorized strategies must send with the batch size
+    of the outputs it belongs to. ``y`` is unbatched yet differentiated, so it
+    needs a batch dimension too to get one gradient per example rather than
+    their sum.
+    """
+
+    def loss(x, y):
+        out = apply_tesseract(batched_tess, {"x": x, "y": y}, vmap_method=vmap_method)
+        return out["result"].sum()
+
+    grad = jax.grad(loss, argnums=(0, 1))
+    xs = jnp.stack([jnp.arange(3.0) * s for s in (1.0, 2.0)])
+    y = jnp.linspace(0.5, 1.5, 3)
+    got = jax.vmap(grad, in_axes=(0, None))(xs, y)
+    expected = [jnp.stack(g) for g in zip(*(grad(x, y) for x in xs), strict=True)]
+
+    for g, e in zip(got, expected, strict=True):
+        assert g.shape == e.shape
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
 def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
