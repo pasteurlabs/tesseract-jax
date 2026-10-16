@@ -151,6 +151,12 @@ def served_gpu_mixed_dtype_tesseract():
     yield from _served_gpu_tesseract("mixed_dtype_tesseract")
 
 
+@pytest.fixture(scope="module")
+def served_gpu_vectoradd_tesseract():
+    """``vectoradd_tesseract`` over cuda_ipc, which also accepts host inputs."""
+    yield from _served_gpu_tesseract("vectoradd_tesseract")
+
+
 def _local_gpu_tesseract(*, env: dict[str, str] | None = None, **kwargs):
     """Load ``transport_tesseract`` in-process, computing with CuPy.
 

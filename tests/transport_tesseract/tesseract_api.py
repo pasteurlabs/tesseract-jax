@@ -62,7 +62,7 @@ def _asxp(x: Any) -> Any:
 class InputSchema(BaseModel):
     a: Differentiable[Array[(None,), Float32]] = Field(description="Vector a")
     b: Differentiable[Array[(None,), Float32]] = Field(description="Vector b")
-    scale: Float32 = Field(default=np.float32(2.0), description="Scalar scale")
+    scale: Float32 = Field(default=2.0, description="Scalar scale")
     mask: Array[(None,), Float32] | None = Field(
         default=None,
         description="Non-differentiable elementwise mask; defaults to all-ones.",

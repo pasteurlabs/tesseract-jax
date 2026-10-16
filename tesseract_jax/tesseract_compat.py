@@ -43,7 +43,7 @@ def _on_device(values: "list | tuple") -> bool:
     return any(has_cuda_array_interface(v) for v in values)
 
 
-def _to_host(value: TransportArray) -> TransportArray:
+def to_host(value: TransportArray) -> TransportArray:
     """Copy a GPU array to a host NumPy array, and return anything else as is.
 
     Lazy import for the same reason as in :func:`_on_device`.
@@ -75,7 +75,7 @@ def _cast_return(
         and np.dtype(value.__cuda_array_interface__["typestr"]) == dtype
     ):
         return value
-    return np.asarray(_to_host(value), dtype=dtype)
+    return np.asarray(to_host(value), dtype=dtype)
 
 
 def _placeholder(
@@ -167,14 +167,19 @@ def _discarded_slot(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
 # learns to drive them.
 _SUPPORTED_TRANSPORTS = frozenset({"cuda_ipc"})
 
+# Ends every error about a GPU transport that cannot be used.
+HOST_COPY_HINT = (
+    "To copy GPU arrays to the host instead, pass "
+    "tesseract.with_encoding(gpu_transport='none') to apply_tesseract."
+)
+
 
 def _equality_key(tesseract: Tesseract) -> tuple:
-    """What two Tesseracts share when calls through them are interchangeable.
+    """The connection and requested encoding, which make calls interchangeable.
 
-    Their connection (the one a Tesseract shares with its ``with_encoding``
-    views) and the encoding they request. Taken once, when a wrapper is built,
-    so that its hash stays fixed even if the Tesseract is torn down or served
-    again later.
+    A Tesseract shares its connection with its ``with_encoding`` views. A
+    wrapper takes the key once, when it is built, so its hash stays fixed even
+    if the Tesseract is torn down or served again.
     """
     return tesseract._client, tesseract.current_encoding
 
@@ -215,16 +220,14 @@ class Jaxeract:
 
         self._equality_key = _equality_key(self.client)
 
-    # Every attribute above is derived from ``self.client``, so two wrappers around
-    # the same Tesseract are interchangeable. Saying so matters: this object is a
-    # parameter of ``tesseract_dispatch_p``, and ``apply_tesseract`` builds a fresh
-    # one per call, so with the inherited identity semantics two otherwise identical
-    # calls lower to custom calls that XLA cannot recognise as equal and therefore
-    # cannot common up. Equality goes by the connection and the encoding (see
-    # ``_equality_key``) rather than the URL or schema, so that distinct Tesseracts stay
-    # distinct while ``with_encoding`` views that request the same encoding, such
-    # as one built afresh for every call, compare equal. The GPU transport is not
-    # compared, since it follows from these two (see ``resolve_gpu_transport``).
+    # This object is a parameter of ``tesseract_dispatch_p``, and ``apply_tesseract``
+    # builds a fresh one per call. With identity semantics, two identical calls would
+    # lower to custom calls that XLA cannot recognize as equal and therefore cannot
+    # common up. Every attribute above is derived from ``self.client``, so equality
+    # goes by ``_equality_key`` instead of the URL or schema. Distinct Tesseracts
+    # stay distinct, while ``with_encoding`` views that request the same encoding,
+    # such as one built afresh for every call, compare equal. The GPU transport
+    # follows from the key (see ``resolve_gpu_transport``), so it is not compared.
     def __eq__(self, other: object) -> bool:
         """Whether ``other`` wraps an equivalent Tesseract."""
         if not isinstance(other, Jaxeract):
@@ -249,9 +252,7 @@ class Jaxeract:
             raise ValueError(
                 f"The Tesseract requests gpu_transport={gpu_transport!r}, which "
                 f"tesseract-jax cannot drive (supported: "
-                f"{['none', *sorted(_SUPPORTED_TRANSPORTS)]}). Pass "
-                "tesseract.with_encoding(gpu_transport='none') to apply_tesseract "
-                "to copy GPU arrays to the host instead."
+                f"{['none', *sorted(_SUPPORTED_TRANSPORTS)]}). {HOST_COPY_HINT}"
             )
         return gpu_transport
 

@@ -3,12 +3,11 @@
 
 """GPU-direct dispatch tests: the native FFI (CUDA) lowering of the primitive.
 
-On GPU, ``apply_tesseract`` lowers ``tesseract_dispatch`` to a native XLA FFI
-custom call when the Tesseract uses a device transport, keeping data on the
-device. There is no separate entry point: the ``cuda`` platform lowering routes
-through the FFI path when the Tesseract resolves to a device transport, and
-without one it falls back to the host-callback lowering (a device->host->device
-round-trip). The served fixtures are created with ``gpu_transport="cuda_ipc"``.
+On GPU, the ``cuda`` platform lowering of ``tesseract_dispatch`` is a native XLA
+FFI custom call that keeps data on the device, provided the Tesseract resolves
+to a device transport. Without one, it falls back to the host-callback lowering
+(a device->host->device round-trip). The served fixtures are created with
+``gpu_transport="cuda_ipc"``.
 
 Most of these use a served (subprocess) GPU Tesseract, since CUDA IPC is
 cross-process and cannot be self-opened. The ``local_*`` tests load the same
@@ -34,17 +33,9 @@ import pytest
 from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
+from tesseract_jax.testing import is_on_gpu, to_numpy
 
 pytestmark = pytest.mark.gpu
-
-
-def _to_np(x):
-    get = getattr(x, "get", None)
-    return get() if callable(get) else np.asarray(x)
-
-
-def _on_gpu(x) -> bool:
-    return any(d.platform == "gpu" for d in x.devices())
 
 
 @contextlib.contextmanager
@@ -91,9 +82,9 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
         a, b
     )
     c = out["c"]
-    assert _on_gpu(c)
+    assert is_on_gpu(c)
     np.testing.assert_allclose(
-        _to_np(c), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+        to_numpy(c), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
 
 
@@ -110,9 +101,9 @@ def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
         lambda x: apply_tesseract(served_gpu_mixed_dtype_tesseract, {"x": x})["y"]
     )(x)
 
-    assert _on_gpu(y)
-    assert _to_np(y).dtype == np.float64
-    np.testing.assert_allclose(_to_np(y), np.asarray(x) * 2.0, rtol=0, atol=0)
+    assert is_on_gpu(y)
+    assert to_numpy(y).dtype == np.float64
+    np.testing.assert_allclose(to_numpy(y), np.asarray(x) * 2.0, rtol=0, atol=0)
 
 
 def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
@@ -174,37 +165,41 @@ def test_apply_matches_host_callback(served_gpu_tesseract, served_transport_tess
         b_cpu = jnp.asarray(np.asarray(b))
         cpu = apply_tesseract(served_transport_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
 
-    assert _on_gpu(gpu)
-    np.testing.assert_array_equal(_to_np(gpu), np.asarray(cpu))
+    assert is_on_gpu(gpu)
+    np.testing.assert_array_equal(to_numpy(gpu), np.asarray(cpu))
 
 
 @pytest.mark.parametrize(
     ("client", "expect_ffi"),
     [("served", True), ("from_url", True), ("host_view", False)],
 )
-def test_gpu_transport_selects_lowering(served_gpu_tesseract, client, expect_ffi):
+def test_gpu_transport_selects_lowering(
+    served_gpu_vectoradd_tesseract, client, expect_ffi
+):
     """cuda_ipc lowers to the FFI call, and a view requesting ``"none"`` opts out.
 
     The served client requests cuda_ipc, and a ``from_url`` client of the same
-    server, which requests nothing, uses it once it checked that it works. Both
+    server, which requests nothing, uses it once it has checked that it works. Both
     lowerings compute the same result, so the test inspects the lowered program
-    for the FFI target. The ``"none"`` view asks for host outputs despite the
-    Tesseract's cuda_ipc transport, and JAX moves them back on-device.
+    for the FFI target. The ``"none"`` view sends host inputs and asks for host
+    outputs despite the Tesseract's cuda_ipc transport, and JAX moves them back
+    on-device.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
+    served = served_gpu_vectoradd_tesseract
     tess = {
-        "served": served_gpu_tesseract,
-        "from_url": Tesseract.from_url(served_gpu_tesseract._client.url),
-        "host_view": served_gpu_tesseract.with_encoding(gpu_transport="none"),
+        "served": served,
+        "from_url": Tesseract.from_url(served._client.url),
+        "host_view": served.with_encoding(gpu_transport="none"),
     }[client]
     a = jnp.ones(8, dtype=jnp.float32)
     f = jax.jit(lambda a, b: apply_tesseract(tess, {"a": a, "b": b})["c"])
     assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
 
     c = f(a, a)
-    assert _on_gpu(c)
-    np.testing.assert_allclose(_to_np(c), np.full(8, 3.0, np.float32))
+    assert is_on_gpu(c)
+    np.testing.assert_allclose(to_numpy(c), np.full(8, 2.0, np.float32))
 
 
 def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
@@ -237,11 +232,11 @@ def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
             assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
 
         c = f(a, b)
-        assert _on_gpu(c)
-        np.testing.assert_allclose(_to_np(c), np.arange(8) + 1.0)
+        assert is_on_gpu(c)
+        np.testing.assert_allclose(to_numpy(c), np.arange(8) + 1.0)
         g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
-        assert _on_gpu(g)
-        np.testing.assert_allclose(_to_np(g), np.ones(8))
+        assert is_on_gpu(g)
+        np.testing.assert_allclose(to_numpy(g), np.ones(8))
 
         with pytest.raises(RuntimeError, match="does not work between"):
             jax.jit(lambda a, b: apply_tesseract(served, {"a": a, "b": b}))(a, b)
@@ -258,9 +253,9 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
         return apply_tesseract(served_gpu_tesseract, {"a": a, "b": b})["c"].sum()
 
     g = jax.jit(jax.grad(loss))(a)
-    assert _on_gpu(g)
+    assert is_on_gpu(g)
     # d/da sum(a*2 + b) = 2
-    np.testing.assert_allclose(_to_np(g), np.full((512,), 2.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(g), np.full((512,), 2.0), rtol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -283,8 +278,8 @@ def test_local_client_selects_lowering_by_its_transport(
     assert (FFI_TARGET_NAME in f.lower(a, a).as_text()) == expect_ffi
 
     c = f(a, a)
-    assert _on_gpu(c)
-    np.testing.assert_allclose(_to_np(c), np.asarray(a) * 3.0, rtol=1e-6)
+    assert is_on_gpu(c)
+    np.testing.assert_allclose(to_numpy(c), np.asarray(a) * 3.0, rtol=1e-6)
 
 
 def test_local_client_device_results_on_host_path(local_gpu_tesseract):
@@ -307,13 +302,13 @@ def test_local_client_device_results_on_host_path(local_gpu_tesseract):
         )["c"]
 
     c = jax.jit(f)(a)
-    np.testing.assert_allclose(_to_np(c), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(c), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
 
     g = jax.jit(jax.grad(lambda a: f(a).sum()))(a)
-    np.testing.assert_allclose(_to_np(g), np.full(n, 2.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(g), np.full(n, 2.0), rtol=1e-6)
 
     jac = jax.jit(jax.jacrev(lambda a: f(a, materialize_jacobian=True)))(a)
-    np.testing.assert_allclose(_to_np(jac), np.eye(n) * 2.0, rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(jac), np.eye(n) * 2.0, rtol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -349,12 +344,12 @@ def test_host_results_on_ffi_path(request, monkeypatch, tess_fixture, residency_
         return
 
     c = jax.jit(f)(a)
-    assert _on_gpu(c)
-    np.testing.assert_allclose(_to_np(c), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
+    assert is_on_gpu(c)
+    np.testing.assert_allclose(to_numpy(c), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
 
     g = jax.jit(jax.grad(lambda a: f(a).sum()))(a)
-    assert _on_gpu(g)
-    np.testing.assert_allclose(_to_np(g), np.full(n, 2.0), rtol=1e-6)
+    assert is_on_gpu(g)
+    np.testing.assert_allclose(to_numpy(g), np.full(n, 2.0), rtol=1e-6)
 
 
 # The large size gives the endpoint's CuPy kernel time to still be running when
@@ -375,10 +370,10 @@ def test_local_apply_stays_on_device(local_cuda_ipc_gpu_tesseract, n):
         lambda a, b: apply_tesseract(local_cuda_ipc_gpu_tesseract, {"a": a, "b": b})
     )(a, b)
 
-    assert _on_gpu(out["c"])
+    assert is_on_gpu(out["c"])
     expected = np.asarray(a) * 2.0 + np.asarray(b)
-    np.testing.assert_allclose(_to_np(out["c"]), expected, rtol=1e-6)
-    np.testing.assert_allclose(_to_np(out["c_sum"]), [expected.sum()], rtol=1e-5)
+    np.testing.assert_allclose(to_numpy(out["c"]), expected, rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(out["c_sum"]), [expected.sum()], rtol=1e-5)
 
 
 def test_local_derivatives_stay_on_device(local_cuda_ipc_gpu_tesseract):
@@ -395,19 +390,19 @@ def test_local_derivatives_stay_on_device(local_cuda_ipc_gpu_tesseract):
         )
 
     g = jax.jit(jax.grad(lambda a: f(a, b)["c"].sum()))(a)
-    assert _on_gpu(g)
-    np.testing.assert_allclose(_to_np(g), np.full(n, 2.0), rtol=1e-6)
+    assert is_on_gpu(g)
+    np.testing.assert_allclose(to_numpy(g), np.full(n, 2.0), rtol=1e-6)
 
     ta = jnp.ones(n, dtype=jnp.float32)
     tb = jnp.zeros(n, dtype=jnp.float32)
     _, tangent = jax.jit(lambda a, b: jax.jvp(f, (a, b), (ta, tb)))(a, b)
-    assert _on_gpu(tangent["c"])
-    np.testing.assert_allclose(_to_np(tangent["c"]), np.full(n, 2.0), rtol=1e-6)
-    assert np.all(np.isnan(_to_np(tangent["c_sum"])))
+    assert is_on_gpu(tangent["c"])
+    np.testing.assert_allclose(to_numpy(tangent["c"]), np.full(n, 2.0), rtol=1e-6)
+    assert np.all(np.isnan(to_numpy(tangent["c_sum"])))
 
     jac = jax.jit(jax.jacrev(lambda a: f(a, b, materialize_jacobian=True)["c"]))(a)
-    assert _on_gpu(jac)
-    np.testing.assert_allclose(_to_np(jac), np.eye(n) * 2.0, rtol=1e-6)
+    assert is_on_gpu(jac)
+    np.testing.assert_allclose(to_numpy(jac), np.eye(n) * 2.0, rtol=1e-6)
 
 
 def test_serial_reuse_ring1(served_gpu_tesseract):
@@ -421,7 +416,7 @@ def test_serial_reuse_ring1(served_gpu_tesseract):
         out = f(a, b)
         out.block_until_ready()
         np.testing.assert_allclose(
-            _to_np(out), np.full((512,), i * 2.0 + 2 * i, dtype=np.float32), rtol=1e-6
+            to_numpy(out), np.full((512,), i * 2.0 + 2 * i, dtype=np.float32), rtol=1e-6
         )
 
 
@@ -445,10 +440,10 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
         )["c"]
 
     jac = jax.jit(jax.jacrev(f))(a)
-    assert _on_gpu(jac)
+    assert is_on_gpu(jac)
     # c = a*scale + b with default scale=2, so dc/da = 2*I.
     np.testing.assert_allclose(
-        _to_np(jac), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
+        to_numpy(jac), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
     )
 
 
@@ -480,7 +475,7 @@ def test_jacobian_keeps_float32_precision(
 
     got = jax.jit(jac(f))(a)
     # c = (a*scale + b)*mask with default scale=2, so dc/da = diag(2*mask).
-    np.testing.assert_array_equal(_to_np(got), np.diag(2.0 * np.asarray(mask)))
+    np.testing.assert_array_equal(to_numpy(got), np.diag(2.0 * np.asarray(mask)))
 
 
 @pytest.mark.parametrize("materialize_jacobian", [None, False])
@@ -510,7 +505,7 @@ def test_jacobian_mixed_dtype(
     expected = jac(lambda x: (2.0 * x).astype(jnp.float64))(x)
     got = jax.jit(jac(f))(x)
     assert got.dtype == expected.dtype
-    np.testing.assert_array_equal(_to_np(got), np.asarray(expected))
+    np.testing.assert_array_equal(to_numpy(got), np.asarray(expected))
 
 
 def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
@@ -535,9 +530,9 @@ def test_grad_with_nondiff_array_input_through_gpu_ffi(served_gpu_tesseract):
         return out["c"].sum()
 
     g = jax.jit(jax.grad(loss, argnums=0))(a, mask)
-    assert _on_gpu(g)
+    assert is_on_gpu(g)
     # c = (a*scale + b)*mask, scale=2 => d/da sum(c) = 2*mask.
-    np.testing.assert_allclose(_to_np(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
 
 
 def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
@@ -561,17 +556,17 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
     primal, tangent = jax.jit(lambda a, b, ta, tb: jax.jvp(f, (a, b), (ta, tb)))(
         a, b, ta, tb
     )
-    assert _on_gpu(tangent["c"])
+    assert is_on_gpu(tangent["c"])
     # The discarded placeholder for c_sum must not corrupt the real results:
     # primal c = a*scale + b (scale=2), and dc = scale*da + db = 2*ta + tb = 2.
     np.testing.assert_allclose(
-        _to_np(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
+        to_numpy(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
     )
-    np.testing.assert_allclose(_to_np(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
     # The non-differentiable c_sum output's tangent is the discarded placeholder:
     # it must come back NaN-filled on-device, matching the host path's poison.
-    assert _on_gpu(tangent["c_sum"])
-    assert np.all(np.isnan(_to_np(tangent["c_sum"])))
+    assert is_on_gpu(tangent["c_sum"])
+    assert np.all(np.isnan(to_numpy(tangent["c_sum"])))
 
 
 def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
@@ -659,10 +654,11 @@ def test_result_shape_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
 def test_result_strides_at_ffi_boundary(served_gpu_tesseract, contiguous):
     """A strided result must raise, while explicit row-major strides are accepted.
 
-    The handler copies each result as one flat byte range, so a strided array
-    (which an in-process endpoint can hand over, unlike cuda_ipc, which rejects
-    them) would be misread. We re-expose the first result with explicit strides:
-    its own itemsize (row-major, copied as usual) or 0 (a broadcast, rejected).
+    The handler copies each result as one flat byte range, so it would misread a
+    strided array, which an in-process endpoint can hand over (the cuda_ipc
+    encoder rejects them earlier). The test re-exposes the first result with
+    explicit strides, either its itemsize (row-major, copied as usual) or 0 (a
+    broadcast, rejected).
     """
     n = 8
 
@@ -689,7 +685,7 @@ def test_result_strides_at_ffi_boundary(served_gpu_tesseract, contiguous):
         if contiguous:
             c = run()
             np.testing.assert_allclose(
-                _to_np(c), np.arange(n, dtype=np.float32) * 2.0 + 1.0, rtol=1e-6
+                to_numpy(c), np.arange(n, dtype=np.float32) * 2.0 + 1.0, rtol=1e-6
             )
         else:
             with pytest.raises(jax.errors.JaxRuntimeError, match=r"non-contiguous"):
@@ -720,7 +716,7 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
 
     out = jax.jit(pipeline)(a, b)
     expected = (np.asarray(a) * 2.0 + np.asarray(b)) + np.asarray(b)
-    np.testing.assert_allclose(_to_np(out), expected, rtol=1e-6, atol=0)
+    np.testing.assert_allclose(to_numpy(out), expected, rtol=1e-6, atol=0)
 
 
 @pytest.mark.parametrize("n", [100_000, 10_000_000])
@@ -747,6 +743,6 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
     )
     # Warm up tracing/compilation so the timed loop measures steady-state latency.
     f(a, b).block_until_ready()
-    assert _on_gpu(f(a, b))
+    assert is_on_gpu(f(a, b))
 
     benchmark(lambda: f(a, b).block_until_ready())

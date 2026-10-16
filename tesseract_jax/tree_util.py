@@ -146,8 +146,8 @@ def _merge_path(
     ``explicit_path`` may be given as the segments a pytree path was built
     from, with dict keys as they are, or as a joined path in Tesseract format,
     such as one this function returned. A dict key is free to contain dots, so
-    passing the segments is the only way to say where one ends; joining first
-    and splitting again cannot tell ``{"a": {"b.c": v}}`` from
+    passing the segments is the only way to say where one ends, since joining
+    first and splitting again cannot tell ``{"a": {"b.c": v}}`` from
     ``{"a": {"b": {"c": v}}}``.
 
     Examples:

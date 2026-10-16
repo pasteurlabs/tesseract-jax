@@ -21,6 +21,7 @@ import pytest
 from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
+from tesseract_jax.testing import is_on_gpu
 
 pytestmark = pytest.mark.gpu
 
@@ -37,10 +38,6 @@ def gpu_container_image() -> str:
     # The image name comes from the Tesseract's config, the tag from here
     build_tesseract(here / "transport_tesseract", "test")
     return "transport:test"
-
-
-def _on_gpu(x) -> bool:
-    return any(d.platform == "gpu" for d in x.devices())
 
 
 @pytest.mark.parametrize("client", ["served", "from_url"])
@@ -71,10 +68,10 @@ def test_container_round_trip_stays_on_device(gpu_container_image, monkeypatch, 
         assert FFI_TARGET_NAME in f.lower(a, b).as_text()
 
         c = f(a, b)
-        assert _on_gpu(c)
+        assert is_on_gpu(c)
         np.testing.assert_allclose(np.asarray(c), 2 * np.arange(64) + 1.0)
         g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
-        assert _on_gpu(g)
+        assert is_on_gpu(g)
         np.testing.assert_allclose(np.asarray(g), np.full(64, 2.0))
 
 
@@ -106,7 +103,7 @@ def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
             assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
 
         c = f(a, b)
-        assert _on_gpu(c)
+        assert is_on_gpu(c)
         np.testing.assert_allclose(np.asarray(c), 2 * np.arange(8) + 1.0)
         g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
         np.testing.assert_allclose(np.asarray(g), np.full(8, 2.0))

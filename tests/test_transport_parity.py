@@ -21,12 +21,7 @@ import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
-
-
-def _to_np(x):
-    """Host copy of a result array, whether it is a cupy or a jax/numpy array."""
-    get = getattr(x, "get", None)
-    return get() if callable(get) else np.asarray(x)
+from tesseract_jax.testing import to_numpy
 
 
 def test_apply_matches_analytic(transport):
@@ -34,7 +29,7 @@ def test_apply_matches_analytic(transport):
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
     out = jax.jit(lambda a, b: apply_tesseract(transport, {"a": a, "b": b})["c"])(a, b)
     np.testing.assert_allclose(
-        _to_np(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+        to_numpy(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
 
 
@@ -50,7 +45,7 @@ def test_mask_nondiff_array_input(transport):
 
     out = jax.jit(f)(a, b, mask)
     np.testing.assert_allclose(
-        _to_np(out), (np.asarray(a) * 2.0 + np.asarray(b)) * 3.0, rtol=1e-6
+        to_numpy(out), (np.asarray(a) * 2.0 + np.asarray(b)) * 3.0, rtol=1e-6
     )
 
 
@@ -71,7 +66,7 @@ def test_grad_with_nondiff_array_input(transport):
 
     g = jax.jit(jax.grad(loss, argnums=0))(a, mask)
     # c = (a*scale + b)*mask, scale=2 => d/da sum(c) = 2*mask.
-    np.testing.assert_allclose(_to_np(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
 
 
 def test_jvp_nondiff_output_placeholder_is_nan(transport):
@@ -94,12 +89,12 @@ def test_jvp_nondiff_output_placeholder_is_nan(transport):
         a, b, ta, tb
     )
     np.testing.assert_allclose(
-        _to_np(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
+        to_numpy(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
     )
     # dc = scale*da + db = 2*ta + tb = 2.
-    np.testing.assert_allclose(_to_np(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
     # The non-differentiable c_sum's tangent is the discarded placeholder: NaN.
-    assert np.all(np.isnan(_to_np(tangent["c_sum"])))
+    assert np.all(np.isnan(to_numpy(tangent["c_sum"])))
 
 
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev], ids=["fwd", "bwd"])
@@ -122,7 +117,7 @@ def test_materialized_jacobian_modes(transport, jac):
     out = jax.jit(jac(f))(a)
     # c = a*scale + b, scale=2 => dc/da = 2*I.
     np.testing.assert_allclose(
-        _to_np(out), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
+        to_numpy(out), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
     )
 
 
@@ -138,5 +133,5 @@ def test_vmap_batching(transport):
 
     out = jax.jit(jax.vmap(f))(a, b)
     np.testing.assert_allclose(
-        _to_np(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+        to_numpy(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )

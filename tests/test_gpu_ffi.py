@@ -132,8 +132,6 @@ def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
     A call whose Tesseract asks for a device transport must not silently degrade
     to the slow host path. The lowering raises before touching ctx/array_args.
     """
-    from types import SimpleNamespace
-
     import typeguard
 
     from tesseract_jax import primitive
@@ -158,8 +156,6 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
     usable GPU. Selecting a transport and then lowering without a CUDA device is a
     misconfiguration the lowering surfaces rather than silently falling back.
     """
-    from types import SimpleNamespace
-
     import jax
     import typeguard
 
@@ -187,8 +183,6 @@ def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
     A call without a device transport must behave exactly as on CPU, so the GPU
     lowering delegates straight to the host lowering.
     """
-    from types import SimpleNamespace
-
     import typeguard
 
     from tesseract_jax import primitive
@@ -395,8 +389,6 @@ def test_gpu_lowering_falls_back_to_host_without_shim_or_requested_transport(
 
     It warns, and does not ask the Tesseract for a transport it could not use.
     """
-    from types import SimpleNamespace
-
     import typeguard
 
     from tesseract_jax import primitive
@@ -440,11 +432,11 @@ class _FakeDeviceArray:
 
 
 def test_to_host_copies_device_arrays_only():
-    from tesseract_jax.tesseract_compat import _to_host
+    from tesseract_jax.tesseract_compat import to_host
 
     host = np.arange(3.0)
-    np.testing.assert_array_equal(_to_host(_FakeDeviceArray(host)), host)
-    assert _to_host(host) is host
+    np.testing.assert_array_equal(to_host(_FakeDeviceArray(host)), host)
+    assert to_host(host) is host
 
 
 def test_cast_return_keeps_results_on_the_calls_side():

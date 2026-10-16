@@ -24,7 +24,7 @@ from tesseract_core import Tesseract
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
 from tesseract_jax.dispatch_params import DispatchParams
-from tesseract_jax.tesseract_compat import Jaxeract, _to_host
+from tesseract_jax.tesseract_compat import HOST_COPY_HINT, Jaxeract, to_host
 from tesseract_jax.tree_util import (
     TransportArray,
     combine_args,
@@ -522,7 +522,7 @@ def _build_dispatch_closure(
         if gpu_transport == "none":
             # An in-process endpoint may return device arrays even when given
             # host ones, and the host callback needs host arrays.
-            out = tuple(_to_host(r) for r in out)
+            out = tuple(to_host(r) for r in out)
         return out
 
     return dispatch
@@ -596,10 +596,6 @@ def tesseract_dispatch_gpu_lowering(
         return tesseract_dispatch_lowering(ctx, *array_args, params=params)
 
     uses_transport = f"The Tesseract uses gpu_transport={gpu_transport!r}, but"
-    opt_out = (
-        "pass tesseract.with_encoding(gpu_transport='none') to apply_tesseract to "
-        "copy GPU arrays to the host instead."
-    )
 
     if not gpu_ffi.is_available():
         raise RuntimeError(
@@ -607,7 +603,7 @@ def tesseract_dispatch_gpu_lowering(
             "failed to import), so GPU-direct dispatch cannot run. Reinstall "
             "tesseract-jax with the shim built (a source install compiles it via "
             "the hatch build hook; set TESSERACT_JAX_GPU_REQUIRED=1 to make a build "
-            f"failure fatal), or {opt_out}"
+            f"failure fatal). {HOST_COPY_HINT}"
         )
 
     # Every supported device transport is CUDA-based, so this lowering cannot run
@@ -619,7 +615,7 @@ def tesseract_dispatch_gpu_lowering(
     except RuntimeError as exc:
         raise RuntimeError(
             f"{uses_transport} JAX sees no CUDA device. Install a CUDA-enabled jaxlib and "
-            f"run on a GPU host, or {opt_out}"
+            f"run on a GPU host. {HOST_COPY_HINT}"
         ) from exc
 
     _raise_if_unimplemented(params.eval_func, client)
