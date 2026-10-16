@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 
 class InputSchema(BaseModel):
@@ -28,7 +29,8 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return OutputSchema(result=inputs.scale * jnp.sum(inputs.a**2 + inputs.z**2))
+    a, z = as_jax_array(inputs.a), as_jax_array(inputs.z)
+    return OutputSchema(result=inputs.scale * jnp.sum(a**2 + z**2))
 
 
 def abstract_eval(abstract_inputs):
@@ -39,7 +41,7 @@ def vector_jacobian_product(inputs, vjp_inputs, vjp_outputs, cotangent_vector):
     def f(a, z):
         return inputs.scale * jnp.sum(a**2 + z**2)
 
-    _, vjp_fn = jax.vjp(f, inputs.a, inputs.z)
-    da, dz = vjp_fn(cotangent_vector["result"])
+    _, vjp_fn = jax.vjp(f, as_jax_array(inputs.a), as_jax_array(inputs.z))
+    da, dz = vjp_fn(as_jax_array(cotangent_vector["result"]))
     all_grads = {"a": da, "z": dz}
     return {k: all_grads[k] for k in vjp_inputs if k in all_grads}

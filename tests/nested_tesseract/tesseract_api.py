@@ -1,9 +1,10 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
+import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_array, as_jax_arrays
 
 
 class Scalars(BaseModel):
@@ -36,10 +37,10 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    a = inputs.scalars.a
-    b = inputs.scalars.b
-    v = inputs.vectors.v
-    w = inputs.vectors.w
+    a = as_jax_array(inputs.scalars.a)
+    b = as_jax_array(inputs.scalars.b)
+    v = as_jax_array(inputs.vectors.v)
+    w = as_jax_array(inputs.vectors.w)
 
     new_a = a * 10 + b
     new_v = v * 10 + w
@@ -60,6 +61,7 @@ def jacobian_vector_product(
     jvp_outputs: set[str],
     tangent_vector,
 ):
+    tangent_vector = as_jax_arrays(tangent_vector)
     out = {dy: 0.0 for dy in jvp_outputs}
     if "scalars.a" in jvp_inputs and "scalars.a" in jvp_outputs:
         out["scalars.a"] = 10.0 * tangent_vector["scalars.a"]
@@ -74,6 +76,7 @@ def vector_jacobian_product(
     vjp_outputs: set[str],
     cotangent_vector,
 ):
+    cotangent_vector = as_jax_arrays(cotangent_vector)
     out = {dx: 0.0 for dx in vjp_inputs}
     if "scalars.a" in vjp_inputs and "scalars.a" in vjp_outputs:
         out["scalars.a"] = 10.0 * cotangent_vector["scalars.a"]
@@ -84,14 +87,14 @@ def vector_jacobian_product(
 
 def jacobian(inputs: InputSchema, jac_inputs: set[str], jac_outputs: set[str]):
     jac = {
-        dy: {dx: np.zeros((3,), dtype=np.float32) for dx in jac_inputs}
+        dy: {dx: jnp.zeros((3,), dtype=jnp.float32) for dx in jac_inputs}
         for dy in jac_outputs
     }
 
     if "scalars.a" in jac_inputs and "scalars.a" in jac_outputs:
-        jac["scalars.a"]["scalars.a"] = np.float32(10.0)
+        jac["scalars.a"]["scalars.a"] = jnp.float32(10.0)
     if "vectors.v" in jac_inputs and "vectors.v" in jac_outputs:
-        jac["vectors.v"]["vectors.v"] = 10.0 * np.eye(3, dtype=np.float32)
+        jac["vectors.v"]["vectors.v"] = 10.0 * jnp.eye(3, dtype=jnp.float32)
 
     return jac
 

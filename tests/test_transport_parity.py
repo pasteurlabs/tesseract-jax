@@ -1,22 +1,16 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Platform-sensitive behaviours that must agree across dispatch transports.
+"""Platform-sensitive behaviours that must agree across dispatch transports and producers.
 
-Each test here runs on both dispatch lowerings via the ``transport`` fixture
-(``tests/conftest.py``): the host callback (device->host->device) and the
-GPU-direct cuda_ipc FFI path. The fixture serves the array-agnostic
-``transport_tesseract`` with or without the cuda_ipc GPU transport, so one body
-pins that the two paths compute the same results and handle edge cases the same
-way.
+Each test runs on every leg of the ``transport`` fixture (``tests/conftest.py``),
+which are the host callback (device->host->device) and the GPU-direct cuda_ipc FFI
+path against a Tesseract computing with JAX and one computing with CuPy. The
+cuda_ipc legs are ``gpu``-marked, so on the CPU runner only the host leg runs.
 
-The cuda_ipc parameter is ``gpu``-marked and skips without a GPU, so on the CPU
-runner only the host leg executes; the GPU CI job runs both.
-
-Transport-specific machinery (residency checks, FFI-boundary fault injection,
-on-device placement assertions) has no host analogue and lives in
-``test_gpu_direct.py`` instead. What belongs here is behaviour that should be
-*the same* on both paths.
+Transport-specific machinery (FFI-boundary fault injection, on-device placement
+assertions) has no host analogue and lives in ``test_gpu_direct.py``. What belongs
+here is behaviour that should be the same on every path.
 """
 
 from __future__ import annotations

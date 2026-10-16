@@ -1,47 +1,62 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""An array-module-agnostic Tesseract for exercising both dispatch transports.
+"""An array-module-agnostic Tesseract for exercising every dispatch transport and producer.
 
-The same endpoint bodies serve the host (device->host->device round-trip) and the
-cuda_ipc (GPU-direct) transports. The array module ``xp`` is ``cupy`` when the
-runtime's ``gpu_transport`` is ``cuda_ipc`` and ``numpy`` otherwise. Writing the
-math against ``xp`` (rather than duplicating a NumPy and a CuPy Tesseract) is how a
-single parametrised fixture can drive the platform-sensitive tests on both
-transports and be sure they compute the same thing.
+``TESSERACT_JAX_TEST_ARRAY_MODULE`` selects the array module ``xp`` the endpoints
+compute with: ``numpy`` (the default) for the host transport, and ``jax`` or
+``cupy`` for cuda_ipc. Writing the math once against ``xp`` lets one parametrised
+fixture run the platform-sensitive tests on every leg and be sure they compute the
+same thing.
 
-On the cuda_ipc leg the compute stays in GPU memory, which is what lets the runtime
-export the outputs by CUDA IPC with no device->host copy.
+On the GPU legs, an array input that arrives in host memory fails the call, so a
+host copy on the way in is caught. ``TESSERACT_JAX_TEST_ALLOW_HOST_INPUTS=1``
+moves such inputs onto the device instead, for an in-process Tesseract loaded
+without a GPU transport, which receives host inputs by design.
 
-The math mirrors the all-float32 ``gpu_tesseract``: ``c = (a * scale + b) * mask``
-with a *non-differentiable* array input ``mask`` (default all-ones) and a
-*non-differentiable* output ``c_sum``. Between them they exercise the transport's
-handling of a non-differentiable, non-static array input and a discarded output
-slot -- the placeholder paths that differ between host and device.
+The math is ``c = (a * scale + b) * mask``, with a non-differentiable array input
+``mask`` (default all-ones) and a non-differentiable output ``c_sum``. Between
+them they exercise the placeholder paths for non-differentiable inputs and
+discarded outputs, which differ between host and device.
+
+``return_host`` makes ``apply`` and ``vector_jacobian_product`` return host
+NumPy arrays instead, for a Tesseract whose results end up on the host whatever
+it computes on.
 """
 
+import os
 from typing import Any
 
 import numpy as np
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
-from tesseract_core.runtime.config import get_config
+
+_ARRAY_MODULE = os.environ.get("TESSERACT_JAX_TEST_ARRAY_MODULE", "numpy")
+_ALLOW_HOST_INPUTS = os.environ.get("TESSERACT_JAX_TEST_ALLOW_HOST_INPUTS") == "1"
+
+if _ARRAY_MODULE == "numpy":
+    xp = np
+elif _ARRAY_MODULE == "jax":
+    import jax.numpy as xp
+elif _ARRAY_MODULE == "cupy":
+    import cupy as xp
+else:
+    raise ValueError(f"Unknown TESSERACT_JAX_TEST_ARRAY_MODULE {_ARRAY_MODULE!r}")
 
 
-def _xp():
-    """The array module to compute with, importing CuPy only for the cuda_ipc leg."""
-    if get_config().gpu_transport == "cuda_ipc":
-        import cupy
-
-        return cupy
-    return np
-
-
-def _asxp(x):
-    # x may arrive as a numpy array (base64 inputs) or a device array (cuda_ipc
-    # inputs). asarray keeps a device array on-device and moves a host array onto
-    # the device; on the numpy leg it is a plain host asarray.
-    return _xp().asarray(x)
+def _asxp(x: Any) -> Any:
+    """Adopt an input array with ``xp``, without copying a GPU-resident one."""
+    if xp is np:
+        return np.asarray(x)
+    # Served device inputs and the views an in-process Tesseract receives both
+    # expose __cuda_array_interface__, while only the former also speak DLPack.
+    if not hasattr(x, "__cuda_array_interface__"):
+        if _ALLOW_HOST_INPUTS:
+            return xp.asarray(x)
+        raise RuntimeError(
+            f"Expected a GPU-resident input, got a {type(x).__name__} in host memory."
+        )
+    return xp.from_dlpack(x) if _ARRAY_MODULE == "jax" else xp.asarray(x)
 
 
 class InputSchema(BaseModel):
@@ -51,6 +66,9 @@ class InputSchema(BaseModel):
     mask: Array[(None,), Float32] | None = Field(
         default=None,
         description="Non-differentiable elementwise mask; defaults to all-ones.",
+    )
+    return_host: bool = Field(
+        default=False, description="Return host NumPy arrays instead of xp ones."
     )
 
 
@@ -62,8 +80,13 @@ class OutputSchema(BaseModel):
 
 
 def _mask_for(inputs, a):
-    xp = _xp()
     return _asxp(inputs.mask) if inputs.mask is not None else xp.ones_like(a)
+
+
+def _maybe_to_host(x, inputs):
+    if not inputs.return_host:
+        return x
+    return xp.asnumpy(x) if _ARRAY_MODULE == "cupy" else np.asarray(x)
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
@@ -73,7 +96,10 @@ def apply(inputs: InputSchema) -> OutputSchema:
     c = (a * scale + b) * _mask_for(inputs, a)
     # c_sum is a non-differentiable output: it makes the derivative endpoints emit
     # a placeholder for it, exercising the discarded-output-slot path per transport.
-    return OutputSchema(c=c, c_sum=c.sum().reshape(1))
+    return OutputSchema(
+        c=_maybe_to_host(c, inputs),
+        c_sum=_maybe_to_host(c.sum().reshape(1), inputs),
+    )
 
 
 def abstract_eval(abstract_inputs):
@@ -89,7 +115,6 @@ def jacobian_vector_product(
     jvp_outputs: set[str],
     tangent_vector: dict[str, Any],
 ):
-    xp = _xp()
     a = _asxp(inputs.a)
     scale = float(inputs.scale)
     mask = _mask_for(inputs, a)
@@ -112,9 +137,9 @@ def vector_jacobian_product(
     ct = _asxp(cotangent_vector["c"]) * mask
     out = {}
     if "a" in vjp_inputs:
-        out["a"] = ct * scale
+        out["a"] = _maybe_to_host(ct * scale, inputs)
     if "b" in vjp_inputs:
-        out["b"] = ct
+        out["b"] = _maybe_to_host(ct, inputs)
     return out
 
 
@@ -123,7 +148,6 @@ def jacobian(
     jac_inputs: set[str],
     jac_outputs: set[str],
 ):
-    xp = _xp()
     a = _asxp(inputs.a)
     n = a.shape[0]
     scale = float(inputs.scale)

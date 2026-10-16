@@ -12,15 +12,18 @@ round-trip). The served fixtures are created with ``gpu_transport="cuda_ipc"``.
 
 Most of these use a served (subprocess) GPU Tesseract, since CUDA IPC is
 cross-process and cannot be self-opened. The ``local_*`` tests load the same
-Tesseract in-process, where one created with ``gpu_transport="cuda_ipc"`` hands
-the endpoints XLA's device buffers directly. The tests are marked ``gpu``, and
-the fixtures skip where CUDA / CuPy / a GPU-backed JAX are unavailable.
+Tesseract in-process, computing with CuPy, where one created with
+``gpu_transport="cuda_ipc"`` hands the endpoints XLA's device buffers directly.
+The tests are marked ``gpu``, and the fixtures skip where a GPU-backed JAX (or,
+for the ``local_*`` ones, CuPy) is unavailable.
+
+Every test also runs with the FFI residency check armed in ``conftest.py``, so a
+host copy on any dispatch path fails it.
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
 import sys
 from pathlib import Path
 
@@ -33,19 +36,6 @@ from tesseract_core import Tesseract
 from tesseract_jax import apply_tesseract
 
 pytestmark = pytest.mark.gpu
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _arm_residency_check():
-    """Arm the FFI residency check for every GPU-direct test in this module.
-
-    ``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS`` makes the native handler reject any
-    buffer that crosses the FFI boundary in host memory. The shim reads the flag
-    on every dispatch, so a test can disarm it with ``monkeypatch``. With it
-    armed, every assertion below (apply / grad / jvp / vjp / jacobian) also
-    guards against a host copy sneaking back onto a dispatch path.
-    """
-    os.environ["TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS"] = "1"
 
 
 def _to_np(x):
@@ -110,9 +100,9 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
     """A float32-in/float64-out Tesseract round-trips on-device with the right dtype.
 
-    ``gpu_tesseract`` is all-float32, so the shim's per-buffer dtype handling is
-    otherwise only exercised for one width. Here apply returns float64, so a
-    correct copy must move the wider buffer and preserve the dtype through the
+    ``served_gpu_tesseract`` is all-float32, so the shim's per-buffer dtype
+    handling is otherwise only exercised for one width. Here apply returns float64,
+    so a correct copy must move the wider buffer and preserve the dtype through the
     cuda_ipc return path.
     """
     x = jnp.arange(64, dtype=jnp.float32)
@@ -165,11 +155,13 @@ def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     _assert_interpreter_alive()
 
 
-def test_apply_matches_host_callback(served_gpu_tesseract):
+def test_apply_matches_host_callback(served_gpu_tesseract, served_transport_tesseract):
     """The GPU FFI lowering must match the host-callback lowering exactly.
 
-    We force the same computation onto CPU (host callback) and GPU (FFI) and
-    compare bit-for-bit.
+    We run the same Tesseract through the host callback on CPU and through the FFI
+    on GPU, and compare bit-for-bit. The host leg computes with NumPy and the GPU
+    leg with JAX, but with the default ``scale`` of 2 the product ``a * scale`` is
+    exact, so both round once and agree.
     """
     a = jnp.linspace(-5, 5, 257, dtype=jnp.float32)
     b = jnp.linspace(10, -10, 257, dtype=jnp.float32)
@@ -180,7 +172,7 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
     with jax.default_device(jax.devices("cpu")[0]):
         a_cpu = jnp.asarray(np.asarray(a))
         b_cpu = jnp.asarray(np.asarray(b))
-        cpu = apply_tesseract(served_gpu_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
+        cpu = apply_tesseract(served_transport_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
 
     assert _on_gpu(gpu)
     np.testing.assert_array_equal(_to_np(gpu), np.asarray(cpu))
@@ -269,33 +261,6 @@ def test_grad_through_gpu_ffi(served_gpu_tesseract):
     assert _on_gpu(g)
     # d/da sum(a*2 + b) = 2
     np.testing.assert_allclose(_to_np(g), np.full((512,), 2.0), rtol=1e-6)
-
-
-def test_jax_tesseract_round_trip_stays_on_device(served_gpu_jax_tesseract):
-    """A Tesseract computing with JAX exchanges arrays over cuda_ipc, host-copy free.
-
-    The Tesseract adopts its inputs through DLPack and returns arrays allocated by
-    XLA, unlike the CuPy-based GPU Tesseracts. It rejects inputs that reach it in
-    host memory, and the residency check armed for this module rejects results
-    that reach the FFI boundary in host memory, so passing rules out a host copy
-    in either direction, for both apply and the vjp behind ``jax.grad``.
-    """
-    a = jnp.arange(64, dtype=jnp.float32)
-    b = jnp.ones(64, dtype=jnp.float32) * 3.0
-
-    def f(a, b):
-        return apply_tesseract(served_gpu_jax_tesseract, {"a": a, "b": b})["c"]
-
-    c = jax.jit(f)(a, b)
-    assert _on_gpu(c)
-    np.testing.assert_allclose(
-        _to_np(c), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
-    )
-
-    grad_a, grad_b = jax.jit(jax.grad(lambda a, b: f(a, b).sum(), argnums=(0, 1)))(a, b)
-    assert _on_gpu(grad_a) and _on_gpu(grad_b)
-    np.testing.assert_allclose(_to_np(grad_a), np.full(64, 2.0, np.float32))
-    np.testing.assert_allclose(_to_np(grad_b), np.ones(64, np.float32))
 
 
 @pytest.mark.parametrize(
@@ -465,7 +430,7 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
 
     Forcing ``materialize_jacobian=True`` routes ``jacfwd``/``jacrev`` to the
     Tesseract's ``jacobian`` endpoint rather than the batched jvp/vjp path. On
-    GPU that endpoint returns dense CuPy arrays, which must stay on-device end to
+    GPU that endpoint returns dense JAX arrays, which must stay on-device end to
     end rather than round-tripping through a host cast.
     """
     n = 8
@@ -487,14 +452,17 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
     )
 
 
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
-def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac):
-    """``jacfwd`` / ``jacrev`` return the endpoint's float32 Jacobian bit for bit.
+def test_jacobian_keeps_float32_precision(
+    served_gpu_tesseract, jac, materialize_jacobian
+):
+    """``jacfwd`` / ``jacrev`` return the float32 Jacobian bit for bit.
 
-    The materialized path contracts the Jacobian with one-hot (co)tangents in
-    XLA, which on recent NVIDIA GPUs runs float32 matmuls in TF32 by default,
-    rounding the entries to 10 mantissa bits. A random ``mask`` makes the
-    entries use the full float32 mantissa.
+    With ``None``, XLA contracts the ``jacobian`` endpoint's result with one-hot
+    (co)tangents. On recent NVIDIA GPUs it runs float32 matmuls in TF32 by
+    default, which would round the entries to 10 mantissa bits. A random
+    ``mask`` makes the entries use the full float32 mantissa.
     """
     n = 64
     rng = np.random.default_rng(0)
@@ -507,6 +475,7 @@ def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac
             served_gpu_tesseract,
             {"a": a, "b": b, "mask": mask},
             vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
         )["c"]
 
     got = jax.jit(jac(f))(a)
@@ -514,22 +483,28 @@ def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac
     np.testing.assert_array_equal(_to_np(got), np.diag(2.0 * np.asarray(mask)))
 
 
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
-def test_materialized_jacobian_mixed_dtype(
-    served_gpu_mixed_dtype_tesseract, jac, monkeypatch
+def test_jacobian_mixed_dtype(
+    served_gpu_mixed_dtype_tesseract, jac, materialize_jacobian, monkeypatch
 ):
-    """A jacobian endpoint returning another dtype is cast to the expected one.
+    """``jacfwd`` / ``jacrev`` of a float32-in / float64-out Tesseract.
 
-    The endpoint always returns float64, while ``jacrev`` wants the input's
-    float32. The mismatching block is cast through the host, so the residency
-    check, which rejects that host copy, is disarmed here.
+    ``jacfwd`` returns the output's float64 and ``jacrev`` the input's float32.
+    The ``jacobian`` endpoint always returns float64, so with ``None`` the
+    ``jacrev`` result is cast through the host. The residency check rejects
+    that host copy, so it is disarmed for that case only.
     """
-    monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
+    if jac is jax.jacrev and materialize_jacobian is None:
+        monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
     x = jnp.arange(5, dtype=jnp.float32)
 
     def f(x):
         return apply_tesseract(
-            served_gpu_mixed_dtype_tesseract, {"x": x}, vmap_method="sequential"
+            served_gpu_mixed_dtype_tesseract,
+            {"x": x},
+            vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
         )["y"]
 
     expected = jac(lambda x: (2.0 * x).astype(jnp.float64))(x)
@@ -602,7 +577,7 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
 def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
     """A host pointer reaching the FFI boundary must fail cleanly, not crash.
 
-    The residency check (armed for this module by ``_arm_residency_check``) exists
+    The residency check (armed in ``conftest.py``) exists
     to catch an accidental host copy on a dispatch return path. For it to be useful
     the failure must surface as an ``ffi::Error`` (a Python ``JaxRuntimeError``),
     not abort the process -- which it would if the native handler released the GIL
@@ -762,7 +737,7 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
     the median so a slowdown shows up in the timing report, but shared-runner
     noise makes a fixed wall-clock threshold too flaky to fail CI on. The
     deterministic guard against a silent host round-trip is the residency check
-    armed by ``_arm_residency_check`` above.
+    armed in ``conftest.py``.
     """
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32)

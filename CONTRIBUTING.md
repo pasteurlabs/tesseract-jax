@@ -128,9 +128,19 @@ To run the tests simply run `pytest` in the root of the project:
 $ pytest
 ```
 
-The GPU-direct tests are marked with the `gpu` marker and require a CUDA device
-plus a shim build (see above); they are skipped automatically when no GPU is
-available. CI runs them across a small matrix of CUDA majors (12 and 13), Python
+The GPU-direct tests are marked with the `gpu` marker and require a CUDA device,
+a CUDA-enabled JAX, and a shim build (see above). The GPU test Tesseracts compute
+with JAX, and some tests also run against a CuPy producer, so install CuPy for your
+CUDA major as well:
+
+```console
+$ pip install "jax[cuda12]" cupy-cuda12x
+```
+
+Without a GPU (or without CuPy, for the CuPy-producer tests) they are skipped. Set
+`TESSERACT_JAX_GPU_REQUIRED=1` to make them fail instead, as the GPU CI job does.
+
+CI runs the GPU tests across a small matrix of CUDA majors (12 and 13), Python
 versions (the 3.12 floor and 3.14 ceiling), and JAX versions (latest, plus the
 declared `jax==0.7.0` floor on the CUDA 12 leg) so the shim's runtime loader and
 the `cuda_ipc` path stay covered across the support window.
@@ -138,11 +148,11 @@ the `cuda_ipc` path stay covered across the support window.
 Behaviours that must match between the host and GPU-direct transports (dtype
 handling, discarded-slot fills, non-differentiable inputs/outputs, jacobian
 fwd/bwd, batching) are written once in `tests/test_transport_parity.py` and run on
-both via the parametrised `transport` fixture, which serves the array-agnostic
-`tests/transport_tesseract` with or without the `cuda_ipc` GPU transport
-(computing with `numpy` or `cupy` to match). Tests that have no host analogue
-(FFI-boundary fault injection, on-device residency checks) stay in
-`tests/test_gpu_direct.py`.
+each via the parametrised `transport` fixture, which serves the array-agnostic
+`tests/transport_tesseract` without a GPU transport (computing with NumPy) or with
+the `cuda_ipc` GPU transport (computing with JAX, and again with CuPy). Tests that
+have no host analogue (FFI-boundary fault injection, on-device residency checks)
+stay in `tests/test_gpu_direct.py`.
 
 ### GitHub workflow
 

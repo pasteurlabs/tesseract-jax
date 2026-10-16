@@ -166,7 +166,7 @@ std::string cuda_err(cudaError_t e) {
 }
 
 // Whether the debug pointer-residency check is enabled. Gated on the
-// TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS env var, read once. When on, every
+// TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS env var. When on, every
 // buffer that crosses the FFI boundary (XLA inputs and the Python callback's
 // results) is asserted to live in device (or managed) memory, so an accidental
 // host round-trip -- e.g. a np.asarray/np.full slipping onto a dispatch return
