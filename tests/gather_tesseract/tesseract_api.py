@@ -11,7 +11,7 @@ the integer, floating and complex dtype classes respectively.
 
 from typing import Any
 
-import numpy as np
+import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import (
     Array,
@@ -20,6 +20,7 @@ from tesseract_core.runtime import (
     Int32,
     ShapeDType,
 )
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 # Complex64 lives in schema_types but is not re-exported from
 # tesseract_core.runtime, unlike Float32/Int32.
@@ -52,13 +53,13 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     """Gather `weights` at `indices`, and count how often each index appears."""
+    indices = as_jax_array(inputs.indices)
+    gathered = as_jax_array(inputs.weights)[indices]
     return OutputSchema(
-        gathered=inputs.weights[inputs.indices],
-        count=np.bincount(inputs.indices, minlength=inputs.indices.shape[0])[
-            : inputs.indices.shape[0]
-        ].astype(np.int32),
-        magnitude=np.abs(inputs.weights[inputs.indices]).astype(np.float32),
-        phase=np.exp(1j * inputs.weights[inputs.indices]).astype(np.complex64),
+        gathered=gathered,
+        count=jnp.bincount(indices, length=indices.shape[0]).astype(jnp.int32),
+        magnitude=jnp.abs(gathered).astype(jnp.float32),
+        phase=jnp.exp(1j * gathered).astype(jnp.complex64),
     )
 
 
@@ -84,7 +85,11 @@ def jacobian_vector_product(
     `count` is absent from the result, so the framework fills its tangent slot
     with a discarded integer placeholder.
     """
-    return {"gathered": tangent_vector["weights"][inputs.indices]}
+    return {
+        "gathered": as_jax_array(tangent_vector["weights"])[
+            as_jax_array(inputs.indices)
+        ]
+    }
 
 
 def vector_jacobian_product(
@@ -98,6 +103,8 @@ def vector_jacobian_product(
     `indices` is absent from the result, so the framework fills its gradient
     slot with a discarded integer placeholder.
     """
-    grad = np.zeros_like(inputs.weights)
-    np.add.at(grad, inputs.indices, cotangent_vector["gathered"])
+    grad = jnp.zeros(inputs.weights.shape, dtype=inputs.weights.dtype)
+    grad = grad.at[as_jax_array(inputs.indices)].add(
+        as_jax_array(cotangent_vector["gathered"])
+    )
     return {"weights": grad}

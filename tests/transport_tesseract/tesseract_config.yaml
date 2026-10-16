@@ -1,0 +1,4 @@
+name: "transport"
+version: "0.1.0"
+description: |
+  Unit tesseract that computes with NumPy, JAX or CuPy, for exercising every dispatch transport

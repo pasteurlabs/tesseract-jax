@@ -12,6 +12,7 @@ primitive float/int (static inputs that should not be batched).
 import jax
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float64, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 jax.config.update("jax_enable_x64", True)
 
@@ -30,7 +31,8 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    result = inputs.a * inputs.x**2 + inputs.b * inputs.y**2
+    x, y = as_jax_array(inputs.x), as_jax_array(inputs.y)
+    result = inputs.a * x**2 + inputs.b * y**2
     return OutputSchema(result=result)
 
 
@@ -42,7 +44,7 @@ def vector_jacobian_product(inputs, vjp_inputs, vjp_outputs, cotangent_vector):
     def f(x, y):
         return inputs.a * x**2 + inputs.b * y**2
 
-    _, vjp_fn = jax.vjp(f, inputs.x, inputs.y)
-    dx, dy = vjp_fn(cotangent_vector["result"])
+    _, vjp_fn = jax.vjp(f, as_jax_array(inputs.x), as_jax_array(inputs.y))
+    dx, dy = vjp_fn(as_jax_array(cotangent_vector["result"]))
     all_grads = {"x": dx, "y": dy}
     return {k: all_grads[k] for k in vjp_inputs if k in all_grads}
