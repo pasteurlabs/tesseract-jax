@@ -91,7 +91,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   def apply(inputs):
       return OutputSchema(c=jnp.sin(inputs.a))
 
-  # ✅ Good — use numpy for in-process Tesseracts, or jnp via from_source
+  # ✅ Good — use numpy for in-process Tesseracts
   import numpy as np
 
   def apply(inputs):
