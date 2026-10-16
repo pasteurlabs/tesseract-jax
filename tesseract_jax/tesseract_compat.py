@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 def _on_device(values: "list | tuple") -> bool:
     """Whether any of ``values`` is a GPU array exposing ``__cuda_array_interface__``.
 
-    Applied to a dispatch's arguments, this tells the GPU FFI lowering (device
+    Applied to a dispatch's arguments, this distinguishes the GPU FFI lowering (device
     views) from the CPU host-callback lowering (NumPy arrays).
 
     The ``cuda`` import is deliberately lazy, not at module scope: eagerly

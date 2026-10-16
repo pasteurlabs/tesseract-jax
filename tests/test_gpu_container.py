@@ -29,14 +29,14 @@ here = Path(__file__).parent
 
 @pytest.fixture(scope="module")
 def gpu_container_image() -> str:
-    """Build the container test Tesseract once. Skips without a GPU backend for JAX."""
+    """Build ``transport_tesseract`` into an image once. Skips without a GPU for JAX."""
     if not any(d.platform == "gpu" for d in jax.devices()):
         pytest.skip("no GPU backend for JAX")
     from tesseract_core.sdk.engine import build_tesseract
 
     # The image name comes from the Tesseract's config, the tag from here
-    build_tesseract(here / "gpu_container_tesseract", "test")
-    return "tesseract-jax-gpu-container:test"
+    build_tesseract(here / "transport_tesseract", "test")
+    return "transport:test"
 
 
 def _on_gpu(x) -> bool:
@@ -59,7 +59,10 @@ def test_container_round_trip_stays_on_device(gpu_container_image, monkeypatch, 
         gpu_container_image,
         gpus=["all"],
         gpu_transport="cuda_ipc",
-        environment={"TESSERACT_FORBID_DEVICE_HOST_COPY": "1"},
+        environment={
+            "TESSERACT_JAX_TEST_ARRAY_MODULE": "cupy",
+            "TESSERACT_FORBID_DEVICE_HOST_COPY": "1",
+        },
     ) as served:
         tess = served if client == "served" else Tesseract.from_url(served._client.url)
         a = jnp.arange(64, dtype=jnp.float32)
@@ -89,7 +92,11 @@ def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
         gpu_container_image,
         gpus=["all"],
         gpu_transport="cuda_ipc",
-        environment={"CUDA_VISIBLE_DEVICES": ""},
+        # The container sees no GPU, so it computes with NumPy
+        environment={
+            "TESSERACT_JAX_TEST_ARRAY_MODULE": "numpy",
+            "CUDA_VISIBLE_DEVICES": "",
+        },
     ) as served:
         remote = Tesseract.from_url(served._client.url)
         a = jnp.arange(8, dtype=jnp.float32)

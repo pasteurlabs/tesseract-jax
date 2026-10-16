@@ -19,10 +19,10 @@ with Tesseract.from_source("tesseract_api.py", gpu_transport="cuda_ipc") as tess
 
 ## How the transport is picked
 
-Before the first call compiled for a CUDA device, tesseract-jax asks the Tesseract which transport to use (via `Tesseract.resolve_gpu_transport`). That checks once per connection that the transport actually works between your process and the server, by exchanging a small GPU array:
+When a call is compiled for a CUDA device, tesseract-jax asks the Tesseract which transport to use (via `Tesseract.resolve_gpu_transport`). The Tesseract checks once per connection that the transport works between your process and the server, by exchanging a small GPU array:
 
-- A Tesseract created with `gpu_transport="cuda_ipc"` uses it. If it does not work from your process, the call raises with the reason.
-- A Tesseract that requests no transport, such as one from `Tesseract.from_url`, uses `cuda_ipc` if the server offers it and it works. Otherwise its GPU arrays are copied through the host, with a one-time warning saying why. This happens, for example, when the server runs on another machine.
+- A Tesseract created with `gpu_transport="cuda_ipc"` uses `cuda_ipc`. If `cuda_ipc` does not work from your process, for example because the server does not share your GPU, the call raises with the reason.
+- A Tesseract that requests no transport, such as one from `Tesseract.from_url`, uses `cuda_ipc` if it works. Otherwise its GPU arrays are copied through the host, with a one-time warning saying why. This happens, for example, when the server runs on another machine.
 - Calls compiled for CPU always go through the host and never run the check.
 
 To always copy GPU arrays through the host, pass a view of the Tesseract:
@@ -39,6 +39,6 @@ A Tesseract loaded with `Tesseract.from_tesseract_api` receives host (NumPy) arr
 tess = Tesseract.from_tesseract_api("tesseract_api.py", gpu_transport="cuda_ipc")
 ```
 
-Its endpoints may return host or device arrays either way.
+Despite its name, `cuda_ipc` involves no inter-process communication here. Its endpoints may return host or device arrays either way.
 
 The endpoints must not modify these input arrays in place. They are JAX's own buffers, which hold the caller's arrays and may be read again by later operations, so an in-place change such as `x -= x.mean()` silently changes the caller's values. Compute into a new array instead (`x = x - x.mean()`). A served Tesseract is not affected, since it receives its own copy of each input.
