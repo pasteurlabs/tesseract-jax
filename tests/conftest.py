@@ -65,9 +65,12 @@ def _serve_tesseract(
     The subprocess shares the test environment's packages but not its JAX runtime.
     It inherits this process's environment, plus ``env`` while it is spawned.
     """
+    # The test process's JAX already preallocates most of the GPU's memory, so a
+    # Tesseract computing with JAX must allocate on demand to fit alongside it.
+    env = {"XLA_PYTHON_CLIENT_PREALLOCATE": "false", **(env or {})}
     with contextlib.ExitStack() as stack:
         with pytest.MonkeyPatch.context() as mp:
-            for key, value in (env or {}).items():
+            for key, value in env.items():
                 mp.setenv(key, value)
             tess = stack.enter_context(
                 Tesseract.from_source(
