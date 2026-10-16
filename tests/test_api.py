@@ -836,13 +836,15 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     assert count.shape == (3,)
 
 
-def test_materialized_jacfwd_with_integer_output(gather_tess):
-    """``jacfwd`` through the ``jacobian`` endpoint fills integer tangents cleanly.
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_jacobian_with_integer_output(gather_tess, jac, materialize_jacobian):
+    """``jacfwd`` / ``jacrev`` of a Tesseract with integer outputs.
 
-    The materialized path builds the discarded tangent of every
-    non-differentiable output itself. Filling an integer one with NaN would
-    emit a RuntimeWarning while the call is traced, which
-    ``filterwarnings = ["error"]`` turns into a failure.
+    With ``None`` the call goes through the ``jacobian`` endpoint, whose path
+    builds the discarded tangent of every non-differentiable output itself.
+    Filling an integer one with NaN would emit a RuntimeWarning while the call
+    is traced, which ``filterwarnings = ["error"]`` turns into a failure.
     """
     weights = np.array([1.0, 2.0, 3.0], dtype="float32")
     indices = np.array([0, 2, 2], dtype="int32")
@@ -852,10 +854,11 @@ def test_materialized_jacfwd_with_integer_output(gather_tess):
             gather_tess,
             inputs=dict(weights=weights, indices=indices),
             vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
         )["gathered"]
 
-    jac = jax.jit(jax.jacfwd(gathered))(weights)
-    np.testing.assert_array_equal(jac, np.eye(3, dtype="float32")[indices])
+    got = jax.jit(jac(gathered))(weights)
+    np.testing.assert_array_equal(got, np.eye(3, dtype="float32")[indices])
 
 
 @pytest.mark.parametrize("use_jit", [True, False])

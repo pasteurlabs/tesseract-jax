@@ -867,10 +867,7 @@ def _batched_via_jacobian(
     return grads, (0,) * len(grads)
 
 
-# Both contractions run at the highest precision, so that jacfwd / jacrev, which
-# contract the Jacobian with one-hot (co)tangents, return the endpoint's Jacobian
-# unchanged. At the default precision XLA may run float32 matmuls in reduced
-# precision instead (TF32 on Ampere and later NVIDIA GPUs).
+# HIGHEST precision, so jacfwd / jacrev return the endpoint's Jacobian exactly (no TF32).
 def _matmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract ``matrix``'s trailing axes against each row of ``batched_vector``."""
     batched_vector = batched_vector.astype(matrix.dtype)
@@ -1122,6 +1119,9 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
+
+            See :doc:`/content/vmap-methods` for how this interacts with
+            ``vmap_method``.
         gpu_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
             ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started

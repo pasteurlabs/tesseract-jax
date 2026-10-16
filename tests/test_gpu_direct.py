@@ -281,14 +281,17 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
     )
 
 
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
-def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac):
-    """``jacfwd`` / ``jacrev`` return the endpoint's float32 Jacobian bit for bit.
+def test_jacobian_keeps_float32_precision(
+    served_gpu_tesseract, jac, materialize_jacobian
+):
+    """``jacfwd`` / ``jacrev`` return the float32 Jacobian bit for bit.
 
-    The materialized path contracts the Jacobian with one-hot (co)tangents in
-    XLA, which on recent NVIDIA GPUs runs float32 matmuls in TF32 by default,
-    rounding the entries to 10 mantissa bits. A random ``mask`` makes the
-    entries use the full float32 mantissa.
+    With ``None``, XLA contracts the ``jacobian`` endpoint's result with one-hot
+    (co)tangents. On recent NVIDIA GPUs it runs float32 matmuls in TF32 by
+    default, which would round the entries to 10 mantissa bits. A random
+    ``mask`` makes the entries use the full float32 mantissa.
     """
     n = 64
     rng = np.random.default_rng(0)
@@ -301,6 +304,7 @@ def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac
             served_gpu_tesseract,
             {"a": a, "b": b, "mask": mask},
             vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
             gpu_transport="cuda_ipc",
         )["c"]
 
@@ -309,17 +313,20 @@ def test_materialized_jacobian_keeps_float32_precision(served_gpu_tesseract, jac
     np.testing.assert_array_equal(_to_np(got), np.diag(2.0 * np.asarray(mask)))
 
 
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
-def test_materialized_jacobian_mixed_dtype(
-    served_gpu_mixed_dtype_tesseract, jac, monkeypatch
+def test_jacobian_mixed_dtype(
+    served_gpu_mixed_dtype_tesseract, jac, materialize_jacobian, monkeypatch
 ):
-    """A jacobian endpoint returning another dtype is cast to the expected one.
+    """``jacfwd`` / ``jacrev`` of a float32-in / float64-out Tesseract.
 
-    The endpoint always returns float64, while ``jacrev`` wants the input's
-    float32. The mismatching block is cast through the host, so the residency
-    check, which rejects that host copy, is disarmed here.
+    ``jacfwd`` returns the output's float64 and ``jacrev`` the input's float32.
+    The ``jacobian`` endpoint always returns float64, so with ``None`` the
+    ``jacrev`` result is cast through the host. The residency check rejects
+    that host copy, so it is disarmed for that case only.
     """
-    monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
+    if jac is jax.jacrev and materialize_jacobian is None:
+        monkeypatch.delenv("TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS")
     x = jnp.arange(5, dtype=jnp.float32)
 
     def f(x):
@@ -327,6 +334,7 @@ def test_materialized_jacobian_mixed_dtype(
             served_gpu_mixed_dtype_tesseract,
             {"x": x},
             vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
             gpu_transport="cuda_ipc",
         )["y"]
 
