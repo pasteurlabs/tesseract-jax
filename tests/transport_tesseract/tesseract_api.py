@@ -10,7 +10,9 @@ fixture run the platform-sensitive tests on every leg and be sure they compute t
 same thing.
 
 On the GPU legs, an array input that arrives in host memory fails the call, so a
-host copy on the way in is caught.
+host copy on the way in is caught. ``TESSERACT_JAX_TEST_ALLOW_HOST_INPUTS=1``
+moves such inputs onto the device instead, for an in-process Tesseract loaded
+without a GPU transport, which receives host inputs by design.
 
 The math is ``c = (a * scale + b) * mask``, with a non-differentiable array input
 ``mask`` (default all-ones) and a non-differentiable output ``c_sum``. Between
@@ -30,9 +32,7 @@ from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
 
 _ARRAY_MODULE = os.environ.get("TESSERACT_JAX_TEST_ARRAY_MODULE", "numpy")
-
-# DLPack's device type code for CUDA memory (``kDLCUDA``).
-_DLPACK_CUDA = 2
+_ALLOW_HOST_INPUTS = os.environ.get("TESSERACT_JAX_TEST_ALLOW_HOST_INPUTS") == "1"
 
 if _ARRAY_MODULE == "numpy":
     xp = np
@@ -48,8 +48,11 @@ def _asxp(x: Any) -> Any:
     """Adopt an input array with ``xp``, without copying a GPU-resident one."""
     if xp is np:
         return np.asarray(x)
-    device_type, _ = x.__dlpack_device__()
-    if device_type != _DLPACK_CUDA:
+    # Served device inputs and the views an in-process Tesseract receives both
+    # expose __cuda_array_interface__, while only the former also speak DLPack.
+    if not hasattr(x, "__cuda_array_interface__"):
+        if _ALLOW_HOST_INPUTS:
+            return xp.asarray(x)
         raise RuntimeError(
             f"Expected a GPU-resident input, got a {type(x).__name__} in host memory."
         )
@@ -59,7 +62,7 @@ def _asxp(x: Any) -> Any:
 class InputSchema(BaseModel):
     a: Differentiable[Array[(None,), Float32]] = Field(description="Vector a")
     b: Differentiable[Array[(None,), Float32]] = Field(description="Vector b")
-    scale: Float32 = Field(default=np.float32(2.0), description="Scalar scale")
+    scale: Float32 = Field(default=2.0, description="Scalar scale")
     mask: Array[(None,), Float32] | None = Field(
         default=None,
         description="Non-differentiable elementwise mask; defaults to all-ones.",

@@ -5,8 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import tesseract_core
-from packaging.version import Version
 
 from tesseract_jax import apply_tesseract
 
@@ -974,9 +972,16 @@ def test_used_output_cotangent_is_still_requested(zero_cotangent_tess):
         (["params", "plain"], ["params.{}"], "params.{plain}"),
         (["params", "a/b"], ["params.{}"], "params.{a/b}"),
         (["params", "layer.0.weight"], ["params.{}"], "params.{layer.0.weight}"),
+        # Braces and backslashes in a key are escaped, and a key that looks
+        # braced or like the wildcard is still a raw key.
+        (["params", "a{b}"], ["params.{}"], r"params.{a\{b\}}"),
+        (["params", "a\\b"], ["params.{}"], r"params.{a\\b}"),
+        (["params", "{x}"], ["params.{}"], r"params.{\{x\}}"),
+        (["params", "{}"], ["params.{}"], r"params.{\{\}}"),
         # Re-merging a path this function produced must not brace it twice,
         # which batching relies on.
         ("params.{layer.0.weight}", ["params.{}"], "params.{layer.0.weight}"),
+        (r"params.{\{x\}}", ["params.{}"], r"params.{\{x\}}"),
     ],
 )
 def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
@@ -993,29 +998,11 @@ def test_merge_path_keeps_dotted_dict_keys_whole(explicit, templates, expected):
     assert template == templates[0]
 
 
-# tesseract-core widened its dict-key pattern in pasteurlabs/tesseract-core#707,
-# which landed after 1.12.0. Drop this guard once the minimum version is past it.
-_CORE_ACCEPTS_WIDE_KEYS = Version(tesseract_core.__version__) > Version("1.12.0")
-
-
 @pytest.mark.parametrize(
-    "key",
-    [
-        "plain",
-        pytest.param(
-            "layer.0.weight",
-            marks=pytest.mark.skipif(
-                not _CORE_ACCEPTS_WIDE_KEYS,
-                reason=(
-                    f"tesseract-core {tesseract_core.__version__} rejects the key "
-                    "(needs > 1.12.0)"
-                ),
-            ),
-        ),
-    ],
+    "key", ["plain", "layer.0.weight", "a{b", "a}b", "{x}", "{}", "a\\b"]
 )
 def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
-    """End to end: a state-dict key carries dots and still gets its gradient."""
+    """End to end: a key with dots, braces or backslashes still gets its gradient."""
     inputs = {"params": {key: jnp.ones(3, dtype=jnp.float32)}}
     grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
         inputs

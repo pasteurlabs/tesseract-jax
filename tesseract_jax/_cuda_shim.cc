@@ -27,6 +27,7 @@
 //   __cuda_array_interface__ and host->device for C-contiguous NumPy arrays (a
 //   Tesseract may return either).
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -165,7 +166,7 @@ std::string cuda_err(cudaError_t e) {
 }
 
 // Whether the debug pointer-residency check is enabled. Gated on the
-// TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS env var, read once. When on, every
+// TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS env var. When on, every
 // buffer that crosses the FFI boundary (XLA inputs and the Python callback's
 // results) is asserted to live in device (or managed) memory, so an accidental
 // host round-trip -- e.g. a np.asarray/np.full slipping onto a dispatch return
@@ -295,6 +296,35 @@ std::string shape_str(const std::vector<int64_t>& shape) {
   return s;
 }
 
+// Whether array-interface `strides` (in bytes; None means row-major) describe a
+// row-major layout of `shape` with `nbytes` total. As in NumPy, the strides of
+// size-1 axes are ignored and an empty array counts as contiguous.
+bool is_row_major(nb::handle strides, const std::vector<int64_t>& shape,
+                  size_t nbytes) {
+  if (strides.is_none()) {
+    return true;
+  }
+  const auto s = nb::cast<std::vector<int64_t>>(strides);
+  if (s.size() != shape.size()) {
+    return false;
+  }
+  int64_t numel = 1;
+  for (int64_t d : shape) {
+    numel *= d;
+  }
+  if (numel == 0) {
+    return true;
+  }
+  int64_t expected = static_cast<int64_t>(nbytes) / numel;  // itemsize
+  for (size_t i = shape.size(); i-- > 0;) {
+    if (shape[i] != 1 && s[i] != expected) {
+      return false;
+    }
+    expected *= shape[i];
+  }
+  return true;
+}
+
 // A plain description of one buffer, handed to Python.
 struct BufferDesc {
   uintptr_t ptr;
@@ -369,6 +399,8 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
   // Call into Python under the GIL.
   std::vector<nb::object> results_keepalive;
   std::vector<BufferDesc> result_descs;
+  // Streams the results' producers left work on (see the CAI "stream" key below).
+  std::vector<uintptr_t> producer_streams;
   // The keepalive vector holds Python objects, so it must be emptied while the
   // GIL is held -- otherwise the nb::object destructors call dec_ref() with no
   // GIL and abort the process. This guard clears it under the GIL on *every*
@@ -459,6 +491,22 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
                                            : "__cuda_array_interface__");
         nb::tuple data = nb::cast<nb::tuple>(cai["data"]);
         rd.ptr = nb::cast<uintptr_t>(data[0]);
+        // Under CAI v3, a producer whose work on the data may still be in flight
+        // names the stream it ran on, and the consumer must synchronize on it
+        // before reading. The copies below run on XLA's unrelated stream, so they
+        // would otherwise race the producer's kernels, e.g. when an in-process
+        // endpoint computes its results with CuPy. The protocol's values 1 and 2
+        // (legacy and per-thread default stream) equal the runtime's handles for
+        // those streams, so any value but the disallowed 0 is passed as is.
+        nb::object producer_stream =
+            rd.host ? nb::none() : cai.attr("get")("stream", nb::none());
+        if (!producer_stream.is_none()) {
+          const uintptr_t s = nb::cast<uintptr_t>(producer_stream);
+          if (s != 0 && std::find(producer_streams.begin(), producer_streams.end(),
+                                  s) == producer_streams.end()) {
+            producer_streams.push_back(s);
+          }
+        }
         // XLA sized this output buffer from tesseract-jax's declared avals, but
         // nothing forces the Tesseract to return that dtype or shape: the
         // jacobian response schema permits any dtype, and unconstrained output
@@ -477,6 +525,18 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
               shape_str(out_descs[i].shape));
         }
         rd.nbytes = out_descs[i].nbytes;  // now known to agree
+        // The copies below move one flat byte range, so a strided result (a
+        // transpose, a slice, a broadcast) would be read in the wrong order or
+        // past its allocation. A served Tesseract's cuda_ipc encoder already
+        // rejects these, but an in-process endpoint hands its arrays over as is.
+        nb::object strides = cai.attr("get")("strides", nb::none());
+        if (!is_row_major(strides, rd.shape, rd.nbytes)) {
+          return ffi::Error::InvalidArgument(
+              "tesseract_jax result " + std::to_string(i) +
+              ": Tesseract returned a non-contiguous array with strides " +
+              shape_str(nb::cast<std::vector<int64_t>>(strides)) +
+              "; make it C-contiguous before returning it");
+        }
         result_descs.push_back(rd);
         // Debug: the dispatch's returned buffers must be device-resident.
         // This is the check that matters: a host copy on a derivative return path
@@ -501,6 +561,14 @@ ffi::Error DispatchImpl(cudaStream_t stream, int64_t token,
           e.what());
     }
   }  // release GIL before the device copies
+
+  for (uintptr_t s : producer_streams) {
+    if (cudaError_t e = rt.StreamSynchronize(reinterpret_cast<cudaStream_t>(s));
+        e != cudaSuccess) {
+      return ffi::Error::Internal("cudaStreamSynchronize(producer) failed: " +
+                                  cuda_err(e));
+    }
+  }
 
   // Fill each XLA-owned output buffer. A null pointer marks a placeholder slot
   // (the dispatch returned ``None``): its value is a discarded gradient/tangent

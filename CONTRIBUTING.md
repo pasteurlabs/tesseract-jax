@@ -79,7 +79,7 @@ $ pre-commit install
 
 Tesseract-JAX ships an optional native shim (`tesseract_jax/_cuda_shim.cc`) that
 enables the GPU-direct (`cuda_ipc`) transport, exchanging device arrays with a
-served Tesseract without a host round-trip. The published wheels bundle it, but a
+Tesseract without a host round-trip. The published wheels bundle it, but a
 source install (`pip install -e .`) has to compile it. The shim needs:
 
 - A C++17 compiler (`c++` by default; override with the `CXX` environment

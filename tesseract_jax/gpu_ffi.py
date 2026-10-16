@@ -139,11 +139,16 @@ class _DeviceArrayView:
     allocation. It never adopts, frees, or runs kernels on the object. So the
     minimal thing we must hand it is an object exposing that one attribute; a
     full array library (CuPy) is not needed, which keeps CUDA-array-library
-    dependencies off the GPU-direct input path.
+    dependencies off the GPU-direct input path. An in-process Tesseract receives
+    the view itself, and adopts it through the same protocol (e.g.
+    ``cupy.asarray``).
 
-    The view owns nothing: the memory is XLA's input buffer, valid for the
-    duration of the dispatch. ``data``'s read-only flag is ``False`` because the
-    encoder may read it via an on-GPU copy.
+    The view owns nothing. The memory is XLA's input buffer, valid for the
+    duration of the dispatch, and XLA may pass the same buffer to the caller's
+    other operations, so an in-process endpoint must not write to it. The
+    read-only flag in ``data`` is still ``False``, because ``torch.as_tensor``
+    rejects read-only views and CuPy ignores the flag. There is no ``stream``
+    key, since the handler synchronizes XLA's stream before the dispatch runs.
     """
 
     def __init__(self, ptr: int, typestr: str, shape: tuple[int, ...]) -> None:

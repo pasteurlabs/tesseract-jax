@@ -21,25 +21,15 @@ import numpy as np
 import pytest
 
 from tesseract_jax import apply_tesseract
-
-
-def _to_np(x):
-    """Host copy of a result array, whether it is a cupy or a jax/numpy array."""
-    get = getattr(x, "get", None)
-    return get() if callable(get) else np.asarray(x)
-
-
-def _apply(transport, inputs, **kwargs):
-    client, apply_kwargs = transport
-    return apply_tesseract(client, inputs, **apply_kwargs, **kwargs)
+from tesseract_jax.testing import to_numpy
 
 
 def test_apply_matches_analytic(transport):
     a = jnp.arange(64, dtype=jnp.float32)
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
-    out = jax.jit(lambda a, b: _apply(transport, {"a": a, "b": b})["c"])(a, b)
+    out = jax.jit(lambda a, b: apply_tesseract(transport, {"a": a, "b": b})["c"])(a, b)
     np.testing.assert_allclose(
-        _to_np(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+        to_numpy(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
 
 
@@ -48,11 +38,14 @@ def test_mask_nondiff_array_input(transport):
     a = jnp.arange(32, dtype=jnp.float32)
     b = jnp.ones(32, dtype=jnp.float32)
     mask = jnp.full((32,), 3.0, dtype=jnp.float32)
-    out = jax.jit(
-        lambda a, b, mask: _apply(transport, {"a": a, "b": b, "mask": mask})["c"]
-    )(a, b, mask)
+
+    def f(a, b, mask):
+        out = apply_tesseract(transport, {"a": a, "b": b, "mask": mask})
+        return out["c"]
+
+    out = jax.jit(f)(a, b, mask)
     np.testing.assert_allclose(
-        _to_np(out), (np.asarray(a) * 2.0 + np.asarray(b)) * 3.0, rtol=1e-6
+        to_numpy(out), (np.asarray(a) * 2.0 + np.asarray(b)) * 3.0, rtol=1e-6
     )
 
 
@@ -69,11 +62,11 @@ def test_grad_with_nondiff_array_input(transport):
     mask = jnp.full((n,), 3.0, dtype=jnp.float32)
 
     def loss(a, mask):
-        return _apply(transport, {"a": a, "b": b, "mask": mask})["c"].sum()
+        return apply_tesseract(transport, {"a": a, "b": b, "mask": mask})["c"].sum()
 
     g = jax.jit(jax.grad(loss, argnums=0))(a, mask)
     # c = (a*scale + b)*mask, scale=2 => d/da sum(c) = 2*mask.
-    np.testing.assert_allclose(_to_np(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(g), np.full((n,), 2.0 * 3.0), rtol=1e-6)
 
 
 def test_jvp_nondiff_output_placeholder_is_nan(transport):
@@ -90,18 +83,18 @@ def test_jvp_nondiff_output_placeholder_is_nan(transport):
     tb = jnp.zeros(n, dtype=jnp.float32)
 
     def f(a, b):
-        return _apply(transport, {"a": a, "b": b})
+        return apply_tesseract(transport, {"a": a, "b": b})
 
     primal, tangent = jax.jit(lambda a, b, ta, tb: jax.jvp(f, (a, b), (ta, tb)))(
         a, b, ta, tb
     )
     np.testing.assert_allclose(
-        _to_np(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
+        to_numpy(primal["c"]), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6
     )
     # dc = scale*da + db = 2*ta + tb = 2.
-    np.testing.assert_allclose(_to_np(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
+    np.testing.assert_allclose(to_numpy(tangent["c"]), np.full((n,), 2.0), rtol=1e-6)
     # The non-differentiable c_sum's tangent is the discarded placeholder: NaN.
-    assert np.all(np.isnan(_to_np(tangent["c_sum"])))
+    assert np.all(np.isnan(to_numpy(tangent["c_sum"])))
 
 
 @pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev], ids=["fwd", "bwd"])
@@ -118,12 +111,13 @@ def test_materialized_jacobian_modes(transport, jac):
     b = jnp.ones(n, dtype=jnp.float32)
 
     def f(a):
-        return _apply(transport, {"a": a, "b": b}, materialize_jacobian=True)["c"]
+        out = apply_tesseract(transport, {"a": a, "b": b}, materialize_jacobian=True)
+        return out["c"]
 
     out = jax.jit(jac(f))(a)
     # c = a*scale + b, scale=2 => dc/da = 2*I.
     np.testing.assert_allclose(
-        _to_np(out), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
+        to_numpy(out), np.eye(n, dtype=np.float32) * 2.0, rtol=1e-6
     )
 
 
@@ -134,9 +128,10 @@ def test_vmap_batching(transport):
     b = jnp.ones((batch, n), dtype=jnp.float32) * 3.0
 
     def f(a, b):
-        return _apply(transport, {"a": a, "b": b}, vmap_method="sequential")["c"]
+        out = apply_tesseract(transport, {"a": a, "b": b}, vmap_method="sequential")
+        return out["c"]
 
     out = jax.jit(jax.vmap(f))(a, b)
     np.testing.assert_allclose(
-        _to_np(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
+        to_numpy(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
