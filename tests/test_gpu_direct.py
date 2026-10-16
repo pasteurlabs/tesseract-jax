@@ -12,37 +12,24 @@ So every test here passes ``gpu_transport="cuda_ipc"``.
 
 These require a real GPU and a served (subprocess) GPU Tesseract, since CUDA IPC
 is cross-process and cannot be self-opened. Marked ``gpu``; the
-``served_gpu_tesseract`` fixture skips where CUDA / CuPy / a GPU-backed JAX are
-unavailable.
+``served_gpu_tesseract`` fixture skips where a GPU-backed JAX is unavailable.
+
+Every test also runs with the FFI residency check armed in ``conftest.py``, so a
+host copy on any dispatch path fails it.
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
 pytestmark = pytest.mark.gpu
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _arm_residency_check():
-    """Arm the FFI residency check for every GPU-direct test in this module.
-
-    ``TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS`` makes the native handler reject any
-    buffer that crosses the FFI boundary in host memory. The shim reads the flag
-    on every dispatch, so a test can disarm it with ``monkeypatch``. With it
-    armed, every assertion below (apply / grad / jvp / vjp / jacobian) also
-    guards against a host copy sneaking back onto a dispatch path.
-    """
-    os.environ["TESSERACT_JAX_DEBUG_CHECK_DEVICE_PTRS"] = "1"
 
 
 def _to_np(x):
@@ -111,9 +98,9 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
     """A float32-in/float64-out Tesseract round-trips on-device with the right dtype.
 
-    ``gpu_tesseract`` is all-float32, so the shim's per-buffer dtype handling is
-    otherwise only exercised for one width. Here apply returns float64, so a
-    correct copy must move the wider buffer and preserve the dtype through the
+    ``served_gpu_tesseract`` is all-float32, so the shim's per-buffer dtype
+    handling is otherwise only exercised for one width. Here apply returns float64,
+    so a correct copy must move the wider buffer and preserve the dtype through the
     cuda_ipc return path.
     """
     x = jnp.arange(64, dtype=jnp.float32)
@@ -168,11 +155,13 @@ def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     _assert_interpreter_alive()
 
 
-def test_apply_matches_host_callback(served_gpu_tesseract):
+def test_apply_matches_host_callback(served_gpu_tesseract, served_transport_tesseract):
     """The GPU FFI lowering must match the host-callback lowering exactly.
 
-    We force the same computation onto CPU (host callback) and GPU (FFI) and
-    compare bit-for-bit.
+    We run the same Tesseract through the host callback on CPU and through the FFI
+    on GPU, and compare bit-for-bit. The host leg computes with NumPy and the GPU
+    leg with JAX, but with the default ``scale`` of 2 the product ``a * scale`` is
+    exact, so both round once and agree.
     """
     a = jnp.linspace(-5, 5, 257, dtype=jnp.float32)
     b = jnp.linspace(10, -10, 257, dtype=jnp.float32)
@@ -185,7 +174,7 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
     with jax.default_device(jax.devices("cpu")[0]):
         a_cpu = jnp.asarray(np.asarray(a))
         b_cpu = jnp.asarray(np.asarray(b))
-        cpu = apply_tesseract(served_gpu_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
+        cpu = apply_tesseract(served_transport_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
 
     assert _on_gpu(gpu)
     np.testing.assert_array_equal(_to_np(gpu), np.asarray(cpu))
@@ -269,7 +258,7 @@ def test_materialized_jacobian_through_gpu_ffi(served_gpu_tesseract):
 
     Forcing ``materialize_jacobian=True`` routes ``jacfwd``/``jacrev`` to the
     Tesseract's ``jacobian`` endpoint rather than the batched jvp/vjp path. On
-    GPU that endpoint returns dense CuPy arrays, which must stay on-device end to
+    GPU that endpoint returns dense JAX arrays, which must stay on-device end to
     end rather than round-tripping through a host cast.
     """
     n = 8
@@ -414,7 +403,7 @@ def test_jvp_with_nondiff_output_through_gpu_ffi(served_gpu_tesseract):
 def test_host_pointer_at_ffi_boundary_errors_gracefully(served_gpu_tesseract):
     """A host pointer reaching the FFI boundary must fail cleanly, not crash.
 
-    The residency check (armed for this module by ``_arm_residency_check``) exists
+    The residency check (armed in ``conftest.py``) exists
     to catch an accidental host copy on a dispatch return path. For it to be useful
     the failure must surface as an ``ffi::Error`` (a Python ``JaxRuntimeError``),
     not abort the process -- which it would if the native handler released the GIL
@@ -502,7 +491,7 @@ def test_mixed_cpu_and_gpu_tesseracts_in_one_graph(
     gpu_transport), which takes the usual device->host->device round-trip. The
     two lower to different custom calls and compose without interfering.
     """
-    cpu_tess = Tesseract.from_url(served_vectoradd_tesseract)
+    cpu_tess = served_vectoradd_tesseract
 
     a = jnp.arange(64, dtype=jnp.float32)
     b = jnp.ones(64, dtype=jnp.float32) * 3.0
@@ -532,7 +521,7 @@ def test_bench_apply_gpu_direct(benchmark, served_gpu_tesseract, n):
     the median so a slowdown shows up in the timing report, but shared-runner
     noise makes a fixed wall-clock threshold too flaky to fail CI on. The
     deterministic guard against a silent host round-trip is the residency check
-    armed by ``_arm_residency_check`` above.
+    armed in ``conftest.py``.
     """
     a = jnp.arange(n, dtype=jnp.float32)
     b = jnp.ones(n, dtype=jnp.float32)

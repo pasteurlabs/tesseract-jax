@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract, save_intermediates, sow
 
@@ -532,8 +531,8 @@ class TestSowTag:
 class TestSowIntegration:
     """Integration tests with apply_tesseract."""
 
-    def test_pipeline_grad(self, served_univariate_tesseract_raw):
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+    def test_pipeline_grad(self, served_univariate_tesseract):
+        tess = served_univariate_tesseract
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -557,8 +556,8 @@ class TestSowIntegration:
         assert "primal" in grad_ints["tess_output"]
         assert "cotangent" in grad_ints["tess_output"]
 
-    def test_pipeline_forward_only(self, served_univariate_tesseract_raw):
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+    def test_pipeline_forward_only(self, served_univariate_tesseract):
+        tess = served_univariate_tesseract
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -571,9 +570,9 @@ class TestSowIntegration:
         assert "output" in intermediates
         assert "primal" in intermediates["output"]
 
-    def test_intermediates_match_tesseract_api(self, served_univariate_tesseract_raw):
+    def test_intermediates_match_tesseract_api(self, served_univariate_tesseract):
         """Captured primals/tangents/cotangents match direct Tesseract API calls."""
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        tess = served_univariate_tesseract
         x = jnp.array(2.0)
         y = jnp.array(3.0)
 
