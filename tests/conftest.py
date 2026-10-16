@@ -90,9 +90,11 @@ def _load_tesseract(folder_name: str) -> Tesseract:
 # (consumer) to be *separate* processes sharing the GPU -- a process cannot open
 # an IPC handle it exported itself. ``from_source`` provides that separate process.
 #
-# The GPU Tesseracts compute with JAX, the main use case. The tests whose outcome
-# depends on the producer also run against CuPy, standing in for any other GPU
-# framework. The two differ in how they adopt device inputs (DLPack for JAX,
+# The test Tesseracts compute with JAX, the main use case, and adopt their inputs
+# with ``as_jax_arrays``, so the same Tesseract answers host and cuda_ipc calls.
+# ``transport_tesseract`` can also compute with CuPy, standing in for any other
+# GPU framework, for the tests whose outcome depends on the producer. The two
+# differ in how they adopt device inputs (DLPack for JAX,
 # ``__cuda_array_interface__`` for CuPy) and in which allocator their outputs
 # come from.
 #
@@ -136,14 +138,14 @@ def _served_gpu_tesseract(folder: str, producer: str = "jax"):
 
 @pytest.fixture(scope="module")
 def served_gpu_tesseract():
-    """A served all-float32 GPU Tesseract computing with JAX. Skips without a GPU."""
-    yield from _served_gpu_tesseract("gpu_tesseract")
+    """``transport_tesseract`` computing with JAX over cuda_ipc. Skips without a GPU."""
+    yield from _served_gpu_tesseract("transport_tesseract")
 
 
-@pytest.fixture(scope="module", params=GPU_PRODUCERS)
-def served_gpu_mixed_dtype_tesseract(request):
-    """A served GPU Tesseract with float32 in / float64 out, once per producer."""
-    yield from _served_gpu_tesseract("gpu_mixed_dtype_tesseract", request.param)
+@pytest.fixture(scope="module")
+def served_gpu_mixed_dtype_tesseract():
+    """``mixed_dtype_tesseract`` (float32 in, float64 out) over cuda_ipc."""
+    yield from _served_gpu_tesseract("mixed_dtype_tesseract")
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +220,12 @@ def served_pytree_tesseract():
 @pytest.fixture(scope="session")
 def served_batched_tesseract():
     yield from _serve_tesseract(here / "batched_tesseract" / "tesseract_api.py")
+
+
+@pytest.fixture(scope="session")
+def served_transport_tesseract():
+    """``transport_tesseract`` computing with NumPy, for host-transport calls."""
+    yield from _serve_tesseract(here / "transport_tesseract" / "tesseract_api.py")
 
 
 # Tesseracts with specific endpoints removed — generated dynamically from

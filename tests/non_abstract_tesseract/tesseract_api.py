@@ -7,6 +7,7 @@ from typing import Any
 import jax.numpy as jnp
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float32
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 
 class InputSchema(BaseModel):
@@ -25,7 +26,7 @@ class OutputSchema(BaseModel):
 def apply(inputs: InputSchema) -> OutputSchema:
     """Multiplies a vector `a` by `s`, and sums the result to `b`."""
     return OutputSchema(
-        b=2.0 * inputs.a,
+        b=2.0 * as_jax_array(inputs.a),
         c=jnp.array([1.0, 1.0, 1.0], dtype="float32"),
     )
 
@@ -37,5 +38,5 @@ def vector_jacobian_product(
     cotangent_vector: dict[str, Any],
 ):
     return {
-        "a": 2.0 * cotangent_vector["b"],
+        "a": 2.0 * as_jax_array(cotangent_vector["b"]),
     }

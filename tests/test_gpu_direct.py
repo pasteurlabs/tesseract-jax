@@ -98,11 +98,10 @@ def test_apply_matches_analytic(served_gpu_tesseract, n):
 def test_apply_mixed_dtype_stays_on_device(served_gpu_mixed_dtype_tesseract):
     """A float32-in/float64-out Tesseract round-trips on-device with the right dtype.
 
-    ``gpu_tesseract`` is all-float32, so the shim's per-buffer dtype handling is
-    otherwise only exercised for one width. Here apply returns float64, so a
-    correct copy must move the wider buffer and preserve the dtype through the
-    cuda_ipc return path. The fixture runs this once per producer, since the
-    float64 buffer comes from the producer's allocator.
+    ``served_gpu_tesseract`` is all-float32, so the shim's per-buffer dtype
+    handling is otherwise only exercised for one width. Here apply returns float64,
+    so a correct copy must move the wider buffer and preserve the dtype through the
+    cuda_ipc return path.
     """
     x = jnp.arange(64, dtype=jnp.float32)
     y = jax.jit(
@@ -156,11 +155,13 @@ def test_apply_dtype_mismatch_at_ffi_boundary_errors(served_gpu_tesseract):
     _assert_interpreter_alive()
 
 
-def test_apply_matches_host_callback(served_gpu_tesseract):
+def test_apply_matches_host_callback(served_gpu_tesseract, served_transport_tesseract):
     """The GPU FFI lowering must match the host-callback lowering exactly.
 
-    We force the same computation onto CPU (host callback) and GPU (FFI) and
-    compare bit-for-bit.
+    We run the same Tesseract through the host callback on CPU and through the FFI
+    on GPU, and compare bit-for-bit. The host leg computes with NumPy and the GPU
+    leg with JAX, but with the default ``scale`` of 2 the product ``a * scale`` is
+    exact, so both round once and agree.
     """
     a = jnp.linspace(-5, 5, 257, dtype=jnp.float32)
     b = jnp.linspace(10, -10, 257, dtype=jnp.float32)
@@ -173,7 +174,7 @@ def test_apply_matches_host_callback(served_gpu_tesseract):
     with jax.default_device(jax.devices("cpu")[0]):
         a_cpu = jnp.asarray(np.asarray(a))
         b_cpu = jnp.asarray(np.asarray(b))
-        cpu = apply_tesseract(served_gpu_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
+        cpu = apply_tesseract(served_transport_tesseract, {"a": a_cpu, "b": b_cpu})["c"]
 
     assert _on_gpu(gpu)
     np.testing.assert_array_equal(_to_np(gpu), np.asarray(cpu))

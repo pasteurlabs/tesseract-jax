@@ -21,6 +21,7 @@ from typing import Annotated, Any
 import jax
 from pydantic import AfterValidator, BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float64, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 jax.config.update("jax_enable_x64", True)
 
@@ -62,11 +63,11 @@ def apply(inputs: InputSchema) -> OutputSchema:
     if inputs.mode == "bad_output":
         # Valid Python, but not a Float64 scalar -> OutputSchema rejects it.
         return OutputSchema(result="not a number")
-    return OutputSchema(result=inputs.x**0.5)
+    return OutputSchema(result=as_jax_array(inputs.x) ** 0.5)
 
 
 def jacobian(inputs: InputSchema, jac_inputs: set[str], jac_outputs: set[str]):
-    return {"result": {"x": 0.5 * inputs.x**-0.5}}
+    return {"result": {"x": 0.5 * as_jax_array(inputs.x) ** -0.5}}
 
 
 def jacobian_vector_product(
@@ -76,7 +77,7 @@ def jacobian_vector_product(
     tangent_vector,
 ):
     jac = jacobian(inputs, jvp_inputs, jvp_outputs)
-    return {"result": jac["result"]["x"] * tangent_vector["x"]}
+    return {"result": jac["result"]["x"] * as_jax_array(tangent_vector["x"])}
 
 
 def vector_jacobian_product(
@@ -86,7 +87,7 @@ def vector_jacobian_product(
     cotangent_vector,
 ):
     jac = jacobian(inputs, vjp_inputs, vjp_outputs)
-    return {"x": jac["result"]["x"] * cotangent_vector["result"]}
+    return {"x": jac["result"]["x"] * as_jax_array(cotangent_vector["result"])}
 
 
 def abstract_eval(abstract_inputs):

@@ -10,6 +10,7 @@ import equinox as eqx
 import jax
 from pydantic import BaseModel
 from tesseract_core.runtime import Array, Differentiable, Float64
+from tesseract_core.runtime.jax_recipes import as_jax_arrays
 from tesseract_core.runtime.tree_transforms import filter_func, flatten_with_paths
 
 jax.config.update("jax_enable_x64", True)
@@ -43,7 +44,7 @@ def apply_jit(inputs: dict) -> dict:
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return apply_jit(inputs.model_dump())
+    return apply_jit(as_jax_arrays(inputs.model_dump()))
 
 
 #
@@ -56,7 +57,9 @@ def jacobian(
     jac_inputs: set[str],
     jac_outputs: set[str],
 ):
-    return jac_jit(inputs.model_dump(), tuple(jac_inputs), tuple(jac_outputs))
+    return jac_jit(
+        as_jax_arrays(inputs.model_dump()), tuple(jac_inputs), tuple(jac_outputs)
+    )
 
 
 def jacobian_vector_product(
@@ -66,10 +69,10 @@ def jacobian_vector_product(
     tangent_vector: dict[str, Any],
 ):
     return jvp_jit(
-        inputs.model_dump(),
+        as_jax_arrays(inputs.model_dump()),
         tuple(jvp_inputs),
         tuple(jvp_outputs),
-        tangent_vector,
+        as_jax_arrays(tangent_vector),
     )
 
 
@@ -80,10 +83,10 @@ def vector_jacobian_product(
     cotangent_vector: dict[str, Any],
 ):
     return vjp_jit(
-        inputs.model_dump(),
+        as_jax_arrays(inputs.model_dump()),
         tuple(vjp_inputs),
         tuple(vjp_outputs),
-        cotangent_vector,
+        as_jax_arrays(cotangent_vector),
     )
 
 
