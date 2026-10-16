@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.5.0] - 2026-09-23
+## [0.5.0] - 2026-10-16
 
 ### Features
 
@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Support device-to-device GPU interop (#239)
 - Prune non-differentiable inputs and unused outputs from the VJP (#263)
 - Use DCE to leverage Tesseract's partial differentiation (#209)
+- Keep GPU arrays on the device whenever the Tesseract's GPU transport works (#286)
 
 ### Bug Fixes
 
@@ -20,6 +21,8 @@ All notable changes to this project will be documented in this file.
 - Keep dotted dict keys whole when matching schema templates (#252)
 - Fill discarded derivative slots with each dtype's 0/0 value (#259)
 - Support transposing vector_jacobian_product wrt cotangents (#270)
+- Give integer outputs a float0 tangent (#279)
+- Keep float32 precision in jacfwd/jacrev, give per-example gradients under vmap(grad), and accept host results on the cuda_ipc path (#285)
 
 ### Refactor
 
@@ -30,10 +33,15 @@ All notable changes to this project will be documented in this file.
 ### Documentation
 
 - Document that Tesseracts only support first-order derivatives (#265)
+- Lead the quick start with Tesseract.from_source, and serve test fixtures with it (#284)
 
 ### Performance
 
 - Enable CSE with `has_side_effect=False` (#233)
+
+### Testing
+
+- Run GPU tests against a JAX-computing Tesseract by default, and against CuPy where the producer matters (#288)
 
 ## [0.4.1] - 2026-07-21
 
