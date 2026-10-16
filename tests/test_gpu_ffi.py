@@ -338,3 +338,86 @@ def test_native_dispatch_wraps_inputs_as_views(monkeypatch):
     assert isinstance(view, gpu_ffi._DeviceArrayView)
     assert view.shape == (2, 2)  # list shape normalised to a tuple
     assert view.dtype == np.dtype("<f8")
+
+
+def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
+    """Host results reach the handler as C-contiguous NumPy arrays.
+
+    The handler copies a host result as one flat byte range, so a strided one
+    must be made contiguous first, without changing its shape (0-d results stay
+    0-d, so they match their output buffer). Device results and placeholder
+    ``None`` slots pass through untouched.
+    """
+
+    class _Device:
+        def __init__(self) -> None:
+            self.__cuda_array_interface__ = {
+                "shape": (2,),
+                "typestr": "<f4",
+                "data": (0x1000, False),
+                "version": 3,
+            }
+
+    device = _Device()
+    strided = np.arange(6, dtype=np.float32)[::2]
+    scalar = np.float32(3.0)
+    zero_d = np.array(4.0, dtype=np.float32)
+    monkeypatch.setattr(
+        gpu_ffi,
+        "_registry",
+        {7: lambda views: (device, None, strided, scalar, zero_d)},
+    )
+
+    out_device, out_none, out_host, out_scalar, out_zero_d = gpu_ffi._native_dispatch(
+        7, []
+    )
+
+    assert out_device is device
+    assert out_none is None
+    assert out_host.flags.c_contiguous
+    np.testing.assert_array_equal(out_host, strided)
+    for out, expected in ((out_scalar, scalar), (out_zero_d, zero_d)):
+        assert out.shape == ()
+        assert out.flags.c_contiguous
+        assert out == expected
+
+
+class _FakeDeviceArray:
+    """Looks like a CuPy array: ``__cuda_array_interface__`` plus ``.get()``."""
+
+    def __init__(self, host: np.ndarray) -> None:
+        self._host = host
+        self.__cuda_array_interface__ = {
+            "shape": host.shape,
+            "typestr": host.dtype.str,
+            "data": (0x1000, False),
+            "version": 3,
+        }
+
+    def get(self) -> np.ndarray:
+        return self._host
+
+
+def test_to_host_copies_device_arrays_only():
+    from tesseract_jax.tesseract_compat import _to_host
+
+    host = np.arange(3.0)
+    np.testing.assert_array_equal(_to_host(_FakeDeviceArray(host)), host)
+    assert _to_host(host) is host
+
+
+def test_cast_return_casts_on_the_host_unless_the_dtype_matches():
+    """A device result of the right dtype is left for the shim to copy.
+
+    Everything else, a device result of another dtype or a host result, is cast
+    on the host, since the shim only copies bytes.
+    """
+    from tesseract_jax.tesseract_compat import _cast_return
+
+    device32 = _FakeDeviceArray(np.arange(3.0, dtype=np.float32))
+    assert _cast_return(device32, dtype=np.dtype("float32")) is device32
+    for value in [_FakeDeviceArray(np.arange(3.0)), np.arange(3.0)]:
+        cast = _cast_return(value, dtype=np.dtype("float32"))
+        assert isinstance(cast, np.ndarray)
+        assert cast.dtype == np.float32
+        np.testing.assert_array_equal(cast, np.arange(3.0))

@@ -687,6 +687,34 @@ def test_vjp_with_static_input_between_arrays(static_input_tess):
     np.testing.assert_allclose(grad, grad_raw, rtol=1e-5)
 
 
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_agrees_across_vmap_methods(batched_tess, vmap_method):
+    """Per-example gradients must agree with the unbatched gradient.
+
+    Under ``vmap(grad(f))`` the vjp bind gets batched primals but an unbatched
+    cotangent, which the vectorized strategies must send with the batch size
+    of the outputs it belongs to. ``y`` is unbatched yet differentiated, so it
+    needs a batch dimension too to get one gradient per example rather than
+    their sum.
+    """
+
+    def loss(x, y):
+        out = apply_tesseract(batched_tess, {"x": x, "y": y}, vmap_method=vmap_method)
+        return out["result"].sum()
+
+    grad = jax.grad(loss, argnums=(0, 1))
+    xs = jnp.stack([jnp.arange(3.0) * s for s in (1.0, 2.0)])
+    y = jnp.linspace(0.5, 1.5, 3)
+    got = jax.vmap(grad, in_axes=(0, None))(xs, y)
+    expected = [jnp.stack(g) for g in zip(*(grad(x, y) for x in xs), strict=True)]
+
+    for g, e in zip(got, expected, strict=True):
+        assert g.shape == e.shape
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
 def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
@@ -834,6 +862,31 @@ def test_discarded_tangent_fill_value(gather_tess, use_jit):
     count = np.asarray(tangents["count"])
     assert count.dtype == jax.dtypes.float0
     assert count.shape == (3,)
+
+
+@pytest.mark.parametrize("materialize_jacobian", [None, False])
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev])
+def test_jacobian_with_integer_output(gather_tess, jac, materialize_jacobian):
+    """``jacfwd`` / ``jacrev`` of a Tesseract with integer outputs.
+
+    With ``None`` the call goes through the ``jacobian`` endpoint, whose path
+    builds the discarded tangent of every non-differentiable output itself.
+    Filling an integer one with NaN would emit a RuntimeWarning while the call
+    is traced, which ``filterwarnings = ["error"]`` turns into a failure.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def gathered(weights):
+        return apply_tesseract(
+            gather_tess,
+            inputs=dict(weights=weights, indices=indices),
+            vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
+        )["gathered"]
+
+    got = jax.jit(jac(gathered))(weights)
+    np.testing.assert_array_equal(got, np.eye(3, dtype="float32")[indices])
 
 
 @pytest.mark.parametrize("use_jit", [True, False])

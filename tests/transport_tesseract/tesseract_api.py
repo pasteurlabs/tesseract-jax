@@ -16,6 +16,10 @@ The math is ``c = (a * scale + b) * mask``, with a non-differentiable array inpu
 ``mask`` (default all-ones) and a non-differentiable output ``c_sum``. Between
 them they exercise the placeholder paths for non-differentiable inputs and
 discarded outputs, which differ between host and device.
+
+``return_host`` makes ``apply`` and ``vector_jacobian_product`` return host
+NumPy arrays instead, for a Tesseract whose results end up on the host whatever
+it computes on.
 """
 
 import os
@@ -60,6 +64,9 @@ class InputSchema(BaseModel):
         default=None,
         description="Non-differentiable elementwise mask; defaults to all-ones.",
     )
+    return_host: bool = Field(
+        default=False, description="Return host NumPy arrays instead of xp ones."
+    )
 
 
 class OutputSchema(BaseModel):
@@ -73,6 +80,12 @@ def _mask_for(inputs, a):
     return _asxp(inputs.mask) if inputs.mask is not None else xp.ones_like(a)
 
 
+def _maybe_to_host(x, inputs):
+    if not inputs.return_host:
+        return x
+    return xp.asnumpy(x) if _ARRAY_MODULE == "cupy" else np.asarray(x)
+
+
 def apply(inputs: InputSchema) -> OutputSchema:
     a = _asxp(inputs.a)
     b = _asxp(inputs.b)
@@ -80,7 +93,10 @@ def apply(inputs: InputSchema) -> OutputSchema:
     c = (a * scale + b) * _mask_for(inputs, a)
     # c_sum is a non-differentiable output: it makes the derivative endpoints emit
     # a placeholder for it, exercising the discarded-output-slot path per transport.
-    return OutputSchema(c=c, c_sum=c.sum().reshape(1))
+    return OutputSchema(
+        c=_maybe_to_host(c, inputs),
+        c_sum=_maybe_to_host(c.sum().reshape(1), inputs),
+    )
 
 
 def abstract_eval(abstract_inputs):
@@ -118,9 +134,9 @@ def vector_jacobian_product(
     ct = _asxp(cotangent_vector["c"]) * mask
     out = {}
     if "a" in vjp_inputs:
-        out["a"] = ct * scale
+        out["a"] = _maybe_to_host(ct * scale, inputs)
     if "b" in vjp_inputs:
-        out["b"] = ct
+        out["b"] = _maybe_to_host(ct, inputs)
     return out
 
 

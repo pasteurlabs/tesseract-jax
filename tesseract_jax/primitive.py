@@ -797,8 +797,8 @@ def _batched_via_jacobian(
     ) -> tuple:
         """Assemble ``diff_results`` into ``full_order``, NaN-padding non-diff slots.
 
-        Non-diff output tangents are NaN so the batched JVP matches the
-        sequential one (see ``_discarded_slot``).
+        Non-diff output tangents are NaN (zero for dtypes without a NaN) so the
+        batched JVP matches the sequential one (see ``_discarded_slot``).
         """
         out, k = [], 0
         for item, diff in zip(full_order, is_diff, strict=True):
@@ -806,9 +806,8 @@ def _batched_via_jacobian(
                 out.append(diff_results[k])
                 k += 1
             else:
-                out.append(
-                    jnp.full((batch_size, *item.shape), jnp.nan, dtype=item.dtype)
-                )
+                fill = jnp.nan if jnp.issubdtype(item.dtype, jnp.inexact) else 0
+                out.append(jnp.full((batch_size, *item.shape), fill, dtype=item.dtype))
         return tuple(out)
 
     # Using ``diff_avals`` / ``diff_primals`` as the first arg to
@@ -868,16 +867,26 @@ def _batched_via_jacobian(
     return grads, (0,) * len(grads)
 
 
+# HIGHEST precision, so jacfwd / jacrev return the endpoint's Jacobian exactly (no TF32).
 def _matmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract ``matrix``'s trailing axes against each row of ``batched_vector``."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jax.vmap(lambda v: jnp.tensordot(matrix, v, axes=v.ndim))(batched_vector)
+    return jax.vmap(
+        lambda v: jnp.tensordot(
+            matrix, v, axes=v.ndim, precision=jax.lax.Precision.HIGHEST
+        )
+    )(batched_vector)
 
 
 def _rmatmul(matrix: Any, batched_vector: Any) -> Any:
     """Contract each row of ``batched_vector`` against ``matrix``'s leading axes."""
     batched_vector = batched_vector.astype(matrix.dtype)
-    return jnp.tensordot(batched_vector, matrix, axes=batched_vector.ndim - 1)
+    return jnp.tensordot(
+        batched_vector,
+        matrix,
+        axes=batched_vector.ndim - 1,
+        precision=jax.lax.Precision.HIGHEST,
+    )
 
 
 batching.primitive_batchers[tesseract_dispatch_p] = tesseract_dispatch_batching
@@ -1110,6 +1119,9 @@ def apply_tesseract(
             is large and you are batching over a small number of (co)tangents
             (e.g. to perform low-rank approximations or apply coloring
             methods) ``False`` may be more efficient.
+
+            See :doc:`/content/vmap-methods` for how this interacts with
+            ``vmap_method``.
         gpu_transport: Name of the on-device transport used to exchange GPU
             arrays with the Tesseract instead of a host round-trip (currently
             ``"cuda_ipc"``). Requires a served Tesseract (``HTTPClient``) started
