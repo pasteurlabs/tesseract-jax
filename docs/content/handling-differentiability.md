@@ -240,4 +240,4 @@ g(x, y)           # ⚠️ requests both, then discards "y" (no DCE eagerly)
 
 Wrapping the outer call in `jax.jit` recovers the pruning in the last case of each block. This only affects how much the Tesseract computes, never the returned value.
 
-One case is not pruned, even under `jax.jit`: discarding output rows of a `jax.jacrev` result. Reverse mode builds all rows of the Jacobian in one batched request, so for an `f2` that returns both outputs, `jax.jit(jax.jacrev(f2))(x, y)["a"]` still requests the "b" rows. Return only the outputs you need from the function you differentiate, as `f` does above.
+Output rows discarded from a `jax.jacrev` result are not pruned, even under `jax.jit`. `jax.jacrev` requests the rows of all outputs as one batch, and DCE can't remove part of a batch. If `f2` returns both outputs, `jax.jit(lambda x, y: jax.jacrev(f2)(x, y)["a"])` still requests the "b" rows. To avoid this, return only the outputs you need from the function you differentiate, as `f` does above.
