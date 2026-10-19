@@ -4,7 +4,7 @@ annotated-doc==0.0.5
     # via typer
 annotated-types==0.8.0
     # via pydantic
-certifi==2026.7.22
+certifi==2026.10.18
     # via requests
 charset-normalizer==3.5.2
     # via requests
@@ -28,7 +28,7 @@ ml-dtypes==0.6.0
     # via
     #   jax
     #   jaxlib
-numpy==2.5.3
+numpy==2.5.4
     # via
     #   jax
     #   jaxlib
@@ -37,7 +37,7 @@ numpy==2.5.3
     #   tesseract-core
 opt-einsum==3.4.0
     # via jax
-orjson==3.12.0
+orjson==3.13.0
     # via tesseract-core
 packaging==26.3
     # via
@@ -45,11 +45,11 @@ packaging==26.3
     #   tesseract-jax
 pip==26.2.1
     # via tesseract-core
-pybase64==1.5.0
+pybase64==1.5.1
     # via tesseract-core
-pydantic==2.13.5
+pydantic==2.14.1
     # via tesseract-core
-pydantic-core==2.46.5
+pydantic-core==2.50.1
     # via pydantic
 pygments==2.21.0
     # via rich
@@ -69,7 +69,7 @@ shellingham==1.5.4
     # via typer
 tesseract-core==1.15.0
     # via tesseract-jax
-typer==0.27.2
+typer==0.27.3
     # via tesseract-core
 typing-extensions==4.16.0
     # via
