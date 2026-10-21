@@ -456,8 +456,12 @@ def save_intermediates(
         # also populates the treedef store with the pytree structure of
         # each sow call (needed later to unflatten captured flat arrays
         # back into the original pytree shape).
-        closed_jaxpr = jax.make_jaxpr(lambda *a: fn(*a, **kwargs))(*args)
+        closed_jaxpr, out_shape = jax.make_jaxpr(
+            lambda *a: fn(*a, **kwargs), return_shape=True
+        )(*args)
         original_jaxpr = closed_jaxpr.jaxpr
+        flat_args = jax.tree.leaves(args)
+        out_treedef = jax.tree.structure(out_shape)
         treedefs_snapshot = dict(_sow_treedefs.get())  # type: ignore[arg-type]
 
         # Restore the previous ContextVar state so we don't leak.
@@ -475,15 +479,14 @@ def save_intermediates(
         # No sow calls found -- just evaluate the original program.
         if not found_sow_keys:
             flat_results = jax.core.eval_jaxpr(
-                original_jaxpr, closed_jaxpr.consts, *args
+                original_jaxpr, closed_jaxpr.consts, *flat_args
             )
-            result = flat_results[0] if len(flat_results) == 1 else tuple(flat_results)
-            return result, {}
+            return jax.tree.unflatten(out_treedef, flat_results), {}
 
         # Step 3: Evaluate the rewritten jaxpr.  The result is a flat
         # list: [original_outputs..., captured_sow_values...].
         all_flat_results = jax.core.eval_jaxpr(
-            rewritten_jaxpr, closed_jaxpr.consts, *args
+            rewritten_jaxpr, closed_jaxpr.consts, *flat_args
         )
 
         # Split into original outputs and captured intermediates.
@@ -507,11 +510,6 @@ def save_intermediates(
             intermediates.setdefault(sow_name, {})[sow_mode] = reconstructed
             offset += n_leaves
 
-        result = (
-            original_flat_results[0]
-            if len(original_flat_results) == 1
-            else tuple(original_flat_results)
-        )
-        return result, intermediates
+        return jax.tree.unflatten(out_treedef, original_flat_results), intermediates
 
     return wrapped
