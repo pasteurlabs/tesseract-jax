@@ -1,6 +1,6 @@
 # Debugging pipelines
 
-When building pipelines that chain multiple Tesseracts, it can be difficult to understand what values flow between steps — especially when gradients are involved. Tesseract-JAX provides {func}`~tesseract_jax.sow` and {func}`~tesseract_jax.save_intermediates` to help you inspect intermediate values and their derivatives.
+When building pipelines that chain multiple Tesseracts, it can be difficult to understand what values flow between steps — especially when gradients are involved. Tesseract-JAX provides {func}`~tesseract_jax.sow` and {func}`~tesseract_jax.save_intermediates` to help you inspect intermediate values and their derivatives, and {func}`~tesseract_jax.check_gradients` to find the Tesseract that breaks a gradient.
 
 ## Basic usage
 
@@ -166,3 +166,53 @@ The keys present in each intermediate's dictionary depend on which JAX transform
 | `jax.jvp`              | `primal`, `tangent`                |
 | `jax.jacobian`         | `primal`, `cotangent` (per-column) |
 | `jax.jacfwd`           | `primal`, `tangent` (per-column)   |
+
+## Finding the Tesseract that breaks a gradient
+
+When the gradient of a whole pipeline is wrong, {func}`~tesseract_jax.check_gradients` finds where it goes wrong. It compares the gradient of your loss with a central finite difference along a random direction. While it computes that gradient, it records the inputs each Tesseract receives, and then runs the same check on each Tesseract alone at those inputs. Only the `apply`, `abstract_eval` and `vector_jacobian_product` endpoints are used.
+
+```python
+from tesseract_jax import apply_tesseract, check_gradients
+
+def loss_fn(params):
+    h = apply_tesseract(encoder, {"x": params["x"]})["y"]
+    u = apply_tesseract(solver, {"x": jnp.sin(h)})["y"]
+    return jnp.sum(jnp.cos(u))
+
+report = check_gradients(loss_fn, {"x": jnp.array([0.3, 0.7, 1.1])})
+print(report)
+```
+
+Here both Tesseracts square their input and the VJP of `solver` is 5% too large. Neither has a title in its `tesseract_config.yaml`, so each row is labelled by its call site and its differentiable inputs and outputs:
+
+```
+Gradient check along a random direction (seed=0, rtol=0.01, steps 1e-01 .. 1e-04)
+
+                 grad.d   fin. diff  rel. error    step  result
+  pipeline    -1.57e+00   -1.50e+00    4.76e-02   1e-03  FAIL
+
+  #1 x -> y    3.22e+00    3.22e+00    1.38e-16   1e-01  ok
+  #2 x -> y   -1.68e+00   -1.60e+00    4.76e-02   1e-01  FAIL
+
+#2 x -> y disagrees with a finite difference of its own apply, at the inputs it received in the pipeline. Start there.
+```
+
+`report.passed` is `True` only if the pipeline and every call pass, so `assert report.passed` works in a test. Each row of `report.calls` also holds the Tesseract (`row.tesseract`) and the inputs it received (`row.inputs`).
+
+### Reading the verdict
+
+- **"... Start there."** names the first Tesseract call that fails on its own, because it disagrees with its finite difference or because it raised. If its finite difference is too uncertain to be sure, the verdict says its gradient may still be right.
+- **"Every Tesseract agrees ... The problem is in the JAX code between the Tesseracts"** means each Tesseract is right at the inputs it received, but the pipeline is off by more than ten times the error of any Tesseract. Look for a `jax.lax.stop_gradient`, an operation whose derivative is zero or undefined (`round`, `argmax`, an integer cast, `sqrt` at 0), or a `custom_vjp`.
+- **"... by less than ten times the error of ..."** means no Tesseract call fails, but one is close enough to `rtol` that it could explain the pipeline's error. Rerun with a smaller `rtol`.
+- **"... Only the first call of each site was checked ..."** means no checked call fails, but a Tesseract ran more than once and only its first call was checked, so a later call may be the wrong one.
+- **"The finite difference of the pipeline is too uncertain ..."** means the check cannot tell whether the gradient is wrong, as happens near a minimum of the loss, with a noisy loss, or in float32.
+- **"The gradient of loss_fn could not be computed"** means `jax.grad(loss_fn)` raised; the pipeline row shows the exception. Any Tesseract calls recorded before it are still checked.
+
+A finite difference is taken at each step in `steps`, relative to the RMS of each input. A row passes when the gradient is within `rtol` of one of them after allowing for its error bound, and fails only when three neighbouring finite differences have settled and the gradient is farther than `rtol` from them. Otherwise the row is flagged as too uncertain.
+
+### Limits
+
+- Only the first execution of each call site is checked. For a Tesseract called in a loop (`scan`, `fori_loop`, `t(t(x))`), an error that shows only in later calls is missed; the verdict then says so instead of blaming the JAX code between the Tesseracts.
+- In float32 a correct pipeline often cannot be confirmed, especially when the loss or an output carries a large constant. Use `jax.config.update("jax_enable_x64", True)`.
+- Only reverse mode and first derivatives are checked, along one random direction per row. A pass is evidence, not proof; rerun with another `seed`.
+- Only floating-point leaves of `params` are perturbed. The check is not re-entrant, and Tesseract calls made by other threads while it runs are recorded too.
