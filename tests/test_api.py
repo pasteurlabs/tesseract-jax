@@ -765,8 +765,17 @@ def test_vmap_of_grad_gives_per_example_gradients(
 
 
 @pytest.mark.parametrize("case", list(VMAP_GRAD_CASES))
-def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, case):
-    """Count the ``vector_jacobian_product`` requests of one ``vmap(grad(f))``."""
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, vmap_method, case):
+    """Count the ``vector_jacobian_product`` requests of one ``vmap(grad(f))``.
+
+    The vectorized methods send one batched request once every differentiated
+    input carries the batch dimension, which ``broadcast_all`` always gives
+    them. A shared ``y`` that is differentiated keeps ``expand_dims`` and
+    ``auto_experimental`` on one request per example.
+    """
     calls = []
     orig = batched_tess.vector_jacobian_product
 
@@ -776,11 +785,14 @@ def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, case):
 
     monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
 
-    fn, args, _ = _vmap_of_grad(batched_tess, "sequential", case)
+    fn, args, _ = _vmap_of_grad(batched_tess, vmap_method, case)
     calls.clear()
     fn(*args)
 
-    assert calls == [(3,)] * 4
+    batched = vmap_method == "broadcast_all" or (
+        vmap_method != "sequential" and case == "all-batched"
+    )
+    assert calls == ([(4, 3)] if batched else [(3,)] * 4)
 
 
 def test_list_index_survives_static_pruning():

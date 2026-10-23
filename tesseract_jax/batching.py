@@ -42,6 +42,30 @@ def _is_ellipsis_template(template: str | None, diff_paths: dict[str, Any]) -> b
     return template is not None and "shape" not in diff_paths[template]
 
 
+def _vjp_needs_sequential(
+    is_batched_mask: list[bool], params: "DispatchParams"
+) -> bool:
+    """Whether a VJP with batched cotangents has to run once per batch element.
+
+    A single batched request returns, for each differentiated primal, the
+    gradient of the whole batch with respect to it. That is one gradient per
+    example only if the primal carries the batch dimension; an unbatched one
+    would receive their sum over the batch.
+    """
+    n_primals = params.n_primals
+    if params.eval_func != "vector_jacobian_product" or not any(
+        is_batched_mask[n_primals:]
+    ):
+        return False
+    return not all(
+        batched
+        for batched, differentiated in zip(
+            is_batched_mask[:n_primals], params.has_tangent, strict=True
+        )
+        if differentiated
+    )
+
+
 def _dispatch_vectorized(
     new_args: list,
     is_batched_mask: list[bool],
@@ -60,9 +84,11 @@ def _dispatch_vectorized(
                     new_args[i], new_args[i + n_primals]
                 )
 
-    # VJP (only reached with unbatched cotangents): the outputs are batched, so
-    # each cotangent must be too, and a differentiated primal needs one row per
-    # batch element to receive per-example gradients rather than their sum.
+    # VJP: the outputs are batched, so each cotangent must be too, and a
+    # differentiated primal needs one row per batch element to receive
+    # per-example gradients rather than their sum. With batched cotangents, the
+    # callers only get here once every differentiated primal carries the batch
+    # dimension (see ``_vjp_needs_sequential``).
     if params.eval_func == "vector_jacobian_product":
         needs_batch = [*params.has_tangent, *(True,) * (len(new_args) - n_primals)]
         new_args = [
@@ -124,10 +150,7 @@ def expand_dims(
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
+    if _vjp_needs_sequential(is_batched_mask, params):
         return sequential(new_args, is_batched_mask, **kwargs)
 
     new_args = [
@@ -157,12 +180,8 @@ def broadcast_all(
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
-        return sequential(new_args, is_batched_mask, **kwargs)
-
+    # Every primal gets the batch dimension, so a VJP with batched cotangents
+    # returns one gradient per example and needs no sequential fallback.
     new_args = [
         arg if batched else jnp.broadcast_to(arg, (batch_size, *arg.shape))
         for arg, batched in zip(new_args, is_batched_mask, strict=True)
@@ -191,10 +210,7 @@ def auto_experimental(
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
+    if _vjp_needs_sequential(is_batched_mask, params):
         return sequential(new_args, is_batched_mask, **kwargs)
 
     # Determine which primal args need to support a batch dimension
