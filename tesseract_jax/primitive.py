@@ -4,7 +4,8 @@
 import operator
 import os
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
@@ -39,6 +40,27 @@ tesseract_dispatch_p.multiple_results = True
 
 
 CHECK_STATIC_OUTPUTS_ENV_VAR = "TESSERACT_JAX_CHECK_STATIC_OUTPUTS"
+
+# Called before each apply runs, inside ``record_apply_inputs``. Read at
+# execution time, so it also sees programs compiled before. A module global, as
+# host callbacks run on XLA's own threads, which a ContextVar does not reach.
+_apply_recorder: Callable[[DispatchParams, tuple], None] | None = None
+
+
+@contextmanager
+def record_apply_inputs(
+    record: Callable[[DispatchParams, tuple], None],
+) -> Iterator[None]:
+    """Call ``record(params, args)`` before each apply runs, for ``check_gradients``."""
+    global _apply_recorder
+    if _apply_recorder is not None:
+        raise RuntimeError("check_gradients is not re-entrant")
+    _apply_recorder = record
+    try:
+        yield
+    finally:
+        _apply_recorder = None
+
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _FALSY = frozenset({"0", "false", "no", "off"})
@@ -515,6 +537,8 @@ def _build_dispatch_closure(
     """
 
     def dispatch(*args: TransportArray) -> tuple:
+        if _apply_recorder is not None and params.eval_func == "apply":
+            _apply_recorder(params, args)
         client = params.client.with_gpu_transport(gpu_transport)
         out = getattr(client, params.eval_func)(args, params)
         if not isinstance(out, tuple):
