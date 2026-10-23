@@ -169,7 +169,9 @@ The keys present in each intermediate's dictionary depend on which JAX transform
 
 ## Finding the Tesseract that breaks a gradient
 
-When the gradient of a whole pipeline is wrong, {func}`~tesseract_jax.check_gradients` finds where it goes wrong. It compares the gradient of your loss with a central finite difference along a random direction. While it computes that gradient, it records the inputs each Tesseract receives, and then runs the same check on each Tesseract alone at those inputs. Only the `apply`, `abstract_eval` and `vector_jacobian_product` endpoints are used.
+When the gradient of a whole pipeline is wrong, {func}`~tesseract_jax.check_gradients` finds where it goes wrong. It compares the gradient of your loss with a central finite difference along a random direction. While it computes that gradient, it records the inputs each Tesseract receives, and then runs the same check on each Tesseract alone at those inputs.
+
+Only the `apply`, `abstract_eval` and `vector_jacobian_product` endpoints are used, so Tesseracts that implement only a VJP can be checked.
 
 ```python
 from tesseract_jax import apply_tesseract, check_gradients
@@ -183,7 +185,7 @@ report = check_gradients(loss_fn, {"x": jnp.array([0.3, 0.7, 1.1])})
 print(report)
 ```
 
-Here both Tesseracts square their input and the VJP of `solver` is 5% too large. Neither has a title in its `tesseract_config.yaml`, so each row is labelled by its call site and its differentiable inputs and outputs:
+Here both Tesseracts square their input and the VJP of `solver` is 5% too large. Neither has a `name` in its `tesseract_config.yaml`, so each row is labelled by its call site and its differentiable inputs and outputs:
 
 ```
 Gradient check along a random direction (seed=0, rtol=0.01, steps 1e-01 .. 1e-04)
@@ -197,22 +199,96 @@ Gradient check along a random direction (seed=0, rtol=0.01, steps 1e-01 .. 1e-04
 #2 x -> y disagrees with a finite difference of its own apply, at the inputs it received in the pipeline. Start there.
 ```
 
-`report.passed` is `True` only if the pipeline and every call pass, so `assert report.passed` works in a test. Each row of `report.calls` also holds the Tesseract (`row.tesseract`) and the inputs it received (`row.inputs`).
+`report.passed` is `True` only if the pipeline and every call pass, so `assert report.passed` works in a test.
 
-### Reading the verdict
+### Reading the result
 
-- **"... Start there."** names the first Tesseract call that fails on its own, because it disagrees with its finite difference or because it raised. If its finite difference is too uncertain to be sure, the verdict says its gradient may still be right.
-- **"Every Tesseract agrees ... The problem is in the JAX code between the Tesseracts"** means each Tesseract is right at the inputs it received, along three random directions, but the pipeline is off by more than ten times the error of any Tesseract. Look for a `jax.lax.stop_gradient`, an operation whose derivative is zero or undefined (`round`, `argmax`, an integer cast, `sqrt` at 0), or a `custom_vjp`.
-- **"... by less than ten times the error of ..."** means no Tesseract call fails, but one is close enough to `rtol` that it could explain the pipeline's error. Rerun with a smaller `rtol`.
-- **"... Not every call was checked ..."** means no checked call fails, but a Tesseract ran more often than it was checked, so a call that was skipped may be the wrong one. Rerun with `max_calls_per_site=None`.
-- **"The finite difference of the pipeline is too uncertain ..."** means the check cannot tell whether the gradient is wrong, as happens near a minimum of the loss, with a noisy loss, or in float32.
-- **"The gradient of loss_fn could not be computed"** means `jax.grad(loss_fn)` raised; the pipeline row shows the exception. The Tesseracts are still checked: their calls are recorded again from plain evaluations of `loss_fn`, and an input counts as depending on `params` if it changes when `params` does.
+Start with the last line, the verdict:
 
-A finite difference is taken at each step in `steps`, relative to the RMS of each input. A row passes when the gradient is within `rtol` of one of them after allowing for its error bound, and fails only when three neighbouring finite differences have settled and the gradient is farther than `rtol` from them. Otherwise the row is flagged as too uncertain.
+- **"... Start there."** names the first Tesseract call that fails on its own, because it disagrees with its finite difference or because it raised. Fix that one first; a wrong VJP upstream can make later checks look odd. A row that fails for sure is named before one whose finite difference is too uncertain to tell (see Step size below); for the latter, the verdict adds that its gradient may still be right.
+- **"Every Tesseract agrees ... The problem is in the JAX code between the Tesseracts"** means each Tesseract is right at the inputs it received, along three random directions, but the pipeline is not, by more than ten times the error of any Tesseract. Look at the code that connects them, for example a `jax.lax.stop_gradient`, an operation whose derivative is zero or undefined (`round`, `argmax`, an integer cast, a comparison, `sqrt` at 0), or a `custom_vjp`.
+- **"Not every call was checked"** means a Tesseract ran more often than it was checked (see below), so the pipeline failure may come from a call that was skipped. Rerun with `max_calls_per_site=None` before looking between the Tesseracts.
+- **"... by less than ten times the error of ..."** means no Tesseract call fails, but one is close enough to `rtol` that its error, grown along the pipeline, could explain the pipeline's. Rerun with a smaller `rtol`.
+- **"The finite difference of the pipeline is too uncertain ..."** means no Tesseract call failed, and the finite difference of the pipeline is too uncertain to tell whether its gradient is wrong. See Limits below.
+- **"The gradient of loss_fn could not be computed"** means `jax.grad(loss_fn)` raised, and the pipeline row shows the exception. Common causes are a `while_loop`, which reverse mode does not support, a `loss_fn` that calls `jax.grad` through a Tesseract, and a loss that is not a real scalar. The Tesseracts are still checked: their calls are recorded again from plain evaluations of `loss_fn`, and an input counts as depending on `params` if it changes when `params` does.
+
+The columns are:
+
+- `calls`: how often the call site ran, or `1 of 6` when only some executions were checked.
+- `grad.d`: the gradient contracted with the random direction `d`.
+- `fin. diff`: the central difference along `d` that was kept (see Step size below).
+- `rel. error`: `|grad.d - fin. diff| / max(|grad.d|, |fin. diff|)`. A row passes when it is at most `rtol`.
+- `step`: the step that gave that finite difference.
+- `result`: `ok`, `FAIL`, or `ERROR` with the exception that was raised. A NaN or inf in the gradient, or a finite difference too uncertain to tell, is flagged in parentheses.
+
+A row is labelled with its call site and the Tesseract's `name`, or with its differentiable inputs and outputs (`x -> y`) when it has none. Each row of `report.calls` also holds the Tesseract (`row.tesseract`) and the inputs it received (`row.inputs`).
+
+### Step size
+
+The direction is scaled by the root mean square of each input, so the steps are relative: a step of `1e-3` moves an input of size 2e11 by about 2e8, and an input of size 1 by about 1e-3. The finite difference is taken at each step in `steps`, by default `(1e-1, 1e-2, 1e-3, 1e-4)`.
+
+No single step suits every function. A coarse step has a curvature error, which shrinks with the step; a fine one has noise and rounding error, which grow as the step shrinks. So each finite difference but the finest gets an error bound: how far it moved from the next coarser step, divided by the step ratio minus one (the curvature error shrinks at least in proportion to the step), plus how far it moves to the next finer step (the noise there is at least as large), plus what rounding the function to its precision can do at that step. The coarsest step takes its curvature bound from the finer step instead. The finite difference with the smallest bound is shown.
+
+A row passes when the gradient is within `rtol` of one of these finite differences after allowing for its bound. It fails only when three neighbouring finite differences have settled within `rtol` of each other and the gradient is farther than `rtol` from the middle one by more than their spread. Otherwise the finite difference is too uncertain to tell, and the row fails with that flag. Failing needs firmer evidence than passing because a failing row is named in the verdict. A large constant in float32, for example a loss of `1e8 + f`, rounds away every change the steps make, so its rows are too uncertain rather than wrong.
+
+`rtol` defaults to `1e-2`. A looser tolerance such as `0.1` lets a gradient that is 5% wrong pass.
+
+The finite difference at every step is stored in `row.finite_differences`, and the bound of the one shown in `row.fd_bound`. `steps` needs at least three steps.
+
+### Calls inside `jit`, `scan` and `vmap`
+
+`loss_fn` can be jitted, and can use loops, conditionals and `vmap`. A call site is one Tesseract called with the same input structure, shapes and static arguments.
+
+| Construct                                                               | What is recorded                                                 |
+| ----------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `jax.jit`                                                               | The same as without `jit`, even for a function compiled earlier. |
+| `scan`, `fori_loop`, `while_loop`                                       | One call site that runs once per iteration.                      |
+| `cond`                                                                  | Only the branch that was taken.                                  |
+| `vmap` with `vmap_method="sequential"`                                  | One call per batch element, with unbatched shapes.               |
+| `vmap` with `"expand_dims"`, `"broadcast_all"` or `"auto_experimental"` | One call with batched shapes, checked as that batched call.      |
+| `jax.checkpoint`                                                        | Like any other call. Its rerun in the backward pass is ignored.  |
+| The same call twice, e.g. `t(t(x))`                                     | One call site that ran twice.                                    |
+| Identical calls on identical values                                     | Possibly a single call, since XLA can merge them.                |
+| Calls whose result the loss does not use                                | Nothing under `jit`, since JAX removes them.                     |
+
+By default only the first execution of each call site is checked, since a Tesseract in a loop of 1000 iterations would otherwise be checked 1000 times. Pass `max_calls_per_site=n` to check the first `n`, or `None` to check every one.
+
+### Tesseracts whose gradients are finite differences
+
+Some Tesseracts compute their own VJP by finite differences, which the check cannot tell from the outside. For such a Tesseract a pass only shows its VJP is wired correctly. A failure usually points to its own step size at these inputs.
 
 ### Limits
 
-- By default only the first execution of each call site is checked, so for a Tesseract called in a loop (`scan`, `fori_loop`, `t(t(x))`) an error that shows only in later calls is missed; the verdict then says so instead of blaming the JAX code between the Tesseracts. Pass `max_calls_per_site=n` to check the first `n` executions, or `None` to check every one. The `calls` column shows how often each site ran, or `1 of 4` when only some executions were checked.
-- In float32 a correct pipeline often cannot be confirmed, especially when the loss or an output carries a large constant. Use `jax.config.update("jax_enable_x64", True)`.
-- Only reverse mode and first derivatives are checked, along one random direction per row, and along two more for each call when the pipeline fails and every call passes. A pass is evidence, not proof; rerun with another `seed`.
-- Only floating-point leaves of `params` are perturbed. The check is not re-entrant, and Tesseract calls made by other threads while it runs are recorded too.
+A row fails only on firm evidence, so where finite differences are poor the check says it cannot tell rather than guess. It is still a finite-difference check, and some cases fool it:
+
+- In float32 a correct pipeline often cannot be confirmed, especially when the loss or a Tesseract output carries a large constant, so `assert report.passed` can fail on a correct float32 pipeline. Run the check with `jax.config.update("jax_enable_x64", True)`.
+- Noise in an output, for example from a solver tolerance, makes rows too uncertain. The verdict then names the first Tesseract with the note that it may be right, even when the error is between the Tesseracts.
+- An error of about `rtol`, such as a VJP 1% off at the default `rtol`, is often reported as uncertain or passes. Use a smaller `rtol` to catch it.
+- Near a minimum of the loss, for example at trained parameters, the gradient is small next to the curvature, so the pipeline row is often too uncertain. Check at another point.
+- A kink or a feature finer than the step within reach of an input (`abs`, `clip`, an L1 or hinge loss with residuals near zero), or terms of the loss that cancel, can make the finite difference wrong, and then the verdict can name a correct Tesseract or blame correct code between them.
+- For a Tesseract with several outputs, a wrong VJP for an output the loss does not depend on much can be missed, and the error then shows up as a pipeline failure blamed on the code between the Tesseracts.
+- With the default `max_calls_per_site=1`, an error between the calls of a loop gets "Not every call was checked".
+- Only reverse mode is checked, along random directions. The `jacobian_vector_product` and `jacobian` endpoints are not checked. An error in a few components of a large input can barely show along a direction: a VJP that gave a gradient to an input `apply` ignores was missed in about one run in ten. A pass is evidence, not proof; rerun with another `seed` to try other directions.
+- Only first derivatives are checked. A `loss_fn` that itself calls `jax.grad` through a Tesseract is reported as an error. The loss must be a real scalar. Only floating-point leaves of `params` are perturbed; integer and boolean leaves are held fixed.
+- The check is not re-entrant. While it runs, Tesseract calls made by other threads in the same process are recorded too.
+- Each checked call costs about ten `apply` calls and one VJP, three times that when the pipeline fails and every call passes, and the pipeline about ten evaluations of `loss_fn`.
+
+### Drilling into one Tesseract
+
+To see which elements of a Tesseract's gradient are wrong, save the inputs it received and run `tesseract-runtime check-gradients` on them:
+
+```python
+import json
+import numpy as np
+
+row = report.calls[1]
+inputs = jax.tree.map(lambda v: v.tolist() if isinstance(v, np.ndarray) else v, row.inputs)
+with open("inputs.json", "w") as f:
+    json.dump({"inputs": inputs}, f)
+```
+
+```bash
+$ TESSERACT_API_PATH=solver/tesseract_api.py tesseract-runtime check-gradients @inputs.json --rtol 0.01
+```
+
+That tool perturbs one element at a time with an absolute step (`--eps`), and compares with a default `rtol` of 0.1, which lets the 5% error above pass, hence `--rtol 0.01`.
