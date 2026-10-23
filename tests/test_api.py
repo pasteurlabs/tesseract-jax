@@ -713,6 +713,84 @@ def test_vmap_of_grad_agrees_across_vmap_methods(batched_tess, vmap_method):
         np.testing.assert_allclose(g, e, rtol=1e-6)
 
 
+# (in_axes, argnums) of ``vmap(grad(loss))`` over ``loss(x, y)``.
+VMAP_GRAD_CASES = {
+    "all-batched": ((0, 0), (0, 1)),
+    "shared-y": ((0, None), (0, 1)),
+    "shared-y-only": ((0, None), 1),
+}
+
+
+def _vmap_of_grad(tess, vmap_method, case, nonlinear=True):
+    """``vmap(grad(loss))`` and the per-example gradients it must return."""
+    in_axes, argnums = VMAP_GRAD_CASES[case]
+
+    def loss(x, y):
+        out = apply_tesseract(tess, {"x": x, "y": y}, vmap_method=vmap_method)
+        result = out["result"]
+        return (jnp.sin(result) ** 2).sum() if nonlinear else result.sum()
+
+    grad = jax.grad(loss, argnums=argnums)
+    xs = jnp.stack([jnp.linspace(-1.0, 1.0, 3) * s for s in (0.5, 1.0, 1.5, 2.0)])
+    ys = jnp.stack([jnp.linspace(0.5, 1.5, 3) + s for s in (0.0, 0.1, 0.2, 0.3)])
+    if in_axes[1] is None:
+        ys = jnp.broadcast_to(ys[0], ys.shape)
+    y = ys if in_axes[1] == 0 else ys[0]
+    per_example = [grad(x_i, y_i) for x_i, y_i in zip(xs, ys, strict=True)]
+    expected = jax.tree.map(lambda *g: jnp.stack(g), *per_example)
+    return jax.jit(jax.vmap(grad, in_axes=in_axes)), (xs, y), expected
+
+
+@pytest.mark.parametrize("nonlinear", [True, False], ids=["nonlinear", "linear"])
+@pytest.mark.parametrize("case", list(VMAP_GRAD_CASES))
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_gives_per_example_gradients(
+    batched_tess, vmap_method, case, nonlinear
+):
+    """``vmap(grad(f))`` must match one ``grad(f)`` per example.
+
+    A loss nonlinear in the output gives each example its own cotangent, so
+    the vjp bind sees batched cotangents, not just batched primals. A shared
+    (unbatched) ``y`` that is differentiated must still get one gradient per
+    example, not their sum over the batch.
+    """
+    fn, args, expected = _vmap_of_grad(batched_tess, vmap_method, case, nonlinear)
+    got = fn(*args)
+
+    for g, e in zip(jax.tree.leaves(got), jax.tree.leaves(expected), strict=True):
+        assert g.shape == e.shape
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
+@pytest.mark.parametrize("case", list(VMAP_GRAD_CASES))
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, vmap_method, case):
+    """Count the ``vector_jacobian_product`` requests of one ``vmap(grad(f))``.
+
+    The vectorized methods send one batched request. A shared ``y`` that is
+    differentiated is broadcast to the batch first, so that it gets one
+    gradient per example.
+    """
+    calls = []
+    orig = batched_tess.vector_jacobian_product
+
+    def spy(**kwargs):
+        calls.append(kwargs["inputs"]["x"].shape)
+        return orig(**kwargs)
+
+    monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
+
+    fn, args, _ = _vmap_of_grad(batched_tess, vmap_method, case)
+    calls.clear()
+    fn(*args)
+
+    assert calls == ([(3,)] * 4 if vmap_method == "sequential" else [(4, 3)])
+
+
 def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
