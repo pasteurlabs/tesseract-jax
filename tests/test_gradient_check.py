@@ -488,6 +488,46 @@ def test_loss_error_is_reported(bug_tess, loss_fn, error):
     assert primitive._apply_recorder is None
 
 
+def test_untraceable_grad_still_records(univariate_tess):
+    # When the gradient cannot even be traced, a plain evaluation still records
+    # the calls.
+    @jax.jit
+    def loss_fn(p):
+        y = jax.pure_callback(np.copy, jax.ShapeDtypeStruct((), p["y"].dtype), p["y"])
+        return rosenbrock(univariate_tess, {"x": p["x"], "y": y})
+
+    report = check_gradients(loss_fn, PARAMS)
+    assert "Pure callbacks do not support JVP" in report.pipeline.error
+    (call,) = report.calls
+    assert call.passed
+    assert "could not be computed" in report.verdict
+    assert primitive._apply_recorder is None
+
+
+def test_constants_held_fixed_when_grad_cannot_be_traced(univariate_tess, monkeypatch):
+    # Without tangents, which inputs depend on params comes from comparing two
+    # plain evaluations; y is a constant and must not be perturbed.
+    seen = []
+    apply = univariate_tess.apply
+
+    def spy(inputs):
+        seen.append(float(inputs["y"]))
+        return apply(inputs)
+
+    monkeypatch.setattr(univariate_tess, "apply", spy)
+
+    @jax.jit
+    def loss_fn(x):
+        x = jax.pure_callback(np.copy, jax.ShapeDtypeStruct((), x.dtype), x)
+        return rosenbrock(univariate_tess, {"x": x, "y": jnp.array(0.5)})
+
+    report = check_gradients(loss_fn, jnp.array(0.3))
+    assert "Pure callbacks do not support JVP" in report.pipeline.error
+    (call,) = report.calls
+    assert call.passed
+    assert set(seen) == {0.5}
+
+
 def test_not_reentrant(bug_tess):
     def nested(x):
         check_gradients(lambda v: jnp.sum(square(bug_tess, v)), x)

@@ -206,7 +206,7 @@ Gradient check along a random direction (seed=0, rtol=0.01, steps 1e-01 .. 1e-04
 - **"... by less than ten times the error of ..."** means no Tesseract call fails, but one is close enough to `rtol` that it could explain the pipeline's error. Rerun with a smaller `rtol`.
 - **"... Not every call was checked ..."** means no checked call fails, but a Tesseract ran more often than it was checked, so a call that was skipped may be the wrong one. Rerun with `max_calls_per_site=None`.
 - **"The finite difference of the pipeline is too uncertain ..."** means the check cannot tell whether the gradient is wrong, as happens near a minimum of the loss, with a noisy loss, or in float32.
-- **"The gradient of loss_fn could not be computed"** means `jax.grad(loss_fn)` raised; the pipeline row shows the exception. Any Tesseract calls recorded before it are still checked.
+- **"The gradient of loss_fn could not be computed"** means `jax.grad(loss_fn)` raised; the pipeline row shows the exception. The Tesseracts are still checked: their calls are recorded again from plain evaluations of `loss_fn`, and an input counts as depending on `params` if it changes when `params` does.
 
 A finite difference is taken at each step in `steps`, relative to the RMS of each input. A row passes when the gradient is within `rtol` of one of them after allowing for its error bound, and fails only when three neighbouring finite differences have settled and the gradient is farther than `rtol` from them. Otherwise the row is flagged as too uncertain.
 

@@ -12,6 +12,7 @@ from wrong JAX code between the Tesseracts.
 
 import threading
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -283,6 +284,18 @@ class _Recorder:
             if self.max_calls is None or len(saved) < self.max_calls:
                 # Copy, so a record never shares memory with a buffer XLA owns.
                 saved.append(tuple(np.array(to_host(a), copy=True) for a in args))
+
+
+def _moved(
+    before: list[tuple[np.ndarray, ...]], after: list[tuple[np.ndarray, ...]]
+) -> tuple[bool, ...]:
+    """Which inputs of a call site differ between two recordings of it."""
+    if not after:
+        return (True,) * len(before[0])
+    return tuple(
+        any(not np.array_equal(a[i], b[i]) for a, b in zip(before, after, strict=False))
+        for i in range(len(before[0]))
+    )
 
 
 def _is_float(leaf: Any) -> bool:
@@ -597,7 +610,23 @@ def check_gradients(
             jax.block_until_ready(loss)
         except Exception as exc:  # noqa: BLE001 - reported on the pipeline row
             error = _one_line(exc)
-    if error is None:
+    # Which inputs of each call site depend on params, and so are perturbed.
+    live = {call_params: call_params.has_tangent for call_params in recorder.inputs}
+    if error is not None:
+        # The forward pass failed, perhaps partway, so record the calls from
+        # plain evaluations instead, at x and at x moved a little. These carry
+        # no tangents, so an input counts as depending on params if it moved.
+        d = _scaled_direction(jax.random.fold_in(key, 0), x)
+        recorder, moved = _Recorder(max_calls_per_site), _Recorder(max_calls_per_site)
+        with record_apply_inputs(recorder.record), suppress(Exception):
+            jax.block_until_ready(loss_of(x))
+        with record_apply_inputs(moved.record), suppress(Exception):
+            jax.block_until_ready(loss_of({k: x[k] + 1e-3 * d[k] for k in x}))
+        live = {
+            call_params: _moved(saved, moved.inputs.get(call_params, []))
+            for call_params, saved in recorder.inputs.items()
+        }
+    else:
         try:
             if np.ndim(loss) or not _is_float(loss):
                 raise TypeError("loss_fn must return a real scalar")
@@ -618,13 +647,11 @@ def check_gradients(
         for call, args in enumerate(saved, start=1)
     ]
 
-    # Only the inputs that depend on params, and so carry a tangent, are
-    # perturbed.
     calls = tuple(
         _check_call(
             call_params,
             args,
-            call_params.has_tangent,
+            live[call_params],
             **where,
             n_calls=recorder.n_calls[call_params],
             key=jax.random.fold_in(key, i),
