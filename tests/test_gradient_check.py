@@ -283,6 +283,11 @@ def test_rejects_bad_steps(steps):
         check_gradients(jnp.sum, jnp.ones(2), steps=steps)
 
 
+def test_rejects_zero_max_calls_per_site():
+    with pytest.raises(ValueError, match="max_calls_per_site"):
+        check_gradients(jnp.sum, jnp.ones(2), max_calls_per_site=0)
+
+
 def test_seed_sets_every_direction(univariate_tess, bug_tess):
     def loss_fn(p):
         r = rosenbrock(univariate_tess, p)
@@ -295,6 +300,30 @@ def test_seed_sets_every_direction(univariate_tess, bug_tess):
     first = projections(3)
     assert projections(3) == first
     assert all(a != b for a, b in zip(first, projections(4), strict=True))
+
+
+def test_scan_checks_first_call_and_says_so(bug_tess):
+    # Every value is below 1 at the first iteration only, so only the later
+    # calls hit the bug.
+    @jax.jit
+    def loss_fn(x):
+        step = lambda c, _: (square(bug_tess, c, bug="late") + 1, None)
+        return jnp.sum(jax.lax.scan(step, x, length=4)[0])
+
+    x = jnp.array([0.1, 0.2, 0.3])
+    report = check_gradients(loss_fn, x)
+    (call,) = report.calls
+    assert call.n_calls == 4
+    assert call.passed
+    assert not report.pipeline.passed
+    assert "max_calls_per_site=None" in report.verdict
+    assert "The problem is in the JAX code" not in report.verdict
+
+    report = check_gradients(loss_fn, x, max_calls_per_site=None)
+    assert len(report.calls) == 4
+    assert [c.call for c in report.calls] == [1, 2, 3, 4]
+    np.testing.assert_allclose(report.calls[1].inputs["x"], x**2 + 1)
+    assert "(call 2)" in report.verdict
 
 
 X = np.array([0.1, 0.2, 0.3])
@@ -322,36 +351,31 @@ def vmap(tess, x, vmap_method):
     return jnp.sum(batched(jnp.stack([x, 2 * x])))
 
 
-def scan(tess, x):
-    step = lambda c, _: (square(tess, c) + 1, None)
-    return jnp.sum(jax.lax.scan(step, x, length=4)[0])
-
-
 def checkpoint(tess, x):
     # The backward pass needs the output, so it runs the apply again.
     return jnp.sum(jax.checkpoint(lambda v: square(tess, v) ** 2)(x))
 
 
 @pytest.mark.parametrize(
-    "pipeline, first_x",
+    "pipeline, n_calls, first_x",
     [
-        pytest.param(plain, X, id="jit"),
-        pytest.param(scan, X, id="scan"),
-        pytest.param(while_loop, X, id="while_loop"),
-        pytest.param(cond, X, id="cond"),
-        pytest.param(partial(vmap, vmap_method="sequential"), X, id="vmap_seq"),
+        pytest.param(plain, 1, X, id="jit"),
+        pytest.param(while_loop, 3, X, id="while_loop"),
+        pytest.param(cond, 1, X, id="cond"),
+        pytest.param(partial(vmap, vmap_method="sequential"), 2, X, id="vmap_seq"),
         pytest.param(
             partial(vmap, vmap_method="expand_dims"),
+            1,
             np.stack([X, 2 * X]),
             id="vmap_expand_dims",
         ),
-        pytest.param(checkpoint, X, id="checkpoint"),
+        pytest.param(checkpoint, 1, X, id="checkpoint"),
     ],
 )
-def test_records_under_transformations(bug_tess, pipeline, first_x):
-    # A call site that runs more than once is checked at its first call.
+def test_records_under_transformations(bug_tess, pipeline, n_calls, first_x):
     report = check_gradients(jax.jit(lambda x: pipeline(bug_tess, x)), jnp.asarray(X))
     (call,) = report.calls
+    assert call.n_calls == n_calls
     np.testing.assert_array_equal(call.inputs["x"], first_x)
     assert call.passed
 
@@ -380,20 +404,28 @@ def test_repeated_identical_call_site(bug_tess):
     loss_fn = jax.jit(lambda x: jnp.sum(square(bug_tess, square(bug_tess, x))))
     report = check_gradients(loss_fn, jnp.asarray(X))
     (call,) = report.calls
-    np.testing.assert_array_equal(call.inputs["x"], X)
     assert call.n_calls == 2
+
+    report = check_gradients(loss_fn, jnp.asarray(X), max_calls_per_site=2)
+    first, second = report.calls
+    np.testing.assert_array_equal(first.inputs["x"], X)
+    np.testing.assert_allclose(second.inputs["x"], X**2)
     assert report.passed, report
 
 
-def test_only_first_call_checked_blames_nothing(bug_tess):
-    # The glue between two calls of one site is wrong, but only the first
-    # call is checked, so a later call could be the culprit as well.
+def test_unchecked_calls_blame_nothing(bug_tess):
+    # The glue between two calls of one site is wrong. With only the first
+    # call checked, a later call could be the culprit as well.
     def loss_fn(x):
         return jnp.sum(square(bug_tess, _half_stop_gradient(square(bug_tess, x))))
 
     report = check_gradients(loss_fn, jnp.asarray(X))
     assert not report.pipeline.passed
-    assert "Only the first call of each site was checked" in report.verdict
+    assert "Not every call was checked: #1 x -> y (1 of 2 calls)" in report.verdict
+
+    report = check_gradients(loss_fn, jnp.asarray(X), max_calls_per_site=None)
+    assert all(c.passed for c in report.calls)
+    assert "The problem is in the JAX code" in report.verdict
 
 
 def test_mixed_inputs_pass(

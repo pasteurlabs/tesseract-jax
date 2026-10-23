@@ -10,6 +10,7 @@
 - ``"inf"``: the VJP is inf.
 - ``"ones"``: the VJP ignores its cotangent, as if it were all ones.
 - ``"raise"``: the VJP raises.
+- ``"late"``: the VJP is 5% too large where x > 1, and correct elsewhere.
 - ``"detached"``: apply ignores x and returns zeros, but the VJP is unchanged.
 
 ``noise`` multiplies y by ``1 + noise * sin(1e6 * x)``, a wiggle too fast for
@@ -26,9 +27,9 @@ from tesseract_core.runtime import Array, Differentiable, Float64, ShapeDType
 
 class InputSchema(BaseModel):
     x: Differentiable[Array[..., Float64]]
-    bug: Literal["none", "scale", "zero", "nan", "inf", "ones", "raise", "detached"] = (
-        "none"
-    )
+    bug: Literal[
+        "none", "scale", "zero", "nan", "inf", "ones", "raise", "late", "detached"
+    ] = "none"
     noise: float = 0.0
 
 
@@ -62,4 +63,6 @@ def vector_jacobian_product(inputs, vjp_inputs, vjp_outputs, cotangent_vector):
         grad = 2 * x
     elif inputs.bug == "raise":
         raise ValueError("adjoint solve failed")
+    elif inputs.bug == "late":
+        grad = np.where(x > 1, 1.05 * grad, grad)
     return {"x": grad}

@@ -83,14 +83,17 @@ class CallCheck(Check):
         tesseract: The Tesseract that was called.
         inputs: The inputs it received, as NumPy arrays.
         site: The call site, numbered from 1 in the order the sites first ran.
-            Only the first execution of each site is checked.
+        call: Which execution of the site this row checks, from 1.
         n_calls: How many times the site ran in the forward pass.
+        n_checked: How many of those executions were checked.
     """
 
     tesseract: Tesseract
     inputs: PyTree
     site: int
+    call: int
     n_calls: int
+    n_checked: int
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,9 @@ class GradientReport:
 
     Attributes:
         pipeline: The check of ``loss_fn`` as a whole.
-        calls: One check per Tesseract call site, at the inputs of its first
-            execution, in the order the sites first ran.
+        calls: One check per Tesseract call that was checked, grouped by call
+            site in the order the sites first ran, and by execution within a
+            site.
         rtol: The relative tolerance the checks used.
         seed: The seed of the random directions.
     """
@@ -163,14 +167,17 @@ class GradientReport:
             )
         if self.pipeline.passed:
             return "Gradients agree."
-        repeated = [
-            f"{c.name} ({c.n_calls} calls)" for c in self.calls if c.n_calls > 1
+        unchecked = [
+            f"{_site_label(c.tesseract, c.site)} ({c.n_checked} of {c.n_calls} calls)"
+            for c in self.calls
+            if c.call == 1 and c.n_checked < c.n_calls
         ]
-        if repeated:
+        if unchecked:
             return (
-                "No checked Tesseract call disagrees, but the pipeline does. Only "
-                f"the first call of each site was checked: {', '.join(repeated)}, "
-                "so a later call may be the one that is wrong."
+                "No checked Tesseract call disagrees, but the pipeline does. Not "
+                f"every call was checked: {', '.join(unchecked)}. Rerun "
+                "with max_calls_per_site=None before blaming the JAX code between "
+                "the Tesseracts."
             )
         # Each Tesseract may be off by up to rtol, and that can grow along the
         # pipeline, so the code between them is only blamed when the pipeline
@@ -201,14 +208,17 @@ class GradientReport:
             ),
             "",
             (
-                f"  {'':<{width}}  {'grad.d':>10}  {'fin. diff':>10}  "
+                f"  {'':<{width}}  {'calls':>8}  {'grad.d':>10}  {'fin. diff':>10}  "
                 f"{'rel. error':>10}  {'step':>6}  result"
             ),
-            _format_row(self.pipeline, width),
+            _format_row(self.pipeline, "", width),
         ]
         if self.calls:
             lines.append("")
-        lines += [_format_row(c, width) for c in self.calls]
+        for c in self.calls:
+            n = c.n_checked
+            calls = str(c.n_calls) if n == c.n_calls else f"{n} of {c.n_calls}"
+            lines.append(_format_row(c, calls, width))
         lines += ["", self.verdict]
         return "\n".join(lines)
 
@@ -226,7 +236,7 @@ def _error_range(check: Check) -> tuple[float, float]:
     return max(miss - check.fd_bound, 0) / scale, (miss + check.fd_bound) / scale
 
 
-def _format_row(check: Check, width: int) -> str:
+def _format_row(check: Check, calls: str, width: int) -> str:
     if check.error is not None:
         result = f"ERROR  ({check.error})"
     else:
@@ -234,7 +244,7 @@ def _format_row(check: Check, width: int) -> str:
         if check.problems:
             result += f"  ({'; '.join(check.problems)})"
     return (
-        f"  {check.name:<{width}}  {check.grad_dot_d:10.2e}  "
+        f"  {check.name:<{width}}  {calls:>8}  {check.grad_dot_d:10.2e}  "
         f"{check.fd:10.2e}  {check.rel_error:10.2e}  {check.step:6.0e}  {result}"
     )
 
@@ -257,22 +267,22 @@ def _one_line(exc: Exception) -> str:
 
 
 class _Recorder:
-    """The inputs of the first ``apply`` call at each call site."""
+    """The inputs of each ``apply`` call, grouped by call site."""
 
-    def __init__(self) -> None:
-        self.inputs: dict[DispatchParams, tuple[np.ndarray, ...]] = {}
+    def __init__(self, max_calls: int | None) -> None:
+        self.max_calls = max_calls
         self.n_calls: dict[DispatchParams, int] = {}
+        self.inputs: dict[DispatchParams, list[tuple[np.ndarray, ...]]] = {}
         # Host callbacks can run on XLA's own threads.
         self._lock = threading.Lock()
 
     def record(self, params: DispatchParams, args: tuple) -> None:
         with self._lock:
             self.n_calls[params] = self.n_calls.get(params, 0) + 1
-            if params not in self.inputs:
+            saved = self.inputs.setdefault(params, [])
+            if self.max_calls is None or len(saved) < self.max_calls:
                 # Copy, so a record never shares memory with a buffer XLA owns.
-                self.inputs[params] = tuple(
-                    np.array(to_host(a), copy=True) for a in args
-                )
+                saved.append(tuple(np.array(to_host(a), copy=True) for a in args))
 
 
 def _is_float(leaf: Any) -> bool:
@@ -413,7 +423,9 @@ def _check_call(
     live: tuple[bool, ...],
     *,
     site: int,
+    call: int,
     n_calls: int,
+    n_checked: int,
     key: jax.Array,
     steps: tuple[float, ...],
     rtol: float,
@@ -481,13 +493,18 @@ def _check_call(
             rounding += np.finfo(y.dtype).eps * np.abs(terms).sum()
         return float(value), float(rounding)
 
+    name = _site_label(tesseract, site)
+    if n_checked > 1:
+        name += f" (call {call})"
     return CallCheck(
-        name=_site_label(tesseract, site),
+        name=name,
         **_directional_check(weighted_sum, x, grad, error, direction_key, steps, rtol),
         tesseract=tesseract,
         inputs=inputs,
         site=site,
+        call=call,
         n_calls=n_calls,
+        n_checked=n_checked,
     )
 
 
@@ -498,6 +515,7 @@ def check_gradients(
     seed: int = 0,
     rtol: float = 1e-2,
     steps: Sequence[float] = (1e-1, 1e-2, 1e-3, 1e-4),
+    max_calls_per_site: int | None = 1,
 ) -> GradientReport:
     """Check the gradient of ``loss_fn``, and of each Tesseract it calls.
 
@@ -505,8 +523,6 @@ def check_gradients(
     central finite difference of ``loss_fn``. While computing that gradient,
     it records the inputs that reach each Tesseract's ``apply`` in the forward
     pass, then checks each Tesseract alone at those inputs in the same way.
-    A Tesseract called more than once at the same call site, as in a loop, is
-    checked at the inputs of its first call.
     Only the ``apply``, ``abstract_eval`` and ``vector_jacobian_product``
     endpoints are used.
 
@@ -536,11 +552,15 @@ def check_gradients(
         seed: Seed for the random directions and cotangents.
         rtol: Relative tolerance between the gradient and the finite difference.
         steps: Three or more step sizes, relative to the RMS of each input.
+        max_calls_per_site: How many executions of each call site to check, for
+            a Tesseract called in a loop. ``None`` checks every execution.
 
     Returns:
         A :class:`~tesseract_jax.gradient_check.GradientReport`. Print it for a
         table and a verdict on where to look first.
     """
+    if max_calls_per_site is not None and max_calls_per_site < 1:
+        raise ValueError("max_calls_per_site must be at least 1, or None")
     # Largest first, so that neighbouring steps are next to each other.
     steps = tuple(sorted((float(h) for h in steps), reverse=True))
     if len(steps) < 3 or not all(0 < h < np.inf for h in steps):
@@ -568,7 +588,7 @@ def check_gradients(
     # Record the forward pass only: under jax.checkpoint the backward pass can
     # run an apply again, and that is not a new call.
     grad, error = None, None
-    recorder = _Recorder()
+    recorder = _Recorder(max_calls_per_site)
     with record_apply_inputs(recorder.record):
         try:
             loss, pullback = jax.vjp(loss_of, x)
@@ -592,6 +612,12 @@ def check_gradients(
         ),
     )
 
+    recorded = [
+        (call_params, args, dict(site=site, call=call, n_checked=len(saved)))
+        for site, (call_params, saved) in enumerate(recorder.inputs.items(), start=1)
+        for call, args in enumerate(saved, start=1)
+    ]
+
     # Only the inputs that depend on params, and so carry a tangent, are
     # perturbed.
     calls = tuple(
@@ -599,12 +625,12 @@ def check_gradients(
             call_params,
             args,
             call_params.has_tangent,
-            site=site,
+            **where,
             n_calls=recorder.n_calls[call_params],
-            key=jax.random.fold_in(key, site),
+            key=jax.random.fold_in(key, i),
             steps=steps,
             rtol=rtol,
         )
-        for site, (call_params, args) in enumerate(recorder.inputs.items(), start=1)
+        for i, (call_params, args, where) in enumerate(recorded, start=1)
     )
     return GradientReport(pipeline=pipeline, calls=calls, rtol=rtol, seed=seed)
