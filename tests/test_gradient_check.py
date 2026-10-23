@@ -207,6 +207,18 @@ def test_glue_not_blamed_when_a_tesseract_is_nearly_as_wrong(univariate_tess, bu
     assert report.calls[1].name in report.verdict
 
 
+def test_recheck_before_blaming_glue(bug_tess):
+    # At this seed the first direction of the call misses the 5% error on its
+    # last element, which the pipeline sees.
+    def loss_fn(x):
+        return jnp.sum(jnp.sin(square(bug_tess, x, bug="late")))
+
+    report = check_gradients(loss_fn, jnp.array([0.2, 0.4, 0.6, 0.8, 1.2]), seed=43)
+    (call,) = report.calls
+    assert not call.passed
+    assert report.verdict.endswith("Start there.")
+
+
 @pytest.mark.parametrize(
     "loss_fn",
     [

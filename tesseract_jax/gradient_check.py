@@ -547,7 +547,9 @@ def check_gradients(
     has no NaN or inf. It fails when three neighbouring finite differences
     settled within ``rtol`` of each other and the gradient is farther than
     ``rtol`` from them by more than their spread. Otherwise it reports that
-    the finite difference is too uncertain.
+    the finite difference is too uncertain. Before the verdict blames the
+    code between the Tesseracts, each call is checked along two more random
+    directions.
 
     Example:
         >>> def loss_fn(params):
@@ -647,17 +649,37 @@ def check_gradients(
         for call, args in enumerate(saved, start=1)
     ]
 
-    calls = tuple(
-        _check_call(
-            call_params,
-            args,
-            live[call_params],
-            **where,
-            n_calls=recorder.n_calls[call_params],
-            key=jax.random.fold_in(key, i),
-            steps=steps,
-            rtol=rtol,
-        )
-        for i, (call_params, args, where) in enumerate(recorded, start=1)
+    def check_calls(retry: int) -> list[CallCheck]:
+        checks = []
+        for i, (call_params, args, where) in enumerate(recorded):
+            call_key = jax.random.fold_in(key, i + 1)
+            if retry:
+                call_key = jax.random.fold_in(call_key, retry)
+            checks.append(
+                _check_call(
+                    call_params,
+                    args,
+                    live[call_params],
+                    **where,
+                    n_calls=recorder.n_calls[call_params],
+                    key=call_key,
+                    steps=steps,
+                    rtol=rtol,
+                )
+            )
+        return checks
+
+    calls = check_calls(retry=0)
+    # One random direction now and then misses a wrong VJP. So before the
+    # verdict blames the code between the Tesseracts, check each call along
+    # two more directions, and keep any row that fails.
+    pipeline_wrong = (
+        pipeline.error is None and not pipeline.passed and not _unsure(pipeline)
     )
-    return GradientReport(pipeline=pipeline, calls=calls, rtol=rtol, seed=seed)
+    for retry in (1, 2):
+        if pipeline_wrong and all(c.passed for c in calls):
+            calls = [
+                c if again.passed else again
+                for c, again in zip(calls, check_calls(retry), strict=True)
+            ]
+    return GradientReport(pipeline=pipeline, calls=tuple(calls), rtol=rtol, seed=seed)

@@ -202,7 +202,7 @@ Gradient check along a random direction (seed=0, rtol=0.01, steps 1e-01 .. 1e-04
 ### Reading the verdict
 
 - **"... Start there."** names the first Tesseract call that fails on its own, because it disagrees with its finite difference or because it raised. If its finite difference is too uncertain to be sure, the verdict says its gradient may still be right.
-- **"Every Tesseract agrees ... The problem is in the JAX code between the Tesseracts"** means each Tesseract is right at the inputs it received, but the pipeline is off by more than ten times the error of any Tesseract. Look for a `jax.lax.stop_gradient`, an operation whose derivative is zero or undefined (`round`, `argmax`, an integer cast, `sqrt` at 0), or a `custom_vjp`.
+- **"Every Tesseract agrees ... The problem is in the JAX code between the Tesseracts"** means each Tesseract is right at the inputs it received, along three random directions, but the pipeline is off by more than ten times the error of any Tesseract. Look for a `jax.lax.stop_gradient`, an operation whose derivative is zero or undefined (`round`, `argmax`, an integer cast, `sqrt` at 0), or a `custom_vjp`.
 - **"... by less than ten times the error of ..."** means no Tesseract call fails, but one is close enough to `rtol` that it could explain the pipeline's error. Rerun with a smaller `rtol`.
 - **"... Not every call was checked ..."** means no checked call fails, but a Tesseract ran more often than it was checked, so a call that was skipped may be the wrong one. Rerun with `max_calls_per_site=None`.
 - **"The finite difference of the pipeline is too uncertain ..."** means the check cannot tell whether the gradient is wrong, as happens near a minimum of the loss, with a noisy loss, or in float32.
@@ -214,5 +214,5 @@ A finite difference is taken at each step in `steps`, relative to the RMS of eac
 
 - By default only the first execution of each call site is checked, so for a Tesseract called in a loop (`scan`, `fori_loop`, `t(t(x))`) an error that shows only in later calls is missed; the verdict then says so instead of blaming the JAX code between the Tesseracts. Pass `max_calls_per_site=n` to check the first `n` executions, or `None` to check every one. The `calls` column shows how often each site ran, or `1 of 4` when only some executions were checked.
 - In float32 a correct pipeline often cannot be confirmed, especially when the loss or an output carries a large constant. Use `jax.config.update("jax_enable_x64", True)`.
-- Only reverse mode and first derivatives are checked, along one random direction per row. A pass is evidence, not proof; rerun with another `seed`.
+- Only reverse mode and first derivatives are checked, along one random direction per row, and along two more for each call when the pipeline fails and every call passes. A pass is evidence, not proof; rerun with another `seed`.
 - Only floating-point leaves of `params` are perturbed. The check is not re-entrant, and Tesseract calls made by other threads while it runs are recorded too.
