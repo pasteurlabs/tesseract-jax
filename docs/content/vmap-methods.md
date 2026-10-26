@@ -66,7 +66,7 @@ Falls back to `"sequential"` when:
 
 - Any batched differentiable input has a fixed number of dimensions (e.g. `Array[(None,), Float32]`)
 - A batched input is non-differentiable (shape info not yet available in the schema)
-- A VJP is taken with respect to an input with a fixed number of dimensions, which a batched VJP request would have to broadcast to the batch
+- A VJP is taken with respect to an unbatched input with a fixed number of dimensions (e.g. weights shared across the batch), which a batched VJP request would have to broadcast to the batch
 
 ## How static vs array inputs are handled
 
