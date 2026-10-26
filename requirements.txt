@@ -4,7 +4,7 @@ annotated-doc==0.0.5
     # via typer
 annotated-types==0.8.0
     # via pydantic
-certifi==2026.10.18
+certifi==2026.10.23
     # via requests
 charset-normalizer==3.5.2
     # via requests
@@ -12,9 +12,9 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via typer
 idna==3.20
     # via requests
-jax==0.11.2
+jax==0.12.0.1
     # via tesseract-jax
-jaxlib==0.11.2
+jaxlib==0.12.0.1
     # via jax
 jinja2==3.1.6
     # via tesseract-core
@@ -43,7 +43,7 @@ packaging==26.3
     # via
     #   tesseract-core
     #   tesseract-jax
-pip==26.2.1
+pip==26.2.2
     # via tesseract-core
 pybase64==1.5.1
     # via tesseract-core
