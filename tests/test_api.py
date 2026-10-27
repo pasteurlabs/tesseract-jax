@@ -1036,3 +1036,56 @@ def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     assert declared <= set(_DISCARDED_FILL), (
         f"dtypes missing from _DISCARDED_FILL: {sorted(map(str, declared - set(_DISCARDED_FILL)))}"
     )
+
+
+_DTYPE_FIELDS_API = """
+from pydantic import BaseModel
+from tesseract_core.runtime import Array
+
+
+class InputSchema(BaseModel):
+    f32: Array[(None,), "float32"]
+    f64: Array[(None,), "float64"]
+    i32: Array[(None,), "int32"]
+    c64: Array[(None,), "complex64"]
+    open: Array[(None,), None]
+    opt: Array[(None,), "float32"] | None = None
+
+
+class OutputSchema(BaseModel):
+    y: Array[(None,), "float32"]
+
+
+def apply(inputs):
+    return OutputSchema(y=inputs.f32)
+"""
+
+
+@pytest.mark.parametrize(
+    "field, src, expected",
+    [
+        ("f32", "float64", "float32"),  # float narrowing: cast
+        ("f32", "int32", "float32"),  # int to float: cast
+        ("f32", "float16", "float32"),  # widening: cast
+        ("f64", "float32", "float64"),  # widening (x64 is on in the tests): cast
+        ("i32", "int16", "int32"),  # safe int widening: cast
+        ("i32", "int64", "int64"),  # int narrowing: left to tesseract-core
+        ("i32", "uint32", "uint32"),  # sign change: left to tesseract-core
+        ("i32", "float32", "float32"),  # float to int: left to tesseract-core
+        ("c64", "float64", "complex64"),  # real to complex: cast
+        ("open", "int8", "int8"),  # no declared dtype: untouched
+        ("opt", "float64", "float32"),  # optional array field: cast
+    ],
+)
+def test_inputs_cast_to_schema_dtype(tmp_path, field, src, expected):
+    from tesseract_core import Tesseract
+
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    api = tmp_path / "tesseract_api.py"
+    api.write_text(_DTYPE_FIELDS_API)
+    schemas = Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+    out = _validate_and_coerce_inputs(
+        {field: jnp.ones(3, dtype=src)}, schemas["Apply_InputSchema"], schemas
+    )
+    assert out[field].dtype == np.dtype(expected)

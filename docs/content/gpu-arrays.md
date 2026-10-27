@@ -31,6 +31,12 @@ To always copy GPU arrays through the host, pass a view of the Tesseract:
 apply_tesseract(tess.with_encoding(gpu_transport="none"), inputs)
 ```
 
+## Dtypes
+
+An array input whose dtype differs from its schema field, such as a float64 array for a `Float32` field under `jax_enable_x64`, is cast to the schema dtype on the device before the Tesseract is called. Both transports therefore send the Tesseract the same dtypes. JAX differentiates through the cast, so gradients come back in the dtype you passed. tesseract-jax only makes casts that lose nothing, plus float-to-float narrowing like float64 to float32. Narrowing an integer or changing its sign is left to tesseract-core, which checks the values and casts on the host path but raises under `cuda_ipc`.
+
+A Tesseract whose differentiable inputs and outputs have different dtypes, such as float32 in and float64 out, pays a host round trip under `cuda_ipc` when its `jacobian` endpoint is used. `jax.jacfwd` expects the Jacobian in the output dtype and `jax.jacrev` in the input dtype, and the endpoint returns one dtype whichever mode asks. The other mode casts the whole Jacobian through host memory. Pass `materialize_jacobian=False` to `apply_tesseract` to batch the JVP or VJP endpoint instead, which avoids the cast.
+
 ## In-process Tesseracts
 
 A Tesseract loaded with `Tesseract.from_tesseract_api` receives host (NumPy) arrays by default. Create it with `gpu_transport="cuda_ipc"` to hand its endpoints the device buffers as they are, as objects exposing `__cuda_array_interface__` that are only valid during the call:

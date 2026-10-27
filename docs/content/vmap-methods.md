@@ -119,7 +119,7 @@ The `jacobian` endpoint returns the full Jacobian, of size (output size × input
 
 Calling the endpoint is usually the faster choice when you need the whole Jacobian, as `jax.jacfwd` and `jax.jacrev` do, or when there are many (co)tangents. `False` can be faster when the Jacobian is large and you only apply it to a few (co)tangents, for example in low-rank approximations or coloring methods.
 
-The Jacobian has the dtype that JAX's own `jax.jacfwd` and `jax.jacrev` would give, which is the output dtype in forward mode and the input dtype in reverse mode. A `jacobian` endpoint that returns another dtype is cast to it. When GPU arrays stay on the device (see [GPU arrays](gpu-arrays.md)), that cast goes through host memory.
+The Jacobian has the dtype that JAX's own `jax.jacfwd` and `jax.jacrev` would give, which is the output dtype in forward mode and the input dtype in reverse mode. A `jacobian` endpoint that returns another dtype is cast to it. That is always the case in one of the two modes for a Tesseract whose inputs and outputs have different dtypes. When GPU arrays stay on the device, that cast goes through host memory (see [GPU arrays](gpu-arrays.md#dtypes)).
 
 ### Example: `vmap(grad(f))` — per-element gradients
 
