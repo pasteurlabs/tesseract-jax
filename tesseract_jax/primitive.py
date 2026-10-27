@@ -966,6 +966,62 @@ def _coerce_array_input(value: Any, field_name: str) -> Any:
     )
 
 
+def _schema_dtype(prop_schema: dict) -> np.dtype | None:
+    """The dtype an array field's schema declares, or ``None`` if it leaves it open.
+
+    tesseract-core puts the field's dtype in the ``dtype`` property's
+    ``examples``, and ``float64`` there when the field accepts any dtype. The
+    ``enum`` of accepted dtypes tells those two apart: an open field accepts
+    complex input, which a ``Float64`` field does not.
+    """
+    dtype_schema = prop_schema.get("properties", {}).get("dtype", {})
+    examples = dtype_schema.get("examples")
+    if not examples:
+        return None
+    if examples[0] == "float64" and "complex128" in dtype_schema.get("enum", ()):
+        return None
+    return np.dtype(examples[0])
+
+
+def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
+    """Cast an array input to its field's schema dtype, as JAX ops before the bind.
+
+    tesseract-core casts a mismatched input to the schema dtype when it decodes
+    a host array, but a device array sent over cuda_ipc is rejected instead.
+    Casting here gives both transports the same operands, and lets JAX
+    differentiate through the cast: tangents are cast to the schema dtype on the
+    way in and gradients back to the caller's dtype on the way out.
+
+    Only casts that lose nothing, or that narrow a float (``float64`` to a
+    ``Float32`` field under ``jax_enable_x64``), are done here, since a JAX cast
+    does not check values. Integer narrowing and sign changes, which
+    tesseract-core range-checks, are left for it to validate on the host path.
+    A 64-bit schema dtype with ``jax_enable_x64`` off is left alone too, since
+    JAX cannot represent it; tesseract-core widens the input itself.
+    """
+    target = _schema_dtype(prop_schema)
+    if target is None or value.dtype == target:
+        return value
+    if dtypes.canonicalize_dtype(target) != target:
+        return value
+    if np.can_cast(value.dtype, target, casting="safe") or (
+        jnp.issubdtype(target, jnp.inexact)
+        and np.can_cast(value.dtype, target, casting="same_kind")
+    ):
+        return value.astype(target)
+    return value
+
+
+def _optional_array_schema(prop_schema: dict, all_schemas: dict) -> dict | None:
+    """The array member of an ``anyOf`` schema, if it is the only one."""
+    members = [
+        _resolve_ref(m["$ref"], all_schemas) if "$ref" in m else m
+        for m in prop_schema.get("anyOf", ())
+    ]
+    arrays = [m for m in members if _is_array_schema(m)]
+    return arrays[0] if len(arrays) == 1 else None
+
+
 def _validate_and_coerce_inputs(
     inputs: Any, input_schema: dict, all_schemas: dict
 ) -> Any:
@@ -977,6 +1033,8 @@ def _validate_and_coerce_inputs(
       via ``jnp.asarray()``.
     - Python scalars (int, float, bool, complex) are converted via ``jnp.asarray()``.
     - Python sequences (list, tuple) and other types are rejected with a ``TypeError``.
+    - The array is then cast to the field's schema dtype where that is lossless or
+      a float narrowing (see :func:`_cast_to_schema_dtype`).
     """
     if not isinstance(inputs, dict):
         return inputs
@@ -998,7 +1056,9 @@ def _validate_and_coerce_inputs(
             prop_schema = _resolve_ref(prop_schema["$ref"], all_schemas)
 
         if _is_array_schema(prop_schema):
-            result[key] = _coerce_array_input(value, key)
+            result[key] = _cast_to_schema_dtype(
+                _coerce_array_input(value, key), prop_schema
+            )
         elif prop_schema.get("type") == "object" or "properties" in prop_schema:
             # Nested object - recurse
             result[key] = _validate_and_coerce_inputs(value, prop_schema, all_schemas)
@@ -1009,10 +1069,18 @@ def _validate_and_coerce_inputs(
                 items_schema = _resolve_ref(items_schema["$ref"], all_schemas)
             if _is_array_schema(items_schema) and isinstance(value, (list, tuple)):
                 result[key] = type(value)(
-                    _coerce_array_input(v, f"{key}[{i}]") for i, v in enumerate(value)
+                    _cast_to_schema_dtype(
+                        _coerce_array_input(v, f"{key}[{i}]"), items_schema
+                    )
+                    for i, v in enumerate(value)
                 )
             else:
                 result[key] = value
+        elif isinstance(value, (jax.Array, np.ndarray, jc.Tracer)) and (
+            array_schema := _optional_array_schema(prop_schema, all_schemas)
+        ):
+            # An optional array field (`Array[...] | None`) that was given an array.
+            result[key] = _cast_to_schema_dtype(value, array_schema)
         else:
             result[key] = value
 
