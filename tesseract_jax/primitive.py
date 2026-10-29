@@ -992,12 +992,13 @@ def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
     differentiate through the cast: tangents are cast to the schema dtype on the
     way in and gradients back to the caller's dtype on the way out.
 
-    Only casts that lose nothing, or that narrow a float (``float64`` to a
-    ``Float32`` field under ``jax_enable_x64``), are done here, since a JAX cast
-    does not check values. Integer narrowing and sign changes, which
-    tesseract-core range-checks, are left for it to validate on the host path.
-    A 64-bit schema dtype with ``jax_enable_x64`` off is left alone too, since
-    JAX cannot represent it; tesseract-core widens the input itself.
+    A float or complex field gets every cast tesseract-core accepts for it. A
+    float that overflows the field's dtype becomes inf here, where
+    tesseract-core would raise. An integer or bool field only gets widening
+    casts: narrowing an integer or changing its sign can wrap, which a JAX cast
+    does not check, so those are left to tesseract-core, which range-checks
+    them on the host path and rejects them under cuda_ipc. A 64-bit field with
+    ``jax_enable_x64`` off is left alone too, since JAX cannot represent it.
     """
     target = _schema_dtype(prop_schema)
     if target is None or value.dtype == target:
@@ -1033,8 +1034,9 @@ def _validate_and_coerce_inputs(
       via ``jnp.asarray()``.
     - Python scalars (int, float, bool, complex) are converted via ``jnp.asarray()``.
     - Python sequences (list, tuple) and other types are rejected with a ``TypeError``.
-    - The array is then cast to the field's schema dtype where that is lossless or
-      a float narrowing (see :func:`_cast_to_schema_dtype`).
+    - The array is then cast to the field's schema dtype, for every cast into a
+      float or complex field and widening casts into an integer or bool field
+      (see :func:`_cast_to_schema_dtype`).
     """
     if not isinstance(inputs, dict):
         return inputs

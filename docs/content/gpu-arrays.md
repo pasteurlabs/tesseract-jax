@@ -33,7 +33,11 @@ apply_tesseract(tess.with_encoding(gpu_transport="none"), inputs)
 
 ## Dtypes
 
-An array input whose dtype differs from its schema field, such as a float64 array for a `Float32` field under `jax_enable_x64`, is cast to the schema dtype on the device before the Tesseract is called. Both transports therefore send the Tesseract the same dtypes. JAX differentiates through the cast, so gradients come back in the dtype you passed. tesseract-jax only makes casts that lose nothing, plus float-to-float narrowing like float64 to float32. Narrowing an integer or changing its sign is left to tesseract-core, which checks the values and casts on the host path but raises under `cuda_ipc`.
+An array input whose dtype differs from its schema field, such as a float64 array for a `Float32` field under `jax_enable_x64`, is cast to the schema dtype on the device before the Tesseract is called. Both transports therefore send the Tesseract the same dtypes. JAX differentiates through the cast, so gradients come back in the dtype you passed.
+
+- A float or complex field accepts any dtype that tesseract-core accepts for it. A value too large for the field's dtype becomes `inf`, as it would in any JAX cast.
+- An integer or bool field only gets widening casts, such as int16 to `Int32`. Narrowing an integer or changing its sign, such as int64 to `Int32`, is left to tesseract-core. It checks that the values fit and casts on the host path, but raises under `cuda_ipc`. Pass the field's dtype yourself to use these with `cuda_ipc`, e.g. `x.astype(jnp.int32)`.
+- With `jax_enable_x64` off, a field with a 64-bit dtype, such as `Float64`, cannot be matched in JAX. tesseract-core widens the input on the host path, but `cuda_ipc` raises.
 
 A Tesseract whose differentiable inputs and outputs have different dtypes, such as float32 in and float64 out, pays a host round trip under `cuda_ipc` when its `jacobian` endpoint is used. `jax.jacfwd` expects the Jacobian in the output dtype and `jax.jacrev` in the input dtype, and the endpoint returns one dtype whichever mode asks. The other mode casts the whole Jacobian through host memory. Pass `materialize_jacobian=False` to `apply_tesseract` to batch the JVP or VJP endpoint instead, which avoids the cast.
 
