@@ -1036,3 +1036,88 @@ def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     assert declared <= set(_DISCARDED_FILL), (
         f"dtypes missing from _DISCARDED_FILL: {sorted(map(str, declared - set(_DISCARDED_FILL)))}"
     )
+
+
+_DTYPE_FIELDS_API = """
+from pydantic import BaseModel
+from tesseract_core.runtime import Array
+
+
+class InputSchema(BaseModel):
+    f32: Array[(None,), "float32"]
+    f64: Array[(None,), "float64"]
+    i32: Array[(None,), "int32"]
+    c64: Array[(None,), "complex64"]
+    open: Array[(None,), None]
+    opt: Array[(None,), "float32"] | None = None
+
+
+class OutputSchema(BaseModel):
+    y: Array[(None,), "float32"]
+
+
+def apply(inputs):
+    return OutputSchema(y=inputs.f32)
+"""
+
+
+@pytest.fixture(scope="module")
+def dtype_fields_schemas(tmp_path_factory):
+    from tesseract_core import Tesseract
+
+    api = tmp_path_factory.mktemp("dtype_fields") / "tesseract_api.py"
+    api.write_text(_DTYPE_FIELDS_API)
+    return Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+
+
+@pytest.mark.parametrize(
+    "field, src, expected",
+    [
+        ("f32", "float64", "float32"),  # float narrowing: cast
+        ("f32", "int32", "float32"),  # int to float: cast
+        ("f32", "float16", "float32"),  # widening: cast
+        ("f64", "float32", "float64"),  # widening (x64 is on in the tests): cast
+        ("i32", "int16", "int32"),  # safe int widening: cast
+        ("i32", "int64", "int64"),  # int narrowing: left to tesseract-core
+        ("i32", "uint32", "uint32"),  # sign change: left to tesseract-core
+        ("i32", "float32", "float32"),  # float to int: left to tesseract-core
+        ("c64", "float64", "complex64"),  # real to complex: cast
+        ("open", "int8", "int8"),  # no declared dtype: untouched
+        ("opt", "float64", "float32"),  # optional array field: cast
+    ],
+)
+def test_inputs_cast_to_schema_dtype(dtype_fields_schemas, field, src, expected):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {field: jnp.ones(3, dtype=src)}, schemas["Apply_InputSchema"], schemas
+    )
+    assert out[field].dtype == np.dtype(expected)
+
+
+def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
+    """JAX cannot represent a Float64 field's dtype with x64 off, so leave the input.
+
+    tesseract-core widens it on the host path instead.
+    """
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    jax.config.update("jax_enable_x64", False)
+    try:
+        out = _validate_and_coerce_inputs(
+            {"f64": jnp.ones(3, dtype=jnp.float32)},
+            schemas["Apply_InputSchema"],
+            schemas,
+        )
+    finally:
+        jax.config.update("jax_enable_x64", True)
+    assert out["f64"].dtype == np.float32
+
+
+def test_schema_without_dtype_examples_is_open():
+    """An array schema that names no dtype is treated as accepting any dtype."""
+    from tesseract_jax.primitive import _schema_dtype
+
+    assert _schema_dtype({"properties": {"dtype": {"type": "string"}}}) is None
