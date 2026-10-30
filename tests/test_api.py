@@ -1061,6 +1061,15 @@ def apply(inputs):
 """
 
 
+@pytest.fixture(scope="module")
+def dtype_fields_schemas(tmp_path_factory):
+    from tesseract_core import Tesseract
+
+    api = tmp_path_factory.mktemp("dtype_fields") / "tesseract_api.py"
+    api.write_text(_DTYPE_FIELDS_API)
+    return Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+
+
 @pytest.mark.parametrize(
     "field, src, expected",
     [
@@ -1077,15 +1086,38 @@ def apply(inputs):
         ("opt", "float64", "float32"),  # optional array field: cast
     ],
 )
-def test_inputs_cast_to_schema_dtype(tmp_path, field, src, expected):
-    from tesseract_core import Tesseract
-
+def test_inputs_cast_to_schema_dtype(dtype_fields_schemas, field, src, expected):
     from tesseract_jax.primitive import _validate_and_coerce_inputs
 
-    api = tmp_path / "tesseract_api.py"
-    api.write_text(_DTYPE_FIELDS_API)
-    schemas = Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+    schemas = dtype_fields_schemas
     out = _validate_and_coerce_inputs(
         {field: jnp.ones(3, dtype=src)}, schemas["Apply_InputSchema"], schemas
     )
     assert out[field].dtype == np.dtype(expected)
+
+
+def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
+    """JAX cannot represent a Float64 field's dtype with x64 off, so leave the input.
+
+    tesseract-core widens it on the host path instead.
+    """
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    jax.config.update("jax_enable_x64", False)
+    try:
+        out = _validate_and_coerce_inputs(
+            {"f64": jnp.ones(3, dtype=jnp.float32)},
+            schemas["Apply_InputSchema"],
+            schemas,
+        )
+    finally:
+        jax.config.update("jax_enable_x64", True)
+    assert out["f64"].dtype == np.float32
+
+
+def test_schema_without_dtype_examples_is_open():
+    """An array schema that names no dtype is treated as accepting any dtype."""
+    from tesseract_jax.primitive import _schema_dtype
+
+    assert _schema_dtype({"properties": {"dtype": {"type": "string"}}}) is None

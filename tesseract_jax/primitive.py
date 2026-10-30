@@ -975,12 +975,11 @@ def _schema_dtype(prop_schema: dict) -> np.dtype | None:
     complex input, which a ``Float64`` field does not.
     """
     dtype_schema = prop_schema.get("properties", {}).get("dtype", {})
-    examples = dtype_schema.get("examples")
-    if not examples:
-        return None
-    if examples[0] == "float64" and "complex128" in dtype_schema.get("enum", ()):
-        return None
-    return np.dtype(examples[0])
+    name = (dtype_schema.get("examples") or [None])[0]
+    is_open = name is None or (
+        name == "float64" and "complex128" in dtype_schema.get("enum", ())
+    )
+    return None if is_open else np.dtype(name)
 
 
 def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
