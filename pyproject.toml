@@ -10,7 +10,7 @@ requires-python = ">=3.12,<4"
 dependencies = [
     "jax>=0.7.0",
     "packaging",
-    "tesseract-core>=1.14.0",
+    "tesseract-core>=1.15.0",
 ]
 dynamic = ["version"]
 
@@ -36,7 +36,6 @@ dev = [
     "pytest-cov",
     "pytest-timeout",
     "typeguard",
-    "requests",
     "equinox",
     "tesseract-core[runtime]",
     "tesseract-jax[docs]",
@@ -54,10 +53,12 @@ requires = [
     # ones -- but not vice versa. Build against the *floor* of the supported jax
     # range (>= 0.7.0), so a single shim is valid against every jaxlib a user
     # might actually run, latest included. Python 3.14 only got wheels from the
-    # 0.8 series, so its floor is 0.8.0. Bump these deliberately when raising the
-    # supported jax floor, rather than letting them float up to the newest series.
+    # 0.8 series and Python 3.15 from 0.11.1, so those are their floors. Bump these
+    # deliberately when raising the supported jax floor, rather than letting them
+    # float up to the newest series.
     "jaxlib==0.7.0; python_version < '3.14'",
-    "jaxlib==0.8.0; python_version >= '3.14'",
+    "jaxlib==0.8.0; python_version == '3.14'",
+    "jaxlib==0.11.1; python_version >= '3.15'",
 ]
 build-backend = "hatchling.build"
 

@@ -4,6 +4,7 @@
 import jax
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Differentiable, Float64, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_arrays
 
 jax.config.update("jax_enable_x64", True)
 
@@ -37,7 +38,8 @@ class OutputSchema(BaseModel):
 
 def apply(inputs: InputSchema) -> OutputSchema:
     """Evaluates the Rosenbrock function given input values and parameters."""
-    result = rosenbrock(inputs.x, inputs.y, a=inputs.a, b=inputs.b)
+    x, y, a, b = as_jax_arrays((inputs.x, inputs.y, inputs.a, inputs.b))
+    result = rosenbrock(x, y, a=a, b=b)
     return OutputSchema(result=result)
 
 
@@ -52,12 +54,13 @@ def jacobian(
     jac_outputs: set[str],
 ):
     rosenbrock_signature = ["x", "y", "a", "b"]
+    args = as_jax_arrays((inputs.x, inputs.y, inputs.a, inputs.b))
 
     jac_result = {dy: {} for dy in jac_outputs}
     for dx in jac_inputs:
         grad_func = jax.jacrev(rosenbrock, argnums=rosenbrock_signature.index(dx))
         for dy in jac_outputs:
-            jac_result[dy][dx] = grad_func(inputs.x, inputs.y, inputs.a, inputs.b)
+            jac_result[dy][dx] = grad_func(*args)
 
     return jac_result
 
@@ -70,6 +73,7 @@ def jacobian_vector_product(
 ):
     # NOTE: This is a naive implementation of JVP, which is not efficient.
     jac = jacobian(inputs, jvp_inputs, jvp_outputs)
+    tangent_vector = as_jax_arrays(tangent_vector)
     out = {}
     for dy in jvp_outputs:
         out[dy] = sum(jac[dy][dx] * tangent_vector[dx] for dx in jvp_inputs)
@@ -84,6 +88,7 @@ def vector_jacobian_product(
 ):
     # NOTE: This is a naive implementation of VJP, which is not efficient.
     jac = jacobian(inputs, vjp_inputs, vjp_outputs)
+    cotangent_vector = as_jax_arrays(cotangent_vector)
     out = {}
     for dx in vjp_inputs:
         out[dx] = sum(jac[dy][dx] * cotangent_vector[dy] for dy in vjp_outputs)

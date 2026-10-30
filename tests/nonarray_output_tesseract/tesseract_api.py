@@ -14,6 +14,7 @@ from typing import Any
 import jax
 from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable, Float64, ShapeDType
+from tesseract_core.runtime.jax_recipes import as_jax_array
 
 jax.config.update("jax_enable_x64", True)
 
@@ -29,7 +30,11 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return {"y": inputs.x * 2.0, "backend": "reference", "converged": True}
+    return {
+        "y": as_jax_array(inputs.x) * 2.0,
+        "backend": "reference",
+        "converged": True,
+    }
 
 
 def abstract_eval(abstract_inputs: Any) -> dict:
@@ -41,8 +46,8 @@ def abstract_eval(abstract_inputs: Any) -> dict:
 
 
 def jacobian_vector_product(inputs, jvp_inputs, jvp_outputs, tangent_vector):
-    return {"y": 2.0 * tangent_vector["x"]}
+    return {"y": 2.0 * as_jax_array(tangent_vector["x"])}
 
 
 def vector_jacobian_product(inputs, vjp_inputs, vjp_outputs, cotangent_vector):
-    return {"x": 2.0 * cotangent_vector["y"]}
+    return {"x": 2.0 * as_jax_array(cotangent_vector["y"])}

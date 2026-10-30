@@ -154,3 +154,6 @@ uv.lock.bak
 
 # hatch_vcs version file
 _version.py
+
+# Environments built by Tesseract.from_source
+.tesseract-venv/

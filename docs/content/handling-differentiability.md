@@ -239,3 +239,5 @@ g(x, y)           # ⚠️ requests both, then discards "y" (no DCE eagerly)
 ```
 
 Wrapping the outer call in `jax.jit` recovers the pruning in the last case of each block. This only affects how much the Tesseract computes, never the returned value.
+
+Output rows discarded from a `jax.jacrev` result are not pruned, even under `jax.jit`. `jax.jacrev` requests the rows of all outputs as one batch, and DCE can't remove part of a batch. If `f2` returns both outputs, `jax.jit(lambda x, y: jax.jacrev(f2)(x, y)["a"])` still requests the "b" rows. To avoid this, return only the outputs you need from the function you differentiate, as `f` does above.

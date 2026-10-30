@@ -2,6 +2,53 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-10-26
+
+### Bug Fixes
+
+- Let save_intermediates take and return pytrees (#299)
+
+## [0.5.0] - 2026-10-16
+
+### Features
+
+- Support differentiating Tesseract derivative endpoints wrt (co)tangents (#229)
+- Support non-array output leaves in apply_tesseract (#248)
+- Support device-to-device GPU interop (#239)
+- Prune non-differentiable inputs and unused outputs from the VJP (#263)
+- Use DCE to leverage Tesseract's partial differentiation (#209)
+- Keep GPU arrays on the device whenever the Tesseract's GPU transport works (#286)
+
+### Bug Fixes
+
+- Guard transpose rule against UndefinedPrimal (#228)
+- Keep list indices stable when pruning static leaves (#236)
+- Carry vmap_method and the jacobian params through nested binds (#242)
+- Keep dotted dict keys whole when matching schema templates (#252)
+- Fill discarded derivative slots with each dtype's 0/0 value (#259)
+- Support transposing vector_jacobian_product wrt cotangents (#270)
+- Give integer outputs a float0 tangent (#279)
+- Keep float32 precision in jacfwd/jacrev, give per-example gradients under vmap(grad), and accept host results on the cuda_ipc path (#285)
+
+### Refactor
+
+- Bundle primitive dispatch kwargs into a DispatchParams dataclass (#256)
+- [**breaking**] Dispatch through the primitive in eager mode, always requiring abstract_eval (#262)
+- Rename device_transport parameter to gpu_transport (#273)
+
+### Documentation
+
+- Document that Tesseracts only support first-order derivatives (#265)
+- Lead the quick start with Tesseract.from_source, and serve test fixtures with it (#284)
+
+### Performance
+
+- Enable CSE with `has_side_effect=False` (#233)
+
+### Testing
+
+- Run GPU tests against a JAX-computing Tesseract by default, and against CuPy where the producer matters (#288)
+
 ## [0.4.1] - 2026-07-21
 
 ### Bug Fixes

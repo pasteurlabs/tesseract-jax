@@ -5,7 +5,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract, save_intermediates, sow
 
@@ -150,6 +149,31 @@ class TestSowForward:
         np.testing.assert_array_equal(result, 5.0)
         assert intermediates == {}
 
+    @jit_parametrize
+    def test_pytree_argument(self, use_jit):
+        def fn(inputs):
+            y = sow(inputs["a"] * inputs["b"], "product")
+            return y.sum()
+
+        inputs = {"a": jnp.array([1.0, 2.0]), "b": jnp.array([3.0, 4.0])}
+        result, intermediates = save_intermediates(maybe_jit(fn, use_jit))(inputs)
+        np.testing.assert_array_equal(result, 11.0)
+        np.testing.assert_array_equal(
+            intermediates["product"]["primal"], jnp.array([3.0, 8.0])
+        )
+
+    @pytest.mark.parametrize("use_sow", [False, True], ids=["nosow", "sow"])
+    @jit_parametrize
+    def test_pytree_result(self, use_jit, use_sow):
+        def fn(x):
+            y = sow(x**2, "squared") if use_sow else x**2
+            return {"squared": y, "cubed": x**3}
+
+        result, _ = save_intermediates(maybe_jit(fn, use_jit))(jnp.array(2.0))
+        assert isinstance(result, dict)
+        np.testing.assert_array_equal(result["squared"], 4.0)
+        np.testing.assert_array_equal(result["cubed"], 8.0)
+
 
 class TestSowGrad:
     """save_intermediates captures primals and cotangents with jax.grad."""
@@ -187,6 +211,22 @@ class TestSowGrad:
         )
         np.testing.assert_array_equal(
             intermediates["step"]["cotangent"]["b"], jnp.ones(2)
+        )
+
+    @jit_parametrize
+    def test_grad_wrt_pytree_argument(self, use_jit):
+        def fn(inputs):
+            y = sow(inputs["a"] * inputs["b"], "product")
+            return y.sum()
+
+        inputs = {"a": jnp.array([1.0, 2.0]), "b": jnp.array([3.0, 4.0])}
+        grad, intermediates = save_intermediates(jax.grad(maybe_jit(fn, use_jit)))(
+            inputs
+        )
+        np.testing.assert_array_equal(grad["a"], inputs["b"])
+        np.testing.assert_array_equal(grad["b"], inputs["a"])
+        np.testing.assert_array_equal(
+            intermediates["product"]["cotangent"], jnp.ones(2)
         )
 
     @jit_parametrize
@@ -532,8 +572,8 @@ class TestSowTag:
 class TestSowIntegration:
     """Integration tests with apply_tesseract."""
 
-    def test_pipeline_grad(self, served_univariate_tesseract_raw):
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+    def test_pipeline_grad(self, served_univariate_tesseract):
+        tess = served_univariate_tesseract
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -557,8 +597,8 @@ class TestSowIntegration:
         assert "primal" in grad_ints["tess_output"]
         assert "cotangent" in grad_ints["tess_output"]
 
-    def test_pipeline_forward_only(self, served_univariate_tesseract_raw):
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+    def test_pipeline_forward_only(self, served_univariate_tesseract):
+        tess = served_univariate_tesseract
 
         def pipeline(x, y):
             res = apply_tesseract(tess, {"x": x, "y": y})
@@ -571,9 +611,9 @@ class TestSowIntegration:
         assert "output" in intermediates
         assert "primal" in intermediates["output"]
 
-    def test_intermediates_match_tesseract_api(self, served_univariate_tesseract_raw):
+    def test_intermediates_match_tesseract_api(self, served_univariate_tesseract):
         """Captured primals/tangents/cotangents match direct Tesseract API calls."""
-        tess = Tesseract.from_url(served_univariate_tesseract_raw)
+        tess = served_univariate_tesseract
         x = jnp.array(2.0)
         y = jnp.array(3.0)
 

@@ -45,16 +45,55 @@ def _present(real_node: Any, key: Any) -> bool:
     return False
 
 
-def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
+def _checked_default(value: Any, field_description: str) -> Any:
+    """An omitted field's schema default, or raise if it hides an array placeholder.
+
+    tesseract-core (>=1.15) validates a field's default against the abstract
+    schema too, so an array-valued default (e.g. ``np.float32(1.0)``) comes
+    back as a ``ShapeDType`` placeholder with no real value to patch in --
+    unlike on the callback path, where ``InputSchema.model_validate`` keeps
+    the real default since pydantic doesn't re-validate defaults there.
+    traceable=True has no way to recover the original default from the
+    abstract schema alone, so this raises instead of silently handing the
+    real endpoint a placeholder where it expects a real array.
+    """
+    from tesseract_core.runtime.schema_types import ShapeDType
+
+    if isinstance(value, ShapeDType):
+        # ValueError, not TypeError: value is of the expected type (ShapeDType) --
+        # it's its *meaning* (no real default survived validation) that's wrong,
+        # not its type.
+        raise ValueError(  # noqa: TRY004
+            f"traceable=True cannot use the schema default for {field_description!r}: "
+            "it was omitted from the inputs, and its default is an array. "
+            "tesseract-core resolves that default to a shape/dtype placeholder, not "
+            "a real value, so pass this field explicitly when using traceable=True."
+        )
+    if isinstance(value, BaseModel):
+        for name in type(value).model_fields:
+            _checked_default(getattr(value, name), f"{field_description}.{name}")
+    elif isinstance(value, dict):
+        for key, v in value.items():
+            _checked_default(v, f"{field_description}[{key!r}]")
+    elif isinstance(value, (list, tuple)):
+        for i, v in enumerate(value):
+            _checked_default(v, f"{field_description}[{i}]")
+    return value
+
+
+def _patch_with_real_values(
+    schema_node: Any, real_node: Any, path: str = "inputs"
+) -> Any:
     """Replace each array (``ShapeDType``) leaf with the matching real value.
 
     A field missing from ``real_node`` (omitted from ``apply_tesseract``'s
     raw ``inputs``, relying on ``InputSchema``'s own default) keeps
     ``schema_node``'s own value instead -- the same default the callback
     path's ``InputSchema.model_validate`` would use, since pydantic doesn't
-    re-validate defaults either. A present non-array leaf also keeps
-    ``schema_node``'s value, since it already passed whatever validator
-    applies to it during the abstract-schema validation.
+    re-validate defaults either -- except an array-valued default, which
+    :func:`_checked_default` rejects (see its docstring). A present non-array
+    leaf also keeps ``schema_node``'s value, since it already passed whatever
+    validator applies to it during the abstract-schema validation.
 
     A present array leaf is cast to ``schema_node.dtype`` -- the dtype the
     abstract-schema validation already resolved the field to (including any
@@ -70,9 +109,11 @@ def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
     if isinstance(schema_node, BaseModel):
         updates = {
             name: (
-                _patch_with_real_values(getattr(schema_node, name), real_node[name])
+                _patch_with_real_values(
+                    getattr(schema_node, name), real_node[name], f"{path}.{name}"
+                )
                 if _present(real_node, name)
-                else getattr(schema_node, name)
+                else _checked_default(getattr(schema_node, name), f"{path}.{name}")
             )
             for name in type(schema_node).model_fields
         }
@@ -80,17 +121,17 @@ def _patch_with_real_values(schema_node: Any, real_node: Any) -> Any:
     if isinstance(schema_node, dict):
         return {
             key: (
-                _patch_with_real_values(value, real_node[key])
+                _patch_with_real_values(value, real_node[key], f"{path}[{key!r}]")
                 if _present(real_node, key)
-                else value
+                else _checked_default(value, f"{path}[{key!r}]")
             )
             for key, value in schema_node.items()
         }
     if isinstance(schema_node, (list, tuple)):
         patched = [
-            _patch_with_real_values(value, real_node[i])
+            _patch_with_real_values(value, real_node[i], f"{path}[{i}]")
             if _present(real_node, i)
-            else value
+            else _checked_default(value, f"{path}[{i}]")
             for i, value in enumerate(schema_node)
         ]
         return type(schema_node)(patched)
@@ -113,6 +154,17 @@ class TracedClient:
     def __init__(self, local_client: Any) -> None:
         self._local_client = local_client
 
+    def __getattr__(self, name: str) -> Any:
+        """Forward anything not overridden here to the wrapped real client.
+
+        ``Jaxeract`` (and ``Tesseract`` properties like ``openapi_schema``,
+        ``server_capabilities``, ``current_encoding``) read these directly off
+        the client, not through ``run_tesseract``, so a shim that only
+        overrides ``run_tesseract`` is not actually a drop-in replacement
+        without this.
+        """
+        return getattr(self._local_client, name)
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, TracedClient):
             return NotImplemented
@@ -127,11 +179,16 @@ class TracedClient:
         payload: dict | None = None,
         run_id: str | None = None,
         stream_logs: Any = False,
+        encoding: Any = None,
     ) -> dict:
-        """Dispatch ``endpoint``, tracing it directly unless excluded (see class docstring)."""
+        """Dispatch ``endpoint``, tracing it directly unless excluded (see class docstring).
+
+        ``encoding`` is ignored, like ``LocalClient``'s: arrays are passed in
+        memory either way, so there is nothing to encode.
+        """
         if endpoint == "abstract_eval" or not payload or "inputs" not in payload:
             return self._local_client.run_tesseract(
-                endpoint, payload, run_id, stream_logs
+                endpoint, payload, run_id, stream_logs, encoding
             )
 
         api_module = getattr(self._local_client, "api_module", None)

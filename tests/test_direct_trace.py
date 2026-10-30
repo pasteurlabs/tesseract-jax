@@ -3,16 +3,15 @@
 
 """Traceable-specific behaviour a callback-path parity test can't exercise.
 
-Eligibility, the device_transport conflict, that inlining actually happened
-(not just that the answer is right), and the documented limitation that an
-endpoint must return a plain dict, not a schema instance.
+Eligibility, that inlining actually happened (not just that the answer is
+right), and the documented limitation that an endpoint must return a plain
+dict, not a schema instance.
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from tesseract_core import Tesseract
 
 from tesseract_jax import apply_tesseract
 
@@ -22,25 +21,32 @@ from tesseract_jax import apply_tesseract
 _CALLBACK_TARGET = "xla_ffi_python_cpu_callback"
 
 
-def test_traceable_requires_in_process_tesseract(served_univariate_tesseract_raw):
+def test_traceable_requires_in_process_tesseract(served_univariate_tesseract):
     """A served (HTTPClient) Tesseract has no importable Python function to trace."""
-    served_tess = Tesseract.from_url(served_univariate_tesseract_raw)
     with pytest.raises(ValueError, match="in-process Tesseract"):
         apply_tesseract(
-            served_tess, dict(x=np.array(0.0), y=np.array(0.0)), traceable=True
-        )
-
-
-def test_traceable_and_device_transport_are_mutually_exclusive(
-    vectoradd_jax_tess, vectoradd_jax_ab
-):
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        apply_tesseract(
-            vectoradd_jax_tess,
-            {**vectoradd_jax_ab, "norm_ord": 2},
+            served_univariate_tesseract,
+            dict(x=np.array(0.0), y=np.array(0.0)),
             traceable=True,
-            gpu_transport="cuda_ipc",
         )
+
+
+def test_traceable_works_with_an_in_process_gpu_transport_tesseract(vectoradd_jax_ab):
+    """``traceable=True`` is not blocked by an in-process GPU-transport request.
+
+    ``apply_tesseract`` no longer takes ``gpu_transport`` (it is resolved from
+    the Tesseract itself, lazily, only when a call is compiled for CUDA), so
+    there is nothing left for ``traceable=True`` to conflict with here on CPU.
+    The CUDA-lowering fallback for ``traceable`` (``TracedClient`` has no
+    ``resolve_gpu_transport``) needs a GPU to exercise and is not covered here.
+    """
+    from tesseract_core import Tesseract
+
+    tess = Tesseract.from_tesseract_api(
+        "examples/simple/vectoradd_jax/tesseract_api.py", gpu_transport="cuda_ipc"
+    )
+    out = apply_tesseract(tess, {**vectoradd_jax_ab, "norm_ord": 2}, traceable=True)
+    np.testing.assert_allclose(out["vector_add"]["result"], [4.0, 6.5, 9.0], rtol=1e-6)
 
 
 def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
@@ -188,17 +194,22 @@ def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
         apply_tesseract(mixed_dtype_tess, dict(x=x), traceable=True)
 
 
-def test_patch_falls_back_to_schema_default_for_an_omitted_field(
+def test_omitted_array_field_with_a_default_raises_a_clear_error(
     vectoradd_jax_tess, vectoradd_jax_ab
 ):
-    """An omitted field falls back to the schema default instead of raising.
+    """An omitted array field with a default raises, instead of patching in a placeholder.
 
-    A field omitted from ``inputs`` (relying on the schema default) has no
-    pytree leaf at all; before the fallback this raised ``KeyError``. Tested
-    against ``_patch_inputs`` directly, not ``apply_tesseract``:
+    tesseract-core (>=1.15) validates a field's default against the abstract
+    schema too, so ``Vector_and_Scalar.s``'s default (``np.float32(1.0)``)
+    resolves to a ``ShapeDType`` placeholder, not the real ``1.0`` -- there is
+    no real value left to patch in. Before this, the fallback used that
+    placeholder as if it were a real value (a regression from an older
+    tesseract-core, where the default stayed unvalidated); before the
+    fallback existed at all, omitting the field raised ``KeyError``. Tested
+    against ``_patch_with_real_values`` directly, not ``apply_tesseract``:
     ``apply_tesseract``'s own eager ``abstract_eval`` call independently
-    errors on this omission, for a pre-existing tesseract-core/example
-    reason unrelated to this fix.
+    errors on this omission, for a pre-existing tesseract-core/example reason
+    unrelated to this fix.
     """
     from tesseract_jax.direct_trace import (
         _abstract_input_schema,
@@ -216,6 +227,5 @@ def test_patch_falls_back_to_schema_default_for_an_omitted_field(
 
     abstract_inputs = to_shape_dtype_pytree(real_inputs_omitted)
     abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
-    patched = _patch_with_real_values(abstract_instance.inputs, real_inputs_omitted)
-    # Falls back to Vector_and_Scalar.s's own default rather than raising.
-    assert float(patched.a.s) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match=r"inputs\.a\.s.*omitted"):
+        _patch_with_real_values(abstract_instance.inputs, real_inputs_omitted)

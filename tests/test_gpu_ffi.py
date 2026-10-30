@@ -15,6 +15,8 @@ guard it on the CPU test runner rather than only implicitly on GPU CI.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -116,32 +118,33 @@ def test_cudart_candidates_uses_core_discovery(monkeypatch):
 
 
 class _StubClient:
-    """Minimal stand-in for a Jaxeract: the GPU lowering only reads _gpu_transport."""
+    """Minimal stand-in for a Jaxeract whose Tesseract requests cuda_ipc."""
 
-    _gpu_transport = "cuda_ipc"
+    client = SimpleNamespace(current_encoding=SimpleNamespace(gpu_transport="cuda_ipc"))
+
+    def resolve_gpu_transport(self) -> str:
+        return "cuda_ipc"
 
 
 def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
-    """A device transport with an unavailable shim is a hard error, not a fallback.
+    """A requested device transport with an unavailable shim is a hard error.
 
-    An explicit gpu_transport opt-in must not silently degrade to the slow host
-    path; the lowering raises before touching ctx/array_args.
+    A call whose Tesseract asks for a device transport must not silently degrade
+    to the slow host path. The lowering raises before touching ctx/array_args.
     """
-    from types import SimpleNamespace
-
     import typeguard
 
     from tesseract_jax import primitive
 
     monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
-    # The guard only reads params.client._gpu_transport before raising, so a
+    # The guard only resolves params.client's transport before raising, so a
     # stub suffices; suppress typeguard's runtime check of the DispatchParams
     # annotation (armed for the whole package via --typeguard-packages).
-    params = SimpleNamespace(client=_StubClient())
+    params = SimpleNamespace(client=_StubClient(), traceable=False)
 
     with (
         typeguard.suppress_type_checks(),
-        pytest.raises(RuntimeError, match="gpu_transport='cuda_ipc' was requested"),
+        pytest.raises(RuntimeError, match="FFI shim is unavailable"),
     ):
         primitive.tesseract_dispatch_gpu_lowering(object(), params=params)
 
@@ -153,8 +156,6 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
     usable GPU. Selecting a transport and then lowering without a CUDA device is a
     misconfiguration the lowering surfaces rather than silently falling back.
     """
-    from types import SimpleNamespace
-
     import jax
     import typeguard
 
@@ -167,7 +168,7 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
         raise RuntimeError("Unknown backend: 'cuda'")
 
     monkeypatch.setattr(jax, "devices", no_cuda)
-    params = SimpleNamespace(client=_StubClient())
+    params = SimpleNamespace(client=_StubClient(), traceable=False)
 
     with (
         typeguard.suppress_type_checks(),
@@ -179,17 +180,16 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
 def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
     """No device transport selected: defer to the host-callback lowering.
 
-    A client that did not opt into a device transport must behave exactly as on
-    CPU, so the GPU lowering delegates straight to the host lowering.
+    A call without a device transport must behave exactly as on CPU, so the GPU
+    lowering delegates straight to the host lowering.
     """
-    from types import SimpleNamespace
-
     import typeguard
 
     from tesseract_jax import primitive
 
     class _HostClient:
-        _gpu_transport = None
+        def resolve_gpu_transport(self) -> str:
+            return "none"
 
     sentinel = object()
     seen: dict = {}
@@ -200,7 +200,7 @@ def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(primitive, "tesseract_dispatch_lowering", fake_host_lowering)
-    params = SimpleNamespace(client=_HostClient())
+    params = SimpleNamespace(client=_HostClient(), traceable=False)
 
     with typeguard.suppress_type_checks():
         result = primitive.tesseract_dispatch_gpu_lowering(
@@ -338,3 +338,121 @@ def test_native_dispatch_wraps_inputs_as_views(monkeypatch):
     assert isinstance(view, gpu_ffi._DeviceArrayView)
     assert view.shape == (2, 2)  # list shape normalised to a tuple
     assert view.dtype == np.dtype("<f8")
+
+
+def test_native_dispatch_makes_host_results_contiguous(monkeypatch):
+    """Host results reach the handler as C-contiguous NumPy arrays.
+
+    The handler copies a host result as one flat byte range, so a strided one
+    must be made contiguous first, without changing its shape (0-d results stay
+    0-d, so they match their output buffer). Device results and placeholder
+    ``None`` slots pass through untouched.
+    """
+
+    class _Device:
+        def __init__(self) -> None:
+            self.__cuda_array_interface__ = {
+                "shape": (2,),
+                "typestr": "<f4",
+                "data": (0x1000, False),
+                "version": 3,
+            }
+
+    device = _Device()
+    strided = np.arange(6, dtype=np.float32)[::2]
+    scalar = np.float32(3.0)
+    zero_d = np.array(4.0, dtype=np.float32)
+    monkeypatch.setattr(
+        gpu_ffi,
+        "_registry",
+        {7: lambda views: (device, None, strided, scalar, zero_d)},
+    )
+
+    out_device, out_none, out_host, out_scalar, out_zero_d = gpu_ffi._native_dispatch(
+        7, []
+    )
+
+    assert out_device is device
+    assert out_none is None
+    assert out_host.flags.c_contiguous
+    np.testing.assert_array_equal(out_host, strided)
+    for out, expected in ((out_scalar, scalar), (out_zero_d, zero_d)):
+        assert out.shape == ()
+        assert out.flags.c_contiguous
+        assert out == expected
+
+
+def test_gpu_lowering_falls_back_to_host_without_shim_or_requested_transport(
+    monkeypatch,
+):
+    """Without the shim, a Tesseract that requests no transport takes the host path.
+
+    It warns, and does not ask the Tesseract for a transport it could not use.
+    """
+    import typeguard
+
+    from tesseract_jax import primitive
+
+    class _UnrequestedClient:
+        client = SimpleNamespace(current_encoding=SimpleNamespace(gpu_transport=None))
+
+        def resolve_gpu_transport(self) -> str:
+            raise AssertionError("resolved a transport the shim cannot drive")
+
+    sentinel = object()
+    monkeypatch.setattr(gpu_ffi, "is_available", lambda: False)
+    monkeypatch.setattr(
+        primitive, "tesseract_dispatch_lowering", lambda ctx, *a, params: sentinel
+    )
+    params = SimpleNamespace(client=_UnrequestedClient(), traceable=False)
+
+    with (
+        typeguard.suppress_type_checks(),
+        pytest.warns(UserWarning, match="FFI shim is unavailable"),
+    ):
+        assert (
+            primitive.tesseract_dispatch_gpu_lowering("ctx", params=params) is sentinel
+        )
+
+
+class _FakeDeviceArray:
+    """Looks like a CuPy array: ``__cuda_array_interface__`` plus ``.get()``."""
+
+    def __init__(self, host: np.ndarray) -> None:
+        self._host = host
+        self.__cuda_array_interface__ = {
+            "shape": host.shape,
+            "typestr": host.dtype.str,
+            "data": (0x1000, False),
+            "version": 3,
+        }
+
+    def get(self) -> np.ndarray:
+        return self._host
+
+
+def test_to_host_copies_device_arrays_only():
+    from tesseract_jax.tesseract_compat import to_host
+
+    host = np.arange(3.0)
+    np.testing.assert_array_equal(to_host(_FakeDeviceArray(host)), host)
+    assert to_host(host) is host
+
+
+def test_cast_return_keeps_results_on_the_calls_side():
+    """On the FFI path a device result of the right dtype is left for the shim.
+
+    Everything else is cast on the host: a device result of another dtype, a
+    device result on the host path after a copy, and a host result on either
+    path.
+    """
+    from tesseract_jax.tesseract_compat import _cast_return
+
+    device32 = _FakeDeviceArray(np.arange(3.0, dtype=np.float32))
+    assert _cast_return(device32, dtype=np.dtype("float32"), ffi_path=True) is device32
+    device = _FakeDeviceArray(np.arange(3.0))
+    for value, ffi_path in [(device, True), (device, False), (np.arange(3.0), True)]:
+        cast = _cast_return(value, dtype=np.dtype("float32"), ffi_path=ffi_path)
+        assert isinstance(cast, np.ndarray)
+        assert cast.dtype == np.float32
+        np.testing.assert_array_equal(cast, np.arange(3.0))
