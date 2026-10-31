@@ -66,6 +66,7 @@ Falls back to `"sequential"` when:
 
 - Any batched differentiable input has a fixed number of dimensions (e.g. `Array[(None,), Float32]`)
 - A batched input is non-differentiable (shape info not yet available in the schema)
+- In reverse mode, any unbatched differentiated input has a fixed number of dimensions, since a batched VJP request would have to broadcast it to the batch
 
 ## How static vs array inputs are handled
 
@@ -86,18 +87,18 @@ Scalar arrays (0-d) are treated as regular array args. Under `"expand_dims"`, a 
 
 `jax.jacfwd`, `jax.jacrev`, and `jax.vmap` of `jax.grad`, `jax.jvp`, `jax.vjp` or `jax.linearize` all batch a derivative call to the Tesseract. What runs depends on whether the primals (the point the derivative is taken at), the (co)tangents, or both are batched.
 
-| Primals   | (Co)tangents | Example                                          | Tesseract calls                                                                                                                                                                                                                               |
-| --------- | ------------ | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unbatched | Batched      | `jax.jacfwd(f)(x)`, `jax.jacrev(f)(x)`           | One `jacobian` call, if the Tesseract has the endpoint and `materialize_jacobian` is not `False`. This holds whatever `vmap_method` is, `None` included.                                                                                      |
-| Batched   | Unbatched    | `jax.vmap(jax.grad(f))(xs)`                      | Batched according to `vmap_method`.                                                                                                                                                                                                           |
-| Any       | Batched      | `jax.jacfwd(f)(x)` without a `jacobian` endpoint | If the first row does not apply, JVP calls are batched according to `vmap_method`, and VJP calls run once per cotangent (`"sequential"`) for every `vmap_method` except `None`, since Tesseract VJP endpoints do not take batched cotangents. |
+| Primals   | (Co)tangents | Example                                          | Tesseract calls                                                                                                                                          |
+| --------- | ------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unbatched | Batched      | `jax.jacfwd(f)(x)`, `jax.jacrev(f)(x)`           | One `jacobian` call, if the Tesseract has the endpoint and `materialize_jacobian` is not `False`. This holds whatever `vmap_method` is, `None` included. |
+| Batched   | Any          | `jax.vmap(jax.grad(f))(xs)`                      | Batched according to `vmap_method`.                                                                                                                      |
+| Any       | Batched      | `jax.jacfwd(f)(x)` without a `jacobian` endpoint | If the first row does not apply, JVP and VJP calls are batched according to `vmap_method`.                                                               |
 
 With `vmap_method=None`, every case not handled by a `jacobian` call raises `NotImplementedError`.
 
 When a vectorized method batches a derivative call, it broadcasts arguments so that every batched argument carries the batch dimension:
 
 - **Forward mode** (`jax.jvp`/`jax.linearize`/`jax.jacfwd`): Tesseracts require the shape of each tangent to match its input, so all methods except `"sequential"` broadcast tangents and their inputs to a common batch dimension.
-- **Reverse mode** (`jax.vjp`/`jax.grad`): with batched primals and unbatched cotangents, as in `jax.vmap(jax.grad(f))` below, the cotangents are broadcast to `(batch, ...)`, along with every unbatched input that the gradient is taken with respect to, so that the Tesseract returns one gradient per batch element.
+- **Reverse mode** (`jax.vjp`/`jax.grad`): unbatched cotangents, and every unbatched input that the gradient is taken with respect to, are broadcast to `(batch, ...)`, so that the Tesseract returns one gradient per batch element. `jax.vmap(jax.grad(f))` therefore sends one batched VJP request.
 
 Nested transforms are batched one level at a time, innermost first. In `jax.vmap(jax.jacrev(f))`, `jax.jacrev` batches the cotangents at each primal, which becomes a `jacobian` call by the first row of the table. The outer `jax.vmap` then batches the primals of that call. A batched `jacobian` call always runs once per batch element, whatever `vmap_method` is, because the endpoint has no batched form. The forward `apply` call is batched by the outer `jax.vmap` too, so it still needs a `vmap_method`.
 
@@ -113,7 +114,7 @@ apply_tesseract(tess, inputs, materialize_jacobian=None)
 
 - **`None`** (default): call the `jacobian` endpoint if the Tesseract has one, and batch the JVP / VJP calls otherwise.
 - **`True`**: always call the `jacobian` endpoint. Raises `RuntimeError` if the Tesseract has none.
-- **`False`**: never call the `jacobian` endpoint. JVP calls are batched according to `vmap_method`, and VJP calls run once per cotangent.
+- **`False`**: never call the `jacobian` endpoint. JVP and VJP calls are batched according to `vmap_method`.
 
 The `jacobian` endpoint returns the full Jacobian, of size (output size × input size), whatever the number of (co)tangents. JAX then contracts it with the batch of (co)tangents. Besides `jax.jacfwd` and `jax.jacrev`, this covers any `vmap` over (co)tangents at a fixed point, such as `jax.vmap(jax.linearize(f, x)[1])` or `jax.vmap(jax.vjp(f, x)[1])`.
 
@@ -176,7 +177,7 @@ The batching rule detects that the primal is unbatched but the tangent is batche
 
 ### Example: `jacrev(f)` with `materialize_jacobian=False` — batched cotangents
 
-This results in multiple Tesseract calls (one for each cotangent).
+This results in a single Tesseract call with broadcasting of primals to match cotangent dimensions.
 
 ```python
 def f(x):
@@ -190,4 +191,4 @@ def f(x):
 jax.jacrev(f)(x0)  # x0 has shape (3,), result has shape (3, 3)
 ```
 
-`jacrev` computes the Jacobian using reverse-mode AD. It calls `vjp` once to get the backward function, then uses `vmap` over cotangent vectors (columns of a `(3, 3)` identity matrix) to compute each row of the Jacobian. Since Tesseract VJP endpoints do not take batched cotangents, the batching rule falls back to `"sequential"` for the VJP call, and each cotangent basis vector is processed one at a time.
+`jacrev` computes the Jacobian using reverse-mode AD. It calls `vjp` once to get the backward function, then uses `vmap` over cotangent vectors (columns of a `(3, 3)` identity matrix) to compute each row of the Jacobian. As with `jacfwd`, the batching rule broadcasts the primal `x0` to match. The Tesseract sees primals `x=(3, 3)` and cotangents `(3, 3)`, and returns `dx=(3, 3)`, one row of the Jacobian per cotangent.
