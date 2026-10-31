@@ -1,6 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import operator
 import os
 import warnings
@@ -23,6 +24,7 @@ from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
+from tesseract_jax.direct_trace import TracedClient
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import HOST_COPY_HINT, Jaxeract, to_host
 from tesseract_jax.tree_util import (
@@ -533,10 +535,16 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: run the dispatch closure via a host callback, with no transport."""
+    """CPU lowering: inline the endpoint when traceable, else run it via a host callback, with no transport."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
     dispatch = _build_dispatch_closure(params, "none")
+
+    if params.traceable:
+        # params.client already replaced LocalClient with TracedClient() shim
+        # in apply_tesseract). Same dispatch closure as below; only the
+        # lowering mechanism changes to mlir.lower_fun.
+        return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -575,10 +583,17 @@ def tesseract_dispatch_gpu_lowering(
     native shim (e.g. a CPU-only install where it wasn't compiled), a Tesseract
     that requests no transport takes the host-callback lowering with a warning,
     and one that requests a transport raises.
+
+    Also falls back when ``traceable``: ``TracedClient`` has no
+    ``resolve_gpu_transport`` (inlining a real in-process endpoint needs no GPU
+    transport at all), so resolving one would raise ``AttributeError`` instead
+    of inlining.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
+    if params.traceable:
+        return tesseract_dispatch_lowering(ctx, *array_args, params=params)
     if (
         not gpu_ffi.is_available()
         and client.client.current_encoding.gpu_transport is None
@@ -1026,6 +1041,7 @@ def apply_tesseract(
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
     check_static_outputs: bool | None = None,
+    traceable: bool = False,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -1152,6 +1168,12 @@ def apply_tesseract(
             which is on unless set to a false value. Pass ``False`` to skip the
             comparison for one call. Skipping it also skips building the keypaths
             the warning needs; the caller gets the same values either way.
+        traceable: Whether to inline the Tesseract's real endpoint into the jaxpr
+            instead of dispatching through a host callback or a GPU transport.
+            Requires an in-process Tesseract (``Tesseract.from_tesseract_api(...)``);
+            raises ``ValueError`` otherwise. Every endpoint actually invoked must
+            return a plain ``dict`` (or build via ``model_construct``). Validation
+            is shape/dtype only (the same schema ``abstract_eval`` uses).
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -1184,6 +1206,18 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
+    if traceable and getattr(tesseract_client._client, "api_module", None) is None:
+        raise ValueError(
+            "traceable=True requires an in-process Tesseract built via "
+            "Tesseract.from_tesseract_api(...); "
+            f"{tesseract_client!r} has no importable apply function to trace "
+            "directly."
+        )
+
+    if traceable:
+        # TracedClient swaps dispatch endpoint but not abstract_eval
+        tesseract_client = copy.copy(tesseract_client)
+        tesseract_client._client = TracedClient(tesseract_client._client)
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
@@ -1247,6 +1281,7 @@ def apply_tesseract(
             eval_func="apply",
             vmap_method=vmap_method,
             materialize_jacobian=materialize_jacobian,
+            traceable=traceable,
         ),
     )
 

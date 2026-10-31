@@ -30,9 +30,11 @@ class OutputSchema(BaseModel):
 
 
 def apply(inputs: InputSchema) -> OutputSchema:
-    return OutputSchema(
-        y=as_jax_array(inputs.x) * 2.0, backend="reference", converged=True
-    )
+    return {
+        "y": as_jax_array(inputs.x) * 2.0,
+        "backend": "reference",
+        "converged": True,
+    }
 
 
 def abstract_eval(abstract_inputs: Any) -> dict:

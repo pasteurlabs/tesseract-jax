@@ -30,7 +30,7 @@ class OutputSchema(BaseModel):
 def apply(inputs: InputSchema) -> OutputSchema:
     # d/dx sqrt(x) is 1 / (2 sqrt(x)), which is NaN/inf at x = 0.
     x = as_jax_array(inputs.x)
-    return OutputSchema(safe=x * 2.0, unsafe=jnp.sqrt(x))
+    return {"safe": x * 2.0, "unsafe": jnp.sqrt(x)}
 
 
 def abstract_eval(abstract_inputs):
@@ -52,5 +52,6 @@ def vector_jacobian_product(
     if "safe" in vjp_outputs:
         grad = grad + 2.0 * as_jax_array(cotangent_vector["safe"])
     if "unsafe" in vjp_outputs:
+        # jnp divide-by-zero yields inf/NaN silently, unlike np: no errstate needed.
         grad = grad + (0.5 / jnp.sqrt(x)) * as_jax_array(cotangent_vector["unsafe"])
     return {"x": grad}
