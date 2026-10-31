@@ -20,6 +20,8 @@ import warnings
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as np
+from jax import dtypes
 from pydantic import BaseModel
 
 from tesseract_jax.tree_util import to_shape_dtype_pytree
@@ -43,6 +45,35 @@ def _present(real_node: Any, key: Any) -> bool:
     if isinstance(real_node, (list, tuple)):
         return key < len(real_node)
     return False
+
+
+def _safe_cast_dtype(value: Any, target: str) -> Any:
+    """Cast ``value`` to ``target`` only when it is an AD-safe, checkable cast.
+
+    Mirrors the policy ``apply_tesseract`` itself applies to inputs before
+    dispatch (``_cast_to_schema_dtype`` in ``primitive.py``): a float/complex
+    ``target`` accepts any cast tesseract-core accepts for it (an overflowing
+    value becomes ``inf``, as any JAX cast would, not an error); an
+    integer/bool ``target`` only accepts a widening cast, since narrowing or a
+    sign change can silently wrap a value and a JAX cast does not range-check
+    it the way tesseract-core's real array validator does on the callback
+    path. Left uncast, a real mismatch here still surfaces as the MLIR
+    output-type error this function was built to avoid, rather than silently
+    computing on a wrapped value. A ``target`` JAX cannot represent (a 64-bit
+    dtype with ``jax_enable_x64`` off) is left uncast too.
+    """
+    target_dtype = np.dtype(target)
+    if (
+        value.dtype == target_dtype
+        or dtypes.canonicalize_dtype(target_dtype) != target_dtype
+    ):
+        return value
+    if np.can_cast(value.dtype, target_dtype, casting="safe") or (
+        jnp.issubdtype(target_dtype, jnp.inexact)
+        and np.can_cast(value.dtype, target_dtype, casting="same_kind")
+    ):
+        return value.astype(target_dtype)
+    return value
 
 
 def _checked_default(value: Any, field_description: str) -> Any:
@@ -97,15 +128,16 @@ def _patch_with_real_values(
 
     A present array leaf is cast to ``schema_node.dtype`` -- the dtype the
     abstract-schema validation already resolved the field to (including any
-    expected_dtype coercion ``Array[...]`` declares) -- so a tracer gets the
-    same dtype coercion ``python_to_array`` would apply to a real value on
-    the callback path, instead of flowing through unconverted and failing
-    MLIR's output-type check later.
+    expected_dtype coercion ``Array[...]`` declares) -- when
+    :func:`_safe_cast_dtype` allows it, so a tracer gets the same dtype
+    coercion ``python_to_array`` would apply to a real value on the callback
+    path, instead of flowing through unconverted and failing MLIR's
+    output-type check later.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
     if isinstance(schema_node, ShapeDType):
-        return jnp.asarray(real_node, dtype=schema_node.dtype)
+        return _safe_cast_dtype(jnp.asarray(real_node), schema_node.dtype)
     if isinstance(schema_node, BaseModel):
         updates = {
             name: (
