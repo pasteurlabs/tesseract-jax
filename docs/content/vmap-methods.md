@@ -66,7 +66,7 @@ Falls back to `"sequential"` when:
 
 - Any batched differentiable input has a fixed number of dimensions (e.g. `Array[(None,), Float32]`)
 - A batched input is non-differentiable (shape info not yet available in the schema)
-- A VJP is taken with respect to an unbatched input with a fixed number of dimensions (e.g. weights shared across the batch), which a batched VJP request would have to broadcast to the batch
+- In reverse mode, any unbatched differentiated input has a fixed number of dimensions, since a batched VJP request would have to broadcast it to the batch
 
 ## How static vs array inputs are handled
 
@@ -98,7 +98,7 @@ With `vmap_method=None`, every case not handled by a `jacobian` call raises `Not
 When a vectorized method batches a derivative call, it broadcasts arguments so that every batched argument carries the batch dimension:
 
 - **Forward mode** (`jax.jvp`/`jax.linearize`/`jax.jacfwd`): Tesseracts require the shape of each tangent to match its input, so all methods except `"sequential"` broadcast tangents and their inputs to a common batch dimension.
-- **Reverse mode** (`jax.vjp`/`jax.grad`): unbatched cotangents, and every unbatched input that the gradient is taken with respect to, are broadcast to `(batch, ...)`, so that the Tesseract returns one gradient per batch element rather than their sum. `jax.vmap(jax.grad(f))` therefore sends one batched VJP request, whether the loss gives every example the same cotangent (as `y.sum()` does) or its own (as any loss nonlinear in the output does).
+- **Reverse mode** (`jax.vjp`/`jax.grad`): unbatched cotangents, and every unbatched input that the gradient is taken with respect to, are broadcast to `(batch, ...)`, so that the Tesseract returns one gradient per batch element. `jax.vmap(jax.grad(f))` therefore sends one batched VJP request.
 
 Nested transforms are batched one level at a time, innermost first. In `jax.vmap(jax.jacrev(f))`, `jax.jacrev` batches the cotangents at each primal, which becomes a `jacobian` call by the first row of the table. The outer `jax.vmap` then batches the primals of that call. A batched `jacobian` call always runs once per batch element, whatever `vmap_method` is, because the endpoint has no batched form. The forward `apply` call is batched by the outer `jax.vmap` too, so it still needs a `vmap_method`.
 

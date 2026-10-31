@@ -779,7 +779,7 @@ def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, vmap_method, 
     orig = batched_tess.vector_jacobian_product
 
     def spy(**kwargs):
-        calls.append(kwargs["inputs"]["x"].shape)
+        calls.append((kwargs["inputs"]["x"].shape, kwargs["inputs"]["y"].shape))
         return orig(**kwargs)
 
     monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
@@ -788,7 +788,44 @@ def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, vmap_method, 
     calls.clear()
     fn(*args)
 
-    assert calls == ([(3,)] * 4 if vmap_method == "sequential" else [(4, 3)])
+    expected = [((3,), (3,))] * 4 if vmap_method == "sequential" else [((4, 3), (4, 3))]
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_jacrev_vjp_requests(batched_tess, monkeypatch, vmap_method):
+    """``jacrev`` pulls back one cotangent per output element through the VJP."""
+    x = jnp.linspace(-1.0, 1.0, 3)
+    y = jnp.linspace(0.5, 1.5, 3)
+
+    def f(x):
+        return apply_tesseract(
+            batched_tess,
+            {"x": x, "y": y},
+            vmap_method=vmap_method,
+            materialize_jacobian=False,
+        )["result"]
+
+    expected = jax.jacfwd(f)(x)
+    calls = []
+    orig = batched_tess.vector_jacobian_product
+
+    def spy(**kwargs):
+        calls.append((kwargs["inputs"]["x"].shape, kwargs["inputs"]["y"].shape))
+        return orig(**kwargs)
+
+    monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
+    np.testing.assert_allclose(jax.jacrev(f)(x), expected, rtol=1e-6)
+    # y is not differentiated, so only broadcast_all broadcasts it to the batch.
+    expected_calls = {
+        "sequential": [((3,), (3,))] * 3,
+        "auto_experimental": [((3, 3), (1, 3))],
+        "expand_dims": [((3, 3), (1, 3))],
+        "broadcast_all": [((3, 3), (3, 3))],
+    }
+    assert calls == expected_calls[vmap_method]
 
 
 def test_list_index_survives_static_pruning():
