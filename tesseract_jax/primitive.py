@@ -1125,8 +1125,8 @@ def apply_tesseract(
             ``False``
                 Batch ``jacobian_vector_product`` according to ``vmap_method`` (e.g.
                 ``vmap_method=auto_experimental`` would broadcast primals to match tangents).
-                If ``vmap_method`` is not ``None``, ``vector_jacobian_product`` will always
-                be called sequentially once per cotangent. ⚠️ If ``vmap_method=None``
+                ``vector_jacobian_product`` is batched the same way, with the
+                differentiated primals broadcast to match the cotangents. ⚠️ If ``vmap_method=None``
                 and ``materialize_jacobian=False`` then batched (co)tangents are not supported
                 (a ``NotImplementedError`` will be raised).
 
