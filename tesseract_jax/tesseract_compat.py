@@ -490,18 +490,17 @@ class Jaxeract:
             if v is not None
         }
         ffi_path = _on_device(array_args)
+
         # A traced value is a Tracer, which np.asarray (_cast_return) rejects;
         # jnp.asarray is the traced equivalent, and there is no on-device FFI
         # path while tracing either way.
-        cast = (
-            (lambda value, *, dtype: jnp.asarray(value, dtype=dtype))
-            if params.traceable
-            else (
-                lambda value, *, dtype: _cast_return(
-                    value, dtype=dtype, ffi_path=ffi_path
-                )
-            )
-        )
+        def cast_traced(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+            return jnp.asarray(value, dtype=dtype)
+
+        def cast_ffi(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+            return _cast_return(value, dtype=dtype, ffi_path=ffi_path)
+
+        cast = cast_traced if params.traceable else cast_ffi
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
