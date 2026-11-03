@@ -1065,9 +1065,9 @@ def apply_tesseract(
     in-process Tesseract (``Tesseract.from_tesseract_api(...)``); every
     endpoint actually invoked must return a plain ``dict`` (or build via
     ``model_construct``), and validation is shape/dtype only (the same schema
-    ``abstract_eval`` uses). See :doc:`/content/traceable` for the full
-    picture, including this sharp edge, and
-    :func:`tesseract_jax.direct_trace.to_traceable`.
+    ``abstract_eval`` uses). See the "No JAX operations inside
+    ``from_tesseract_api`` endpoints" sharp edge in :doc:`/content/get-started`
+    for the full picture, and :func:`tesseract_jax.direct_trace.to_traceable`.
 
     Example:
         >>> from tesseract_core import Tesseract

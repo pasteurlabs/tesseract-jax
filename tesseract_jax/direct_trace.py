@@ -332,7 +332,9 @@ def to_traceable(tesseract_client: Tesseract) -> Tesseract:
     call it exactly as you would the original Tesseract. Every endpoint actually
     invoked must return a plain ``dict`` (or build via ``model_construct``), and
     validation is shape/dtype only (the same schema ``abstract_eval`` uses) -- see
-    ``TracedClient`` for both, and :doc:`/content/traceable` for the full picture.
+    ``TracedClient`` for both, and the "No JAX operations inside
+    ``from_tesseract_api`` endpoints" sharp edge in :doc:`/content/get-started`
+    for the full picture.
     """
     api_module = getattr(tesseract_client._client, "api_module", None)
     if api_module is None:

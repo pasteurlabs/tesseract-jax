@@ -95,6 +95,8 @@ jax.grad(vector_sum)(x, y) # 🎉
 
 - **Non-array outputs come from `abstract_eval`**: an `OutputSchema` field that is not an array, such as a `str` or a `bool`, cannot enter a traced computation. As such, non-array outputs returned by `apply` are ignored and their value is instead taken from `abstract_eval`. `apply_tesseract` warns when the two differ; pass `check_static_outputs=False` or set `TESSERACT_JAX_CHECK_STATIC_OUTPUTS=0` to skip the comparison. A field whose value depends on the input values belongs in the schema as an array.
 
+- **No JAX operations inside `from_tesseract_api` endpoints**: in-process endpoints run inside JAX FFI callbacks, so `jax.numpy` there can deadlock. Use plain NumPy, or pass `to_traceable(tesseract_client)` to `apply_tesseract` to inline the endpoint into the jaxpr instead of dispatching it through a callback — in which case every endpoint actually invoked must return a plain `dict` (or build via `model_construct`), not `OutputSchema(...)`. See the [sharp edges in the docs](https://docs.pasteurlabs.ai/projects/tesseract-jax/latest/content/get-started.html#sharp-edges) for the full picture.
+
 ## License
 
 Tesseract-JAX is licensed under the [Apache License 2.0](LICENSE) and is free to use, modify, and distribute (under the terms of the license).
