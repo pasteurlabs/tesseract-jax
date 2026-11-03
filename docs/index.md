@@ -30,6 +30,7 @@ content/get-started
 content/handling-differentiability
 content/vmap-methods
 content/gpu-arrays
+content/traceable
 content/debugging
 content/api
 ```

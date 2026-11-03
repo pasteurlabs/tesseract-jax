@@ -29,7 +29,7 @@ class OutputSchema(BaseModel):
     converged: bool = Field(default=True, description="Whether the solve converged.")
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
+def apply(inputs: InputSchema) -> dict:
     return {
         "y": as_jax_array(inputs.x) * 2.0,
         "backend": "reference",

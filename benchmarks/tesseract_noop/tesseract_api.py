@@ -13,13 +13,8 @@ class OutputSchema(BaseModel):
     result: Differentiable[Array[..., Float32]]
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
-    """Identity function - returns input unchanged.
-
-    Returns a plain dict, not ``OutputSchema(...)``: the validating
-    constructor calls ``np.asarray`` on its arguments, which raises on a
-    tracer when calling a Tesseract built with ``to_traceable()``.
-    """
+def apply(inputs: InputSchema) -> dict:
+    """Identity function - returns input unchanged."""
     return {"result": inputs.data}
 
 

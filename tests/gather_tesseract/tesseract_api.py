@@ -51,7 +51,7 @@ class OutputSchema(BaseModel):
     )
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
+def apply(inputs: InputSchema) -> dict:
     """Gather `weights` at `indices`, and count how often each index appears."""
     # jnp.bincount needs a static `length` to stay jittable, unlike np.bincount.
     indices = as_jax_array(inputs.indices)
