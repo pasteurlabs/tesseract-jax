@@ -194,22 +194,54 @@ def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
         apply_tesseract(mixed_dtype_tess, dict(x=x), traceable=True)
 
 
-def test_omitted_array_field_with_a_default_raises_a_clear_error(
+def test_omitted_array_field_recovers_its_real_default(
     vectoradd_jax_tess, vectoradd_jax_ab
 ):
-    """An omitted array field with a default raises, instead of patching in a placeholder.
+    """An omitted array field's real default is recovered, not a ShapeDType placeholder.
 
     tesseract-core (>=1.15) validates a field's default against the abstract
-    schema too, so ``Vector_and_Scalar.s``'s default (``np.float32(1.0)``)
-    resolves to a ``ShapeDType`` placeholder, not the real ``1.0`` -- there is
-    no real value left to patch in. Before this, the fallback used that
-    placeholder as if it were a real value (a regression from an older
-    tesseract-core, where the default stayed unvalidated); before the
-    fallback existed at all, omitting the field raised ``KeyError``. Tested
-    against ``_patch_with_real_values`` directly, not ``apply_tesseract``:
-    ``apply_tesseract``'s own eager ``abstract_eval`` call independently
-    errors on this omission, for a pre-existing tesseract-core/example reason
-    unrelated to this fix.
+    schema too, so ``Vector_and_Scalar.s``'s default (``np.float32(1.0)``) on
+    ``abstract_instance.inputs`` is a ``ShapeDType`` placeholder, not the real
+    ``1.0`` -- the abstract schema alone has no real value left to patch in.
+    But a default is never a tracer, so ``_omitted_field_value`` validates it
+    through the real (non-abstract) field instead, via the real sibling class
+    ``_patch_with_real_values`` is given. Before that recovery existed, this
+    raised a clear error rather than silently use the placeholder (a
+    regression from an older tesseract-core, where the default stayed
+    unvalidated and happened to still be real); before any fallback existed,
+    omitting the field raised ``KeyError``.
+    """
+    from tesseract_jax.direct_trace import (
+        _abstract_input_schema,
+        _patch_with_real_values,
+    )
+    from tesseract_jax.tree_util import to_shape_dtype_pytree
+
+    api_module = vectoradd_jax_tess._client.api_module
+    AbstractInputSchema = _abstract_input_schema(
+        api_module.InputSchema, api_module.OutputSchema
+    )
+
+    a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"
+    real_inputs_omitted = {"a": a_no_s, "b": vectoradd_jax_ab["b"], "norm_ord": 2}
+
+    abstract_inputs = to_shape_dtype_pytree(real_inputs_omitted)
+    abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
+    patched = _patch_with_real_values(
+        abstract_instance.inputs, real_inputs_omitted, api_module.InputSchema
+    )
+    assert float(patched.a.s) == pytest.approx(1.0)
+
+
+def test_omitted_array_field_raises_without_a_resolvable_real_class(
+    vectoradd_jax_tess, vectoradd_jax_ab
+):
+    """Without a real sibling class to recover the default from, the clear error returns.
+
+    Mirrors calling ``_patch_with_real_values`` with no ``real_cls`` -- the
+    situation inside a plain ``dict``/``list`` schema node, or behind an
+    annotation ``_real_nested_cls`` doesn't resolve -- so there's nowhere left
+    to look up the real default.
     """
     from tesseract_jax.direct_trace import (
         _abstract_input_schema,
@@ -229,3 +261,23 @@ def test_omitted_array_field_with_a_default_raises_a_clear_error(
     abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
     with pytest.raises(ValueError, match=r"inputs\.a\.s.*omitted"):
         _patch_with_real_values(abstract_instance.inputs, real_inputs_omitted)
+
+
+def test_apply_tesseract_recovers_an_omitted_array_default_end_to_end(
+    vectoradd_jax_tess,
+):
+    """The default recovery works through a real ``apply_tesseract(traceable=True)`` call."""
+    out = apply_tesseract(
+        vectoradd_jax_tess,
+        {
+            "a": {"v": jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)},  # "s" omitted
+            "b": {
+                "v": jnp.array([4.0, 5.0, 6.0], dtype=jnp.float32),
+                "s": jnp.float32(0.5),
+            },
+            "norm_ord": 2,
+        },
+        traceable=True,
+    )
+    # a.s defaults to 1.0: result = a.v * a.s + b.v * b.s = [1,2,3] + [2,2.5,3].
+    np.testing.assert_allclose(out["vector_add"]["result"], [3.0, 4.5, 6.0], rtol=1e-6)

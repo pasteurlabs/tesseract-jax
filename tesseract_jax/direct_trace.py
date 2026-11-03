@@ -22,7 +22,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from jax import dtypes
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic_core import PydanticUndefined
 
 from tesseract_jax.tree_util import to_shape_dtype_pytree
 
@@ -77,16 +78,18 @@ def _safe_cast_dtype(value: Any, target: str) -> Any:
 
 
 def _checked_default(value: Any, field_description: str) -> Any:
-    """An omitted field's schema default, or raise if it hides an array placeholder.
+    """An omitted field's schema default, or raise if it hides an unresolved array placeholder.
 
+    Used once :func:`_omitted_field_value` and :func:`_real_nested_cls` have
+    already failed to recover a real value for this leaf -- a field whose
+    real sibling class isn't known (inside a plain ``dict``/``list``, or
+    behind an ``Optional``/``Union`` annotation we don't resolve; see
+    :func:`_real_nested_cls`) or whose default a ``TypeAdapter`` rejects.
     tesseract-core (>=1.15) validates a field's default against the abstract
     schema too, so an array-valued default (e.g. ``np.float32(1.0)``) comes
     back as a ``ShapeDType`` placeholder with no real value to patch in --
     unlike on the callback path, where ``InputSchema.model_validate`` keeps
     the real default since pydantic doesn't re-validate defaults there.
-    traceable=True has no way to recover the original default from the
-    abstract schema alone, so this raises instead of silently handing the
-    real endpoint a placeholder where it expects a real array.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
@@ -112,19 +115,81 @@ def _checked_default(value: Any, field_description: str) -> Any:
     return value
 
 
+def _real_nested_cls(
+    real_cls: type[BaseModel] | None, name: str
+) -> type[BaseModel] | None:
+    """The real (non-abstract) nested model class backing field ``name``, or ``None``.
+
+    ``None`` means a nested default under this field can't be recovered by
+    :func:`_omitted_field_value` -- either because ``real_cls`` itself was
+    already unrecoverable, or because the field's real annotation isn't a
+    bare class reference (``Optional[Model]``, ``Model | Other``, and similar
+    wrapped/union annotations all fall back to :func:`_checked_default`
+    instead of being resolved here).
+    """
+    field_info = real_cls.model_fields.get(name) if real_cls is not None else None
+    if field_info is None:
+        return None
+    annotation = field_info.annotation
+    is_model = isinstance(annotation, type) and issubclass(annotation, BaseModel)
+    return annotation if is_model else None
+
+
+def _omitted_field_value(
+    abstract_value: Any, real_cls: type[BaseModel] | None, name: str, path: str
+) -> Any:
+    """The real value for an omitted field: its real default, or :func:`_checked_default`'s fallback.
+
+    tesseract-core (>=1.15) validates a field's default against the abstract
+    schema too, so an array-valued default comes back as a ``ShapeDType``
+    placeholder on ``abstract_value`` with no real value left on it. But a
+    default is never a tracer -- only a caller-supplied value can be -- so
+    there's nothing stopping us from validating it through the *real* field
+    directly instead: the exact same ``TypeAdapter(field.annotation)
+    .validate_python(default)`` tesseract-core's own schema generation runs
+    before discarding the result down to a ``ShapeDType`` (see
+    ``replace_array_default_with_shapedtype`` in tesseract-core's
+    ``schema_generation.py``) -- we just keep the value instead of throwing
+    it away. Falls back to :func:`_checked_default` whenever ``real_cls``
+    doesn't have this field (not a bare class reference; see
+    :func:`_real_nested_cls`) or its default doesn't validate.
+    """
+    from tesseract_core.runtime.schema_types import ShapeDType
+
+    if not isinstance(abstract_value, ShapeDType) or real_cls is None:
+        return _checked_default(abstract_value, path)
+
+    field_info = real_cls.model_fields.get(name)
+    if field_info is None:
+        return _checked_default(abstract_value, path)
+
+    default = field_info.get_default(call_default_factory=True)
+    if default is PydanticUndefined:
+        return _checked_default(abstract_value, path)
+
+    try:
+        real_default = TypeAdapter(field_info.annotation).validate_python(default)
+    except ValidationError:
+        return _checked_default(abstract_value, path)
+
+    return jnp.asarray(real_default)
+
+
 def _patch_with_real_values(
-    schema_node: Any, real_node: Any, path: str = "inputs"
+    schema_node: Any,
+    real_node: Any,
+    real_cls: type[BaseModel] | None = None,
+    path: str = "inputs",
 ) -> Any:
     """Replace each array (``ShapeDType``) leaf with the matching real value.
 
     A field missing from ``real_node`` (omitted from ``apply_tesseract``'s
-    raw ``inputs``, relying on ``InputSchema``'s own default) keeps
-    ``schema_node``'s own value instead -- the same default the callback
-    path's ``InputSchema.model_validate`` would use, since pydantic doesn't
-    re-validate defaults either -- except an array-valued default, which
-    :func:`_checked_default` rejects (see its docstring). A present non-array
-    leaf also keeps ``schema_node``'s value, since it already passed whatever
-    validator applies to it during the abstract-schema validation.
+    raw ``inputs``, relying on ``InputSchema``'s own default) is resolved by
+    :func:`_omitted_field_value` -- the real default when ``real_cls`` (the
+    non-abstract sibling of ``schema_node``'s class) makes that possible, else
+    :func:`_checked_default`'s fallback. A present non-array leaf keeps
+    ``schema_node``'s value, since it already passed whatever validator
+    applies to it during the abstract-schema validation.
 
     A present array leaf is cast to ``schema_node.dtype`` -- the dtype the
     abstract-schema validation already resolved the field to (including any
@@ -142,10 +207,15 @@ def _patch_with_real_values(
         updates = {
             name: (
                 _patch_with_real_values(
-                    getattr(schema_node, name), real_node[name], f"{path}.{name}"
+                    getattr(schema_node, name),
+                    real_node[name],
+                    _real_nested_cls(real_cls, name),
+                    f"{path}.{name}",
                 )
                 if _present(real_node, name)
-                else _checked_default(getattr(schema_node, name), f"{path}.{name}")
+                else _omitted_field_value(
+                    getattr(schema_node, name), real_cls, name, f"{path}.{name}"
+                )
             )
             for name in type(schema_node).model_fields
         }
@@ -153,7 +223,7 @@ def _patch_with_real_values(
     if isinstance(schema_node, dict):
         return {
             key: (
-                _patch_with_real_values(value, real_node[key], f"{path}[{key!r}]")
+                _patch_with_real_values(value, real_node[key], None, f"{path}[{key!r}]")
                 if _present(real_node, key)
                 else _checked_default(value, f"{path}[{key!r}]")
             )
@@ -161,7 +231,7 @@ def _patch_with_real_values(
         }
     if isinstance(schema_node, (list, tuple)):
         patched = [
-            _patch_with_real_values(value, real_node[i], f"{path}[{i}]")
+            _patch_with_real_values(value, real_node[i], None, f"{path}[{i}]")
             if _present(real_node, i)
             else _checked_default(value, f"{path}[{i}]")
             for i, value in enumerate(schema_node)
@@ -236,7 +306,7 @@ class TracedClient:
         abstract_inputs = to_shape_dtype_pytree(orig_inputs)
         abstract_instance = schema.model_validate({"inputs": abstract_inputs})
         patched_instance = _patch_with_real_values(
-            abstract_instance.inputs, orig_inputs
+            abstract_instance.inputs, orig_inputs, api_module.InputSchema
         )
 
         # If endpoint calls ``inputs.model_dump``, pydantic would raise a warning because
