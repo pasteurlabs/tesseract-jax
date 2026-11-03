@@ -51,17 +51,20 @@ def _present(real_node: Any, key: Any) -> bool:
 def _safe_cast_dtype(value: Any, target: str) -> Any:
     """Cast ``value`` to ``target`` only when it is an AD-safe, checkable cast.
 
-    Mirrors the policy ``apply_tesseract`` itself applies to inputs before
-    dispatch (``_cast_to_schema_dtype`` in ``primitive.py``): a float/complex
-    ``target`` accepts any cast tesseract-core accepts for it (an overflowing
-    value becomes ``inf``, as any JAX cast would, not an error); an
-    integer/bool ``target`` only accepts a widening cast, since narrowing or a
-    sign change can silently wrap a value and a JAX cast does not range-check
-    it the way tesseract-core's real array validator does on the callback
-    path. Left uncast, a real mismatch here still surfaces as the MLIR
-    output-type error this function was built to avoid, rather than silently
-    computing on a wrapped value. A ``target`` JAX cannot represent (a 64-bit
-    dtype with ``jax_enable_x64`` off) is left uncast too.
+    A float/complex ``target`` accepts any cast tesseract-core accepts for it
+    (an overflowing value becomes ``inf``, as any JAX cast would, not an
+    error); an integer/bool ``target`` only accepts a widening cast, since
+    narrowing or a sign change can silently wrap a value and a JAX cast does
+    not range-check it the way tesseract-core's real array validator does on
+    the callback path. Left uncast, a real mismatch here still surfaces as
+    the MLIR output-type error this function was built to avoid, rather than
+    silently computing on a wrapped value. A ``target`` JAX cannot represent
+    (a 64-bit dtype with ``jax_enable_x64`` off) is left uncast too.
+
+    This policy isn't shared with anything else in tesseract-jax today (a
+    matching input-side cast in ``primitive.py``, ``_cast_to_schema_dtype``,
+    exists only on the not-yet-merged #307 -- if it lands, extract one shared
+    "is this cast AD-safe" predicate instead of keeping two copies in sync).
     """
     target_dtype = np.dtype(target)
     if (
@@ -222,22 +225,24 @@ def _patch_with_real_values(
         return schema_node.model_copy(update=updates)
     if isinstance(schema_node, dict):
         return {
-            key: (
-                _patch_with_real_values(value, real_node[key], None, f"{path}[{key!r}]")
-                if _present(real_node, key)
-                else _checked_default(value, f"{path}[{key!r}]")
-            )
+            key: _patch_container_item(key, value, real_node, path)
             for key, value in schema_node.items()
         }
     if isinstance(schema_node, (list, tuple)):
         patched = [
-            _patch_with_real_values(value, real_node[i], None, f"{path}[{i}]")
-            if _present(real_node, i)
-            else _checked_default(value, f"{path}[{i}]")
+            _patch_container_item(i, value, real_node, path)
             for i, value in enumerate(schema_node)
         ]
         return type(schema_node)(patched)
     return schema_node
+
+
+def _patch_container_item(key: Any, value: Any, real_node: Any, path: str) -> Any:
+    """A ``dict``/``list``/``tuple`` item at ``key``, patched or defaulted like any other leaf."""
+    item_path = f"{path}[{key!r}]"
+    if _present(real_node, key):
+        return _patch_with_real_values(value, real_node[key], None, item_path)
+    return _checked_default(value, item_path)
 
 
 class TracedClient:
