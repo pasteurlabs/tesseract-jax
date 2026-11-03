@@ -14,8 +14,6 @@ import numpy as np
 import pytest
 from tesseract_core import Tesseract
 
-from tesseract_jax import apply_tesseract, to_traceable
-
 here = Path(__file__).parent
 
 jax.config.update("jax_enable_x64", True)
@@ -400,6 +398,13 @@ def vectoradd_jax_ab() -> dict:
 @pytest.fixture
 def vectoradd_apply(vectoradd_jax_tess):
     """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
+    # Imported here, not at module level: a top-level import makes typeguard's
+    # own pytest plugin see tesseract_jax as "already imported" by the time it
+    # tries to instrument it (--typeguard-packages=tesseract_jax), which it
+    # raises on as of pytest 9.2 -- test modules import it directly instead,
+    # which collect later, after typeguard's hook has already run.
+    from tesseract_jax import apply_tesseract, to_traceable
+
     traced_tess = to_traceable(vectoradd_jax_tess)
 
     def call(ab: dict, traceable: bool, norm_ord: int = 2) -> dict:
