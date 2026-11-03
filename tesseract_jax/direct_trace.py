@@ -94,9 +94,6 @@ def _checked_default(value: Any, field_description: str) -> Any:
     from tesseract_core.runtime.schema_types import ShapeDType
 
     if isinstance(value, ShapeDType):
-        # ValueError, not TypeError: value is of the expected type (ShapeDType) --
-        # it's its *meaning* (no real default survived validation) that's wrong,
-        # not its type.
         raise ValueError(  # noqa: TRY004
             f"traceable=True cannot use the schema default for {field_description!r}: "
             "it was omitted from the inputs, and its default is an array. "
