@@ -370,11 +370,7 @@ def zero_cotangent_tess() -> Tesseract:
 
 @pytest.fixture
 def vectoradd_jax_tess() -> Tesseract:
-    """The flagship JAX-recipe example, loaded in-process from its own source.
-
-    Points at ``examples/simple/vectoradd_jax`` directly, so a change to the
-    documented recipe is exercised here too.
-    """
+    """The ``vectoradd_jax`` example, loaded in-process from ``examples/`` so tests track it."""
     return Tesseract.from_tesseract_api(
         str(here.parent / "examples" / "simple" / "vectoradd_jax" / "tesseract_api.py")
     )
@@ -398,11 +394,8 @@ def vectoradd_jax_ab() -> dict:
 @pytest.fixture
 def vectoradd_apply(vectoradd_jax_tess):
     """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
-    # Imported here, not at module level: a top-level import makes typeguard's
-    # own pytest plugin see tesseract_jax as "already imported" by the time it
-    # tries to instrument it (--typeguard-packages=tesseract_jax), which it
-    # raises on as of pytest 9.2 -- test modules import it directly instead,
-    # which collect later, after typeguard's hook has already run.
+    # Imported lazily because typeguard's pytest plugin raises (as of pytest 9.2)
+    # if tesseract_jax is already imported when it instruments the package.
     from tesseract_jax import apply_tesseract, to_traceable
 
     traced_tess = to_traceable(vectoradd_jax_tess)

@@ -534,15 +534,13 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: inline the endpoint when traceable, else run it via a host callback, with no transport."""
+    """CPU lowering: inline the endpoint if traceable, else run it via a host callback."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
     dispatch = _build_dispatch_closure(params, "none")
 
     if params.traceable:
-        # params.client already replaced LocalClient with TracedClient() shim
-        # in apply_tesseract). Same dispatch closure as below; only the
-        # lowering mechanism changes to mlir.lower_fun.
+        # TracedClient makes the dispatch closure traceable, so lower it like any JAX function.
         return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
@@ -583,10 +581,8 @@ def tesseract_dispatch_gpu_lowering(
     that requests no transport takes the host-callback lowering with a warning,
     and one that requests a transport raises.
 
-    Also falls back when ``traceable``: ``TracedClient`` has no
-    ``resolve_gpu_transport`` (inlining a real in-process endpoint needs no GPU
-    transport at all), so resolving one would raise ``AttributeError`` instead
-    of inlining.
+    A traceable dispatch needs no transport and goes straight to
+    :func:`tesseract_dispatch_lowering`, before any transport is resolved.
     """
     from tesseract_jax import gpu_ffi
 
@@ -1059,15 +1055,9 @@ def apply_tesseract(
     them. See :doc:`/content/gpu-arrays` for how the transport is picked and
     what an in-process Tesseract receives.
 
-    Pass ``to_traceable(tesseract_client)`` instead of ``tesseract_client`` to
-    inline the Tesseract's real endpoint into the jaxpr, instead of
-    dispatching through a host callback or a GPU transport. Requires an
-    in-process Tesseract (``Tesseract.from_tesseract_api(...)``); every
-    endpoint actually invoked must return a plain ``dict`` (or build via
-    ``model_construct``), and validation is shape/dtype only (the same schema
-    ``abstract_eval`` uses). See the "No JAX operations inside
-    ``from_tesseract_api`` endpoints" sharp edge in :doc:`/content/get-started`
-    for the full picture, and :func:`tesseract_jax.direct_trace.to_traceable`.
+    Pass ``to_traceable(tesseract_client)`` to trace an in-process Tesseract's
+    endpoints into the jaxpr instead of dispatching them. See
+    :func:`tesseract_jax.to_traceable` for its requirements.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -1208,9 +1198,7 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    # to_traceable() already did the one-time validation and client swap; a
-    # traced Tesseract is detected here by its client's type, the same way
-    # resolve_gpu_transport() detects a GPU-transport Tesseract by its encoding.
+    # to_traceable() marks a Tesseract by swapping in a TracedClient.
     traceable = isinstance(tesseract_client._client, TracedClient)
     client = Jaxeract(tesseract_client)
 

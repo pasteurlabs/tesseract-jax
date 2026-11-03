@@ -1,10 +1,10 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Traceable-vs-callback parity for the flagship ``vectoradd_jax`` recipe.
+"""Traced-vs-callback parity for the ``vectoradd_jax`` example.
 
-Exercises a static (non-array) input leaf (``norm_ord``) mixed with nested
-submodels -- a combination none of the other traceable-eligible fixtures has.
+The example mixes a static input (``norm_ord``) with nested submodels, which
+no other traced test Tesseract does.
 """
 
 import jax
@@ -79,11 +79,7 @@ def test_jacobian_matches_between_dispatch_modes(
 def test_static_norm_ord_affects_result_under_traceable(
     vectoradd_apply, vectoradd_jax_ab
 ):
-    """``norm_ord`` must stay static despite sitting alongside nested submodels.
-
-    It has to be classified as aux, not a jax leaf, even mixed in with
-    array-carrying submodels in the same schema.
-    """
+    """``norm_ord`` stays a static input next to array-carrying submodels."""
     out_ord2 = vectoradd_apply(vectoradd_jax_ab, traceable=True, norm_ord=2)
     out_ord1 = vectoradd_apply(vectoradd_jax_ab, traceable=True, norm_ord=1)
     assert not np.allclose(

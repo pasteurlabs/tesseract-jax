@@ -181,12 +181,9 @@ def merge_dicts(d1, d2):
 @pytest.mark.parametrize("traceable", [False, True])
 @pytest.mark.parametrize("use_jit", [True, False])
 def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit, traceable):
-    """Test the primal (apply) endpoint of pytree_tesseract.
+    """Test the primal (apply) endpoint of pytree_tesseract, in both dispatch modes.
 
-    The traced case exercises ``_patch_with_real_values`` against a schema
-    with real dict/list/nested-model container variety (unlike
-    ``vectoradd_jax``, which is flat submodels only) -- pytree_tesseract's
-    ``apply`` already returns a plain dict, so it needs no changes to qualify.
+    The traced case covers dict, list, and nested-model inputs.
     """
     tess = to_traceable(pytree_tess) if traceable else pytree_tess
 

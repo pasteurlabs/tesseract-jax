@@ -1,18 +1,16 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Trace a Tesseract's real dispatch endpoints instead of dispatching them.
+"""Trace a Tesseract's Python endpoints into the jaxpr instead of dispatching them.
 
-Provides ``TracedClient`` as a drop-in replacement for ``LocalCLient``,
-validating and calling the real Python endpoint directly.
-
-Inputs and outputs are exchanged as validation-light objects: shapes/dtypes
-are checked against the same ``AbstractEval_``-prefixed sibling schema
-``abstract_eval`` already uses, then real values are patched in without
-re-validating, and each endpoint returns a plain ``dict`` (or builds via
-``model_construct``) rather than the schema's validating constructor. Both
-follow from the same fact -- pydantic's ``Array[...]`` validator calls
-``np.asarray``, which rejects a Tracer -- for every endpoint, not just ``apply``.
+``TracedClient`` stands in for a Tesseract's ``LocalClient``. It validates
+inputs against the ``AbstractEval_`` schema that ``abstract_eval`` uses, which
+checks shapes and dtypes only, and then patches the real (possibly traced)
+values back in without re-validating them. Full validation is not possible
+because pydantic's ``Array`` validator calls ``np.asarray``, which raises on a
+tracer. For the same reason, every traced endpoint must return a plain
+``dict`` (or build its output via ``model_construct``) instead of calling
+``OutputSchema(...)``.
 """
 
 import copy
@@ -34,7 +32,7 @@ from tesseract_jax.tree_util import to_shape_dtype_pytree
 def _abstract_input_schema(
     InputSchema: type[BaseModel], OutputSchema: type[BaseModel]
 ) -> type[BaseModel]:
-    """The ``AbstractEval_``-prefixed sibling of ``InputSchema``, cached per schema pair."""
+    """Return the ``AbstractEval_`` variant of ``InputSchema``, cached per schema pair."""
     from tesseract_core.runtime.schema_generation import create_abstract_eval_schema
 
     AbstractInputSchema, _ = create_abstract_eval_schema(InputSchema, OutputSchema)
@@ -51,22 +49,15 @@ def _present(real_node: Any, key: Any) -> bool:
 
 
 def _safe_cast_dtype(value: Any, target: str) -> Any:
-    """Cast ``value`` to ``target`` only when it is an AD-safe, checkable cast.
+    """Cast ``value`` to ``target`` unless the cast could silently corrupt it.
 
-    A float/complex ``target`` accepts any cast tesseract-core accepts for it
-    (an overflowing value becomes ``inf``, as any JAX cast would, not an
-    error); an integer/bool ``target`` only accepts a widening cast, since
-    narrowing or a sign change can silently wrap a value and a JAX cast does
-    not range-check it the way tesseract-core's real array validator does on
-    the callback path. Left uncast, a real mismatch here still surfaces as
-    the MLIR output-type error this function was built to avoid, rather than
-    silently computing on a wrapped value. A ``target`` JAX cannot represent
-    (a 64-bit dtype with ``jax_enable_x64`` off) is left uncast too.
-
-    This policy isn't shared with anything else in tesseract-jax today (a
-    matching input-side cast in ``primitive.py``, ``_cast_to_schema_dtype``,
-    exists only on the not-yet-merged #307 -- if it lands, extract one shared
-    "is this cast AD-safe" predicate instead of keeping two copies in sync).
+    Float and complex targets accept any ``same_kind`` cast, as tesseract-core
+    does, and an overflowing value becomes ``inf``. Integer and bool targets
+    accept only widening casts, because a JAX cast does not range-check the
+    value the way tesseract-core's array validator does. A value left uncast
+    later fails MLIR's output-type check, which is safer than computing on a
+    wrapped value. Targets JAX cannot represent (64-bit dtypes without
+    ``jax_enable_x64``) are left uncast too.
     """
     target_dtype = np.dtype(target)
     if (
@@ -83,18 +74,9 @@ def _safe_cast_dtype(value: Any, target: str) -> Any:
 
 
 def _checked_default(value: Any, field_description: str) -> Any:
-    """An omitted field's schema default, or raise if it hides an unresolved array placeholder.
+    """Return an omitted field's default, raising if it contains a ``ShapeDType`` placeholder.
 
-    Used once :func:`_omitted_field_value` and :func:`_real_nested_cls` have
-    already failed to recover a real value for this leaf -- a field whose
-    real sibling class isn't known (inside a plain ``dict``/``list``, or
-    behind an ``Optional``/``Union`` annotation we don't resolve; see
-    :func:`_real_nested_cls`) or whose default a ``TypeAdapter`` rejects.
-    tesseract-core (>=1.15) validates a field's default against the abstract
-    schema too, so an array-valued default (e.g. ``np.float32(1.0)``) comes
-    back as a ``ShapeDType`` placeholder with no real value to patch in --
-    unlike on the callback path, where ``InputSchema.model_validate`` keeps
-    the real default since pydantic doesn't re-validate defaults there.
+    Fallback for when :func:`_omitted_field_value` cannot recover the real default.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
@@ -121,14 +103,10 @@ def _checked_default(value: Any, field_description: str) -> Any:
 def _real_nested_cls(
     real_cls: type[BaseModel] | None, name: str
 ) -> type[BaseModel] | None:
-    """The real (non-abstract) nested model class backing field ``name``, or ``None``.
+    """Return the model class annotating field ``name`` of ``real_cls``, or ``None``.
 
-    ``None`` means a nested default under this field can't be recovered by
-    :func:`_omitted_field_value` -- either because ``real_cls`` itself was
-    already unrecoverable, or because the field's real annotation isn't a
-    bare class reference (``Optional[Model]``, ``Model | Other``, and similar
-    wrapped/union annotations all fall back to :func:`_checked_default`
-    instead of being resolved here).
+    Only bare class annotations resolve. ``Optional[Model]``, unions, and other
+    wrapped annotations return ``None``.
     """
     field_info = real_cls.model_fields.get(name) if real_cls is not None else None
     if field_info is None:
@@ -141,21 +119,16 @@ def _real_nested_cls(
 def _omitted_field_value(
     abstract_value: Any, real_cls: type[BaseModel] | None, name: str, path: str
 ) -> Any:
-    """The real value for an omitted field: its real default, or :func:`_checked_default`'s fallback.
+    """Return the value of an omitted field, recovering its real default where possible.
 
-    tesseract-core (>=1.15) validates a field's default against the abstract
-    schema too, so an array-valued default comes back as a ``ShapeDType``
-    placeholder on ``abstract_value`` with no real value left on it. But a
-    default is never a tracer -- only a caller-supplied value can be -- so
-    there's nothing stopping us from validating it through the *real* field
-    directly instead: the exact same ``TypeAdapter(field.annotation)
-    .validate_python(default)`` tesseract-core's own schema generation runs
-    before discarding the result down to a ``ShapeDType`` (see
-    ``replace_array_default_with_shapedtype`` in tesseract-core's
-    ``schema_generation.py``) -- we just keep the value instead of throwing
-    it away. Falls back to :func:`_checked_default` whenever ``real_cls``
-    doesn't have this field (not a bare class reference; see
-    :func:`_real_nested_cls`) or its default doesn't validate.
+    tesseract-core (>=1.15) validates defaults against the abstract schema,
+    which turns an array-valued default into a ``ShapeDType`` placeholder.
+    Since a default is never a tracer, we validate it against the real field
+    annotation instead, using the same ``TypeAdapter`` call tesseract-core
+    makes in ``replace_array_default_with_shapedtype``. If ``real_cls`` is
+    unknown (inside a plain ``dict``/``list``, or behind an annotation
+    :func:`_real_nested_cls` does not resolve) or the default fails to
+    validate, :func:`_checked_default` handles the field instead.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
@@ -184,23 +157,14 @@ def _patch_with_real_values(
     real_cls: type[BaseModel] | None = None,
     path: str = "inputs",
 ) -> Any:
-    """Replace each array (``ShapeDType``) leaf with the matching real value.
+    """Replace each ``ShapeDType`` leaf of ``schema_node`` with the matching value in ``real_node``.
 
-    A field missing from ``real_node`` (omitted from ``apply_tesseract``'s
-    raw ``inputs``, relying on ``InputSchema``'s own default) is resolved by
-    :func:`_omitted_field_value` -- the real default when ``real_cls`` (the
-    non-abstract sibling of ``schema_node``'s class) makes that possible, else
-    :func:`_checked_default`'s fallback. A present non-array leaf keeps
-    ``schema_node``'s value, since it already passed whatever validator
-    applies to it during the abstract-schema validation.
-
-    A present array leaf is cast to ``schema_node.dtype`` -- the dtype the
-    abstract-schema validation already resolved the field to (including any
-    expected_dtype coercion ``Array[...]`` declares) -- when
-    :func:`_safe_cast_dtype` allows it, so a tracer gets the same dtype
-    coercion ``python_to_array`` would apply to a real value on the callback
-    path, instead of flowing through unconverted and failing MLIR's
-    output-type check later.
+    Array values are cast to the dtype the abstract schema resolved, if
+    :func:`_safe_cast_dtype` allows it, to match the coercion the callback path
+    applies. Non-array leaves keep their already-validated ``schema_node``
+    value. Fields omitted from ``real_node`` go through
+    :func:`_omitted_field_value`, which uses ``real_cls``, the non-abstract
+    model class of ``schema_node``, to recover real defaults.
     """
     from tesseract_core.runtime.schema_types import ShapeDType
 
@@ -238,7 +202,7 @@ def _patch_with_real_values(
 
 
 def _patch_container_item(key: Any, value: Any, real_node: Any, path: str) -> Any:
-    """A ``dict``/``list``/``tuple`` item at ``key``, patched or defaulted like any other leaf."""
+    """Patch the ``dict``/``list``/``tuple`` item at ``key``, or check its default if omitted."""
     item_path = f"{path}[{key!r}]"
     if _present(real_node, key):
         return _patch_with_real_values(value, real_node[key], None, item_path)
@@ -246,30 +210,17 @@ def _patch_container_item(key: Any, value: Any, real_node: Any, path: str) -> An
 
 
 class TracedClient:
-    """Stands in for a Tesseract's ``LocalClient``, tracing endpoints that take ``inputs``.
+    """Stand-in for ``LocalClient`` that traces every endpoint called with ``inputs``.
 
-    Traces any endpoint whose payload has an ``"inputs"`` key (``apply`` /
-    ``jacobian_vector_product`` / ``vector_jacobian_product`` / ``jacobian``
-    today; a new differentiable-dispatch endpoint traces automatically once
-    added, since the patch/call logic below is endpoint-name-agnostic).
-    ``abstract_eval`` is excluded by name, since its payload also happens to
-    be ``{"inputs": ...}``. Every excluded endpoint (``abstract_eval``,
-    ``openapi_schema``, ``health``, ``test``) delegates to the real
-    ``LocalClient``.
+    This covers ``apply`` and the differentiation endpoints. ``abstract_eval``
+    and endpoints without ``inputs`` delegate to the wrapped ``LocalClient``.
     """
 
     def __init__(self, local_client: Any) -> None:
         self._local_client = local_client
 
     def __getattr__(self, name: str) -> Any:
-        """Forward anything not overridden here to the wrapped real client.
-
-        ``Jaxeract`` (and ``Tesseract`` properties like ``openapi_schema``,
-        ``server_capabilities``, ``current_encoding``) read these directly off
-        the client, not through ``run_tesseract``, so a shim that only
-        overrides ``run_tesseract`` is not actually a drop-in replacement
-        without this.
-        """
+        """Forward other attributes, which ``Jaxeract`` and ``Tesseract`` read off the client."""
         return getattr(self._local_client, name)
 
     def __eq__(self, other: object) -> bool:
@@ -288,17 +239,16 @@ class TracedClient:
         stream_logs: Any = False,
         encoding: Any = None,
     ) -> dict:
-        """Dispatch ``endpoint``, tracing it directly unless excluded (see class docstring).
+        """Trace ``endpoint`` directly, or delegate it to the wrapped client.
 
-        ``encoding`` is ignored, like ``LocalClient``'s: arrays are passed in
-        memory either way, so there is nothing to encode.
+        ``encoding`` is ignored, as in ``LocalClient``, since arrays stay in memory.
         """
         if endpoint == "abstract_eval" or not payload or "inputs" not in payload:
             return self._local_client.run_tesseract(
                 endpoint, payload, run_id, stream_logs, encoding
             )
 
-        # api_module's presence is checked once, in to_traceable(), not on every dispatch.
+        # to_traceable() has already checked that api_module exists.
         api_module = self._local_client.api_module
 
         schema = _abstract_input_schema(api_module.InputSchema, api_module.OutputSchema)
@@ -310,10 +260,8 @@ class TracedClient:
             abstract_instance.inputs, orig_inputs, api_module.InputSchema
         )
 
-        # If endpoint calls ``inputs.model_dump``, pydantic would raise a warning because
-        # our patched inputs is still an ``AbstractInputSchema`` even though it doesn't
-        # conform to this specification due to the presence of concrete arrays. This is
-        # expected so we can safely suppress.
+        # The patched inputs are an AbstractInputSchema instance holding real arrays,
+        # so pydantic warns if the endpoint calls model_dump. This is expected.
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore", message="Pydantic serializer warnings", category=UserWarning
@@ -324,17 +272,14 @@ class TracedClient:
 
 
 def to_traceable(tesseract_client: Tesseract) -> Tesseract:
-    """A copy of ``tesseract_client`` that ``apply_tesseract`` inlines into the jaxpr.
+    """Return a copy of ``tesseract_client`` whose endpoints ``apply_tesseract`` traces into the jaxpr.
 
-    Requires an in-process Tesseract built via ``Tesseract.from_tesseract_api(...)``;
-    raises ``ValueError`` otherwise. ``apply_tesseract`` detects a Tesseract built
-    this way itself (by its client's type), so there is no separate flag to pass:
-    call it exactly as you would the original Tesseract. Every endpoint actually
-    invoked must return a plain ``dict`` (or build via ``model_construct``), and
-    validation is shape/dtype only (the same schema ``abstract_eval`` uses) -- see
-    ``TracedClient`` for both, and the "No JAX operations inside
-    ``from_tesseract_api`` endpoints" sharp edge in :doc:`/content/get-started`
-    for the full picture.
+    Requires an in-process Tesseract built via ``Tesseract.from_tesseract_api``,
+    and raises ``ValueError`` otherwise. Pass the copy to ``apply_tesseract`` in
+    place of the original. Every endpoint it calls must return a plain ``dict``,
+    and inputs are only validated for shape and dtype. See the "No JAX
+    operations inside ``from_tesseract_api`` endpoints" sharp edge in
+    :doc:`/content/get-started`.
     """
     api_module = getattr(tesseract_client._client, "api_module", None)
     if api_module is None:

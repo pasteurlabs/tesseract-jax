@@ -52,6 +52,5 @@ def vector_jacobian_product(
     if "safe" in vjp_outputs:
         grad = grad + 2.0 * as_jax_array(cotangent_vector["safe"])
     if "unsafe" in vjp_outputs:
-        # jnp divide-by-zero yields inf/NaN silently, unlike np: no errstate needed.
         grad = grad + (0.5 / jnp.sqrt(x)) * as_jax_array(cotangent_vector["unsafe"])
     return {"x": grad}

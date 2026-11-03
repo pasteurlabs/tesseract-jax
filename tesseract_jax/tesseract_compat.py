@@ -25,10 +25,9 @@ from tesseract_jax.tree_util import (
 if TYPE_CHECKING:
     from tesseract_jax.dispatch_params import DispatchParams
 
-# WARNING: Jaxeract methods normally run inside an FFI callback, where
-# allocating jax.numpy arrays is unsafe -- use vanilla numpy. Under
-# params.traceable they run during ordinary JAX tracing instead, where
-# jax.numpy is required (numpy raises on a Tracer).
+# WARNING: Jaxeract methods normally run inside an FFI callback, where allocating
+# jax.numpy arrays is unsafe, so use vanilla numpy. Under params.traceable they run
+# during tracing instead, where numpy raises on a Tracer and jax.numpy is required.
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -491,9 +490,7 @@ class Jaxeract:
         }
         ffi_path = _on_device(array_args)
 
-        # A traced value is a Tracer, which np.asarray (_cast_return) rejects;
-        # jnp.asarray is the traced equivalent, and there is no on-device FFI
-        # path while tracing either way.
+        # _cast_return calls np.asarray, which raises on a Tracer.
         def cast_traced(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
             return jnp.asarray(value, dtype=dtype)
 

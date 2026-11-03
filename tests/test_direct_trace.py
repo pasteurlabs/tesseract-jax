@@ -1,12 +1,7 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Traceable-specific behaviour a callback-path parity test can't exercise.
-
-Eligibility, that inlining actually happened (not just that the answer is
-right), and the documented limitation that an endpoint must return a plain
-dict, not a schema instance.
-"""
+"""Tests for ``to_traceable`` beyond the ``vectoradd_jax`` parity tests."""
 
 import jax
 import jax.numpy as jnp
@@ -33,13 +28,10 @@ def test_traceable_requires_in_process_tesseract(served_univariate_tesseract):
 
 
 def test_traceable_works_with_an_in_process_gpu_transport_tesseract(vectoradd_jax_ab):
-    """A traced Tesseract is not blocked by an in-process GPU-transport request.
+    """``to_traceable`` accepts an in-process Tesseract that requests a GPU transport.
 
-    ``apply_tesseract`` no longer takes ``gpu_transport`` (it is resolved from
-    the Tesseract itself, lazily, only when a call is compiled for CUDA), so
-    there is nothing left for ``to_traceable`` to conflict with here on CPU.
-    The CUDA-lowering fallback for a traced client (which has no
-    ``resolve_gpu_transport``) needs a GPU to exercise and is not covered here.
+    The transport is only resolved when compiling for CUDA, which this test
+    does not cover.
     """
     from tesseract_core import Tesseract
 
@@ -55,9 +47,9 @@ def test_traceable_works_with_an_in_process_gpu_transport_tesseract(vectoradd_ja
 def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
     vectoradd_apply, vectoradd_jax_ab
 ):
-    """The whole point of a traced Tesseract: no opaque call in the lowering.
+    """A traced ``apply`` lowers without a host callback.
 
-    Checked against the uncompiled lowering: backend-independent and fast.
+    Checks the uncompiled lowering, which is fast and backend-independent.
     """
 
     def f(traceable):
@@ -76,7 +68,7 @@ def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
 def test_traceable_jvp_has_no_host_callback_in_lowered_hlo(
     vectoradd_apply, vectoradd_jax_ab
 ):
-    """Same check for a derivative endpoint, not just the primal apply."""
+    """A traced JVP lowers without a host callback."""
     tangents = jax.tree.map(jnp.ones_like, vectoradd_jax_ab)
 
     def f(traceable):
@@ -96,12 +88,10 @@ def test_traceable_jvp_has_no_host_callback_in_lowered_hlo(
 def test_input_dtype_is_cast_to_schema_dtype(
     vectoradd_apply, vectoradd_jax_ab, traceable
 ):
-    """A float64 input is cast to the schema's declared float32, on both dispatch paths.
+    """A float64 input is cast to the schema's float32 on both dispatch paths.
 
-    Regression test for the traced path: ``_patch_with_real_values`` used to
-    patch the real (uncast) value straight through instead of casting it, so
-    a float64 input produced a float64 output that disagreed with
-    ``abstract_eval``'s declared float32 and failed MLIR's output-type check.
+    Without the cast, the traced path returns float64, which fails MLIR's
+    output-type check against ``abstract_eval``'s float32.
     """
     ab_f64 = jax.tree.map(lambda x: x.astype(jnp.float64), vectoradd_jax_ab)
     out = vectoradd_apply(ab_f64, traceable)
@@ -109,15 +99,7 @@ def test_input_dtype_is_cast_to_schema_dtype(
 
 
 def test_unsafe_cast_is_left_alone():
-    """An int narrowing/sign-change mismatch is not silently cast.
-
-    Unlike a float/complex target or a widening integer cast, narrowing
-    (int64 -> int32) can wrap a value, and a JAX cast does not range-check it
-    the way tesseract-core's real array validator does on the callback path.
-    ``_safe_cast_dtype`` leaves the value as-is, so a real mismatch still
-    surfaces as the MLIR output-type error it exists to avoid, instead of
-    silently computing on a wrapped value.
-    """
+    """A narrowing int64 -> int32 cast, which could wrap the value, is not applied."""
     from tesseract_jax.direct_trace import _safe_cast_dtype
 
     out_of_range = jnp.asarray(2**33, dtype=jnp.int64)
@@ -128,12 +110,7 @@ def test_unsafe_cast_is_left_alone():
 
 @pytest.mark.parametrize("traceable", [False, True])
 def test_static_leaves_survive_traced_dispatch(nonarray_output_tess, traceable):
-    """A non-array (str/bool) output leaf comes back unchanged on both paths.
-
-    ``direct_trace.py`` only patches ``ShapeDType`` (array) leaves; a static
-    leaf is carried separately by the primitive (see ``test_nonarray_outputs.py``),
-    so it should be unaffected by which dispatch path produced it.
-    """
+    """Non-array (str/bool) outputs come back unchanged on both dispatch paths."""
     tess = _maybe_traced(nonarray_output_tess, traceable)
     x = jnp.arange(3, dtype=jnp.float64)
 
@@ -151,12 +128,10 @@ def test_static_leaves_survive_traced_dispatch(nonarray_output_tess, traceable):
 def test_symbolic_zero_cotangent_matches_on_traced_dispatch(
     zero_cotangent_tess, traceable
 ):
-    """A symbolic-zero cotangent is dropped identically on both dispatch paths.
+    """An unused output's symbolic-zero cotangent is dropped on both dispatch paths.
 
-    ``unsafe`` has a NaN gradient at x = 0; when only ``safe`` enters the loss,
-    its cotangent must be a symbolic zero and not poison the gradient -- on
-    the traced path just as on the callback path (see ``test_api.py``'s
-    ``test_unused_output_cotangent_is_not_requested``).
+    ``unsafe`` has a NaN gradient at x = 0, so using its cotangent would make
+    the gradient NaN.
     """
     tess = _maybe_traced(zero_cotangent_tess, traceable)
     x = jnp.zeros(3, dtype=jnp.float64)
@@ -170,13 +145,7 @@ def test_symbolic_zero_cotangent_matches_on_traced_dispatch(
 
 @pytest.mark.parametrize("traceable", [False, True])
 def test_gather_discarded_slots_match_on_traced_dispatch(gather_tess, traceable):
-    """Non-differentiable int/float/complex output tangents match on both paths.
-
-    ``gather_tess`` covers all three discarded-tangent dtype classes (see
-    ``test_api.py``'s ``test_discarded_tangent_fill_value``); the traced path's
-    ``apply`` is rewritten in ``jnp`` (``bincount``, scatter-add) instead of
-    ``np``, since ``inputs.weights``/``inputs.indices`` may be tracers.
-    """
+    """Discarded int/float/complex output tangents match on both dispatch paths."""
     tess = _maybe_traced(gather_tess, traceable)
     weights = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
     indices = jnp.array([0, 2, 2], dtype=jnp.int32)
@@ -202,11 +171,7 @@ def test_gather_discarded_slots_match_on_traced_dispatch(gather_tess, traceable)
 
 
 def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
-    """A schema-constructing (not dict-returning) endpoint fails loudly, not silently.
-
-    ``OutputSchema(...)`` re-validates with ``np.asarray``, which fails on a
-    tracer the same way a traced input would.
-    """
+    """An endpoint that returns ``OutputSchema(...)`` raises a tracer error."""
     x = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
     with pytest.raises(Exception, match=r"TracerArrayConversionError|Tracer"):
         apply_tesseract(to_traceable(mixed_dtype_tess), dict(x=x))
@@ -215,20 +180,7 @@ def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
 def test_omitted_array_field_recovers_its_real_default(
     vectoradd_jax_tess, vectoradd_jax_ab
 ):
-    """An omitted array field's real default is recovered, not a ShapeDType placeholder.
-
-    tesseract-core (>=1.15) validates a field's default against the abstract
-    schema too, so ``Vector_and_Scalar.s``'s default (``np.float32(1.0)``) on
-    ``abstract_instance.inputs`` is a ``ShapeDType`` placeholder, not the real
-    ``1.0`` -- the abstract schema alone has no real value left to patch in.
-    But a default is never a tracer, so ``_omitted_field_value`` validates it
-    through the real (non-abstract) field instead, via the real sibling class
-    ``_patch_with_real_values`` is given. Before that recovery existed, this
-    raised a clear error rather than silently use the placeholder (a
-    regression from an older tesseract-core, where the default stayed
-    unvalidated and happened to still be real); before any fallback existed,
-    omitting the field raised ``KeyError``.
-    """
+    """An omitted array field resolves to its real default, not a ``ShapeDType`` placeholder."""
     from tesseract_jax.direct_trace import (
         _abstract_input_schema,
         _patch_with_real_values,
@@ -254,13 +206,7 @@ def test_omitted_array_field_recovers_its_real_default(
 def test_omitted_array_field_raises_without_a_resolvable_real_class(
     vectoradd_jax_tess, vectoradd_jax_ab
 ):
-    """Without a real sibling class to recover the default from, the clear error returns.
-
-    Mirrors calling ``_patch_with_real_values`` with no ``real_cls`` -- the
-    situation inside a plain ``dict``/``list`` schema node, or behind an
-    annotation ``_real_nested_cls`` doesn't resolve -- so there's nowhere left
-    to look up the real default.
-    """
+    """Without ``real_cls``, an omitted array field raises instead of using a placeholder."""
     from tesseract_jax.direct_trace import (
         _abstract_input_schema,
         _patch_with_real_values,
@@ -284,7 +230,7 @@ def test_omitted_array_field_raises_without_a_resolvable_real_class(
 def test_apply_tesseract_recovers_an_omitted_array_default_end_to_end(
     vectoradd_jax_tess,
 ):
-    """The default recovery works through a real ``apply_tesseract`` call on a traced Tesseract."""
+    """An omitted array field's real default is used in a traced ``apply_tesseract`` call."""
     out = apply_tesseract(
         to_traceable(vectoradd_jax_tess),
         {

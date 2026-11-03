@@ -102,7 +102,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   This only affects `from_tesseract_api` (in-process execution). Tesseracts served in a separate process (`from_source`, `from_image`, or `from_url`) are not subject to this restriction.
   ```
 
-  If you specifically want `jax.numpy` here — for example to let XLA fuse the endpoint's own operations with the surrounding computation, or to avoid an HTTP round trip — pass `to_traceable(tess)` instead of `tess` to `apply_tesseract`. This inlines the endpoint directly into the jaxpr instead of dispatching it through the FFI callback, so there is no lock to deadlock on:
+  To use `jax.numpy` in an in-process Tesseract, for example so XLA can fuse the endpoint with the surrounding computation, pass `to_traceable(tess)` to `apply_tesseract` instead of `tess`. This traces the endpoint into the jaxpr rather than dispatching it through an FFI callback, so there is no lock to deadlock on:
 
   ```python
   from tesseract_jax import apply_tesseract, to_traceable
@@ -112,7 +112,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   ```
 
   ```{warning}
-  Every endpoint a traced Tesseract actually calls must return a plain `dict`, or build its result via `model_construct`, instead of `OutputSchema(...)` or any other schema's validating constructor. The validating constructor calls `np.asarray` on every array field, which raises on a JAX tracer. This applies to *every* `apply`, `jacobian_vector_product`, `vector_jacobian_product`, and `jacobian` function you want to trace, not just one of them. If you see a `TracerArrayConversionError` from inside your Tesseract's own code, this is almost always why.
+  Every endpoint a traced Tesseract calls must return a plain `dict` or build its result via `model_construct`. Constructing `OutputSchema(...)` validates every array field with `np.asarray`, which raises on a JAX tracer. This applies to `apply`, `jacobian_vector_product`, `vector_jacobian_product`, and `jacobian` alike. A `TracerArrayConversionError` raised from your Tesseract's own code usually points to this.
   ```
 
   ```python
@@ -120,7 +120,7 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   def apply(inputs):
       return OutputSchema(c=jnp.sin(inputs.a))
 
-  # ✅ works under to_traceable (and the callback path, unchanged)
+  # ✅ works under to_traceable
   def apply(inputs):
       return {"c": jnp.sin(inputs.a)}
   ```
