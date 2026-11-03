@@ -108,6 +108,24 @@ def test_input_dtype_is_cast_to_schema_dtype(
     assert out["vector_add"]["result"].dtype == jnp.float32
 
 
+def test_unsafe_cast_is_left_alone():
+    """An int narrowing/sign-change mismatch is not silently cast.
+
+    Unlike a float/complex target or a widening integer cast, narrowing
+    (int64 -> int32) can wrap a value, and a JAX cast does not range-check it
+    the way tesseract-core's real array validator does on the callback path.
+    ``_safe_cast_dtype`` leaves the value as-is, so a real mismatch still
+    surfaces as the MLIR output-type error it exists to avoid, instead of
+    silently computing on a wrapped value.
+    """
+    from tesseract_jax.direct_trace import _safe_cast_dtype
+
+    out_of_range = jnp.asarray(2**33, dtype=jnp.int64)
+    result = _safe_cast_dtype(out_of_range, "int32")
+    assert result.dtype == jnp.int64
+    assert int(result) == 2**33
+
+
 @pytest.mark.parametrize("traceable", [False, True])
 def test_static_leaves_survive_traced_dispatch(nonarray_output_tess, traceable):
     """A non-array (str/bool) output leaf comes back unchanged on both paths.
