@@ -22,7 +22,7 @@ from conftest import (
     create_test_array,
 )
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,7 +55,7 @@ class TestNoopApi:
     @pytest.fixture(autouse=True)
     def setup_inputs(self, noop_tesseract_api, array_size):
         jax.clear_caches()
-        self.tess = noop_tesseract_api
+        self.tess = to_traceable(noop_tesseract_api)
         self.inputs = {"data": create_test_array(array_size)}
         self.inputs_f64 = {"data": create_test_array(array_size, dtype="float64")}
         self.batched_inputs = {
@@ -67,7 +67,7 @@ class TestNoopApi:
 
         @jax.jit
         def fn(inputs):
-            return apply_tesseract(self.tess, inputs, traceable=True)
+            return apply_tesseract(self.tess, inputs)
 
         jax.block_until_ready(fn(self.inputs))
         benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs)
@@ -77,7 +77,7 @@ class TestNoopApi:
 
         @jax.jit
         def fn(inputs):
-            return apply_tesseract(self.tess, inputs, traceable=True)
+            return apply_tesseract(self.tess, inputs)
 
         jax.block_until_ready(fn(self.inputs_f64))
         benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs_f64)
@@ -92,7 +92,6 @@ class TestNoopApi:
                     self.tess,
                     {"data": data},
                     vmap_method="auto_experimental",
-                    traceable=True,
                 )
             )
         )
@@ -106,7 +105,7 @@ class TestVectoraddApi:
     @pytest.fixture(autouse=True)
     def setup_inputs(self, vectoradd_tesseract_api, array_size):
         jax.clear_caches()
-        self.tess = vectoradd_tesseract_api
+        self.tess = to_traceable(vectoradd_tesseract_api)
         self.a_v = create_test_array(array_size)
         self.b_v = create_test_array(array_size)
 
@@ -118,9 +117,7 @@ class TestVectoraddApi:
 
         @jax.jit
         def fn(a):
-            out = apply_tesseract(
-                self.tess, _make_vectoradd_inputs(a, b_v), traceable=True
-            )
+            out = apply_tesseract(self.tess, _make_vectoradd_inputs(a, b_v))
             return out["vector_add"]["result"]
 
         @jax.jit
@@ -143,7 +140,6 @@ class TestVectoraddApi:
                 self.tess,
                 _make_vectoradd_inputs(a_v, b_v),
                 vmap_method="auto_experimental",
-                traceable=True,
             )
             return out["vector_add"]["result"]
 
@@ -162,7 +158,6 @@ class TestVectoraddApi:
                 self.tess,
                 _make_vectoradd_inputs(a_v, b_v),
                 vmap_method="auto_experimental",
-                traceable=True,
             )
             return out["vector_add"]["result"]
 

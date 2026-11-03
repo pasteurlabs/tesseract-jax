@@ -18,7 +18,7 @@ def apply(inputs: InputSchema) -> OutputSchema:
 
     Returns a plain dict, not ``OutputSchema(...)``: the validating
     constructor calls ``np.asarray`` on its arguments, which raises on a
-    tracer under ``apply_tesseract(..., traceable=True)``.
+    tracer when calling a Tesseract built with ``to_traceable()``.
     """
     return {"result": inputs.data}
 

@@ -1,7 +1,6 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import operator
 import os
 import warnings
@@ -1041,7 +1040,6 @@ def apply_tesseract(
     vmap_method: VmapMethod = None,
     materialize_jacobian: bool | None = None,
     check_static_outputs: bool | None = None,
-    traceable: bool = False,
 ) -> Any:
     """Applies the given Tesseract object to the inputs.
 
@@ -1060,6 +1058,14 @@ def apply_tesseract(
     ``tesseract_client.with_encoding(gpu_transport="none")`` to always copy
     them. See :doc:`/content/gpu-arrays` for how the transport is picked and
     what an in-process Tesseract receives.
+
+    Pass ``to_traceable(tesseract_client)`` instead of ``tesseract_client`` to
+    inline the Tesseract's real endpoint into the jaxpr, instead of
+    dispatching through a host callback or a GPU transport. Requires an
+    in-process Tesseract (``Tesseract.from_tesseract_api(...)``); every
+    endpoint actually invoked must return a plain ``dict`` (or build via
+    ``model_construct``), and validation is shape/dtype only (the same schema
+    ``abstract_eval`` uses). See :func:`tesseract_jax.direct_trace.to_traceable`.
 
     Example:
         >>> from tesseract_core import Tesseract
@@ -1168,12 +1174,6 @@ def apply_tesseract(
             which is on unless set to a false value. Pass ``False`` to skip the
             comparison for one call. Skipping it also skips building the keypaths
             the warning needs; the caller gets the same values either way.
-        traceable: Whether to inline the Tesseract's real endpoint into the jaxpr
-            instead of dispatching through a host callback or a GPU transport.
-            Requires an in-process Tesseract (``Tesseract.from_tesseract_api(...)``);
-            raises ``ValueError`` otherwise. Every endpoint actually invoked must
-            return a plain ``dict`` (or build via ``model_construct``). Validation
-            is shape/dtype only (the same schema ``abstract_eval`` uses).
 
     Returns:
         The outputs of the Tesseract object after applying the inputs.
@@ -1206,18 +1206,10 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
-    if traceable and getattr(tesseract_client._client, "api_module", None) is None:
-        raise ValueError(
-            "traceable=True requires an in-process Tesseract built via "
-            "Tesseract.from_tesseract_api(...); "
-            f"{tesseract_client!r} has no importable apply function to trace "
-            "directly."
-        )
-
-    if traceable:
-        # TracedClient swaps dispatch endpoint but not abstract_eval
-        tesseract_client = copy.copy(tesseract_client)
-        tesseract_client._client = TracedClient(tesseract_client._client)
+    # to_traceable() already did the one-time validation and client swap; a
+    # traced Tesseract is detected here by its client's type, the same way
+    # resolve_gpu_transport() detects a GPU-transport Tesseract by its encoding.
+    traceable = isinstance(tesseract_client._client, TracedClient)
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)

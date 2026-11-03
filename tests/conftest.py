@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from tesseract_core import Tesseract
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 here = Path(__file__).parent
 
@@ -400,11 +400,11 @@ def vectoradd_jax_ab() -> dict:
 @pytest.fixture
 def vectoradd_apply(vectoradd_jax_tess):
     """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
+    traced_tess = to_traceable(vectoradd_jax_tess)
 
     def call(ab: dict, traceable: bool, norm_ord: int = 2) -> dict:
-        return apply_tesseract(
-            vectoradd_jax_tess, {**ab, "norm_ord": norm_ord}, traceable=traceable
-        )
+        tess = traced_tess if traceable else vectoradd_jax_tess
+        return apply_tesseract(tess, {**ab, "norm_ord": norm_ord})
 
     return call
 

@@ -15,6 +15,7 @@ follow from the same fact -- pydantic's ``Array[...]`` validator calls
 ``np.asarray``, which rejects a Tracer -- for every endpoint, not just ``apply``.
 """
 
+import copy
 import functools
 import warnings
 from typing import Any
@@ -24,6 +25,7 @@ import numpy as np
 from jax import dtypes
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticUndefined
+from tesseract_core import Tesseract
 
 from tesseract_jax.tree_util import to_shape_dtype_pytree
 
@@ -98,10 +100,11 @@ def _checked_default(value: Any, field_description: str) -> Any:
 
     if isinstance(value, ShapeDType):
         raise ValueError(  # noqa: TRY004
-            f"traceable=True cannot use the schema default for {field_description!r}: "
-            "it was omitted from the inputs, and its default is an array. "
-            "tesseract-core resolves that default to a shape/dtype placeholder, not "
-            "a real value, so pass this field explicitly when using traceable=True."
+            f"A traced Tesseract cannot use the schema default for "
+            f"{field_description!r}: it was omitted from the inputs, and its "
+            "default is an array. tesseract-core resolves that default to a "
+            "shape/dtype placeholder, not a real value, so pass this field "
+            "explicitly when calling a Tesseract built with to_traceable()."
         )
     if isinstance(value, BaseModel):
         for name in type(value).model_fields:
@@ -295,12 +298,8 @@ class TracedClient:
                 endpoint, payload, run_id, stream_logs, encoding
             )
 
-        api_module = getattr(self._local_client, "api_module", None)
-        if api_module is None:
-            raise ValueError(
-                "traceable=True requires an in-process Tesseract built via "
-                "Tesseract.from_tesseract_api(...)."
-            )
+        # api_module's presence is checked once, in to_traceable(), not on every dispatch.
+        api_module = self._local_client.api_module
 
         schema = _abstract_input_schema(api_module.InputSchema, api_module.OutputSchema)
 
@@ -322,3 +321,27 @@ class TracedClient:
             out = getattr(api_module, endpoint)(inputs=patched_instance, **payload)
 
         return out.model_dump() if isinstance(out, BaseModel) else out
+
+
+def to_traceable(tesseract_client: Tesseract) -> Tesseract:
+    """A copy of ``tesseract_client`` that ``apply_tesseract`` inlines into the jaxpr.
+
+    Requires an in-process Tesseract built via ``Tesseract.from_tesseract_api(...)``;
+    raises ``ValueError`` otherwise. ``apply_tesseract`` detects a Tesseract built
+    this way itself (by its client's type), so there is no separate flag to pass:
+    call it exactly as you would the original Tesseract. Every endpoint actually
+    invoked must return a plain ``dict`` (or build via ``model_construct``), and
+    validation is shape/dtype only (the same schema ``abstract_eval`` uses) -- see
+    ``TracedClient`` for both.
+    """
+    api_module = getattr(tesseract_client._client, "api_module", None)
+    if api_module is None:
+        raise ValueError(
+            "to_traceable requires an in-process Tesseract built via "
+            "Tesseract.from_tesseract_api(...); "
+            f"{tesseract_client!r} has no importable apply function to trace "
+            "directly."
+        )
+    traced = copy.copy(tesseract_client)
+    traced._client = TracedClient(tesseract_client._client)
+    return traced

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 
 def pytree_apply_impl(inputs: dict) -> dict:
@@ -183,14 +183,15 @@ def merge_dicts(d1, d2):
 def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit, traceable):
     """Test the primal (apply) endpoint of pytree_tesseract.
 
-    ``traceable=True`` exercises ``_patch_with_real_values`` against a schema
+    The traced case exercises ``_patch_with_real_values`` against a schema
     with real dict/list/nested-model container variety (unlike
     ``vectoradd_jax``, which is flat submodels only) -- pytree_tesseract's
     ``apply`` already returns a plain dict, so it needs no changes to qualify.
     """
+    tess = to_traceable(pytree_tess) if traceable else pytree_tess
 
     def f(inputs):
-        return apply_tesseract(pytree_tess, inputs=inputs, traceable=traceable)
+        return apply_tesseract(tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -205,13 +206,14 @@ def test_pytree_tesseract_jvp(
     pytree_tess, pytree_tess_inputs, use_jit, diffable_paths, traceable
 ):
     """Test the JVP endpoint of pytree_tesseract, in both dispatch modes."""
+    tess = to_traceable(pytree_tess) if traceable else pytree_tess
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs, traceable=traceable)
+        return apply_tesseract(tess, inputs=inputs)
 
     def f_raw(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)

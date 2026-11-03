@@ -13,7 +13,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 # Exact host-callback lowering target (jax._src.callback.emit_python_callback).
 # More specific than "custom-call" so an unrelated XLA custom call (e.g. a
@@ -21,38 +21,41 @@ from tesseract_jax import apply_tesseract
 _CALLBACK_TARGET = "xla_ffi_python_cpu_callback"
 
 
+def _maybe_traced(tess, traceable: bool):
+    """``tess``, or its ``to_traceable`` view when ``traceable``."""
+    return to_traceable(tess) if traceable else tess
+
+
 def test_traceable_requires_in_process_tesseract(served_univariate_tesseract):
     """A served (HTTPClient) Tesseract has no importable Python function to trace."""
     with pytest.raises(ValueError, match="in-process Tesseract"):
-        apply_tesseract(
-            served_univariate_tesseract,
-            dict(x=np.array(0.0), y=np.array(0.0)),
-            traceable=True,
-        )
+        to_traceable(served_univariate_tesseract)
 
 
 def test_traceable_works_with_an_in_process_gpu_transport_tesseract(vectoradd_jax_ab):
-    """``traceable=True`` is not blocked by an in-process GPU-transport request.
+    """A traced Tesseract is not blocked by an in-process GPU-transport request.
 
     ``apply_tesseract`` no longer takes ``gpu_transport`` (it is resolved from
     the Tesseract itself, lazily, only when a call is compiled for CUDA), so
-    there is nothing left for ``traceable=True`` to conflict with here on CPU.
-    The CUDA-lowering fallback for ``traceable`` (``TracedClient`` has no
+    there is nothing left for ``to_traceable`` to conflict with here on CPU.
+    The CUDA-lowering fallback for a traced client (which has no
     ``resolve_gpu_transport``) needs a GPU to exercise and is not covered here.
     """
     from tesseract_core import Tesseract
 
-    tess = Tesseract.from_tesseract_api(
-        "examples/simple/vectoradd_jax/tesseract_api.py", gpu_transport="cuda_ipc"
+    tess = to_traceable(
+        Tesseract.from_tesseract_api(
+            "examples/simple/vectoradd_jax/tesseract_api.py", gpu_transport="cuda_ipc"
+        )
     )
-    out = apply_tesseract(tess, {**vectoradd_jax_ab, "norm_ord": 2}, traceable=True)
+    out = apply_tesseract(tess, {**vectoradd_jax_ab, "norm_ord": 2})
     np.testing.assert_allclose(out["vector_add"]["result"], [4.0, 6.5, 9.0], rtol=1e-6)
 
 
 def test_traceable_apply_has_no_host_callback_in_lowered_hlo(
     vectoradd_apply, vectoradd_jax_ab
 ):
-    """The whole point of traceable=True: no opaque call in the lowering.
+    """The whole point of a traced Tesseract: no opaque call in the lowering.
 
     Checked against the uncompiled lowering: backend-independent and fast.
     """
@@ -113,14 +116,13 @@ def test_static_leaves_survive_traced_dispatch(nonarray_output_tess, traceable):
     leaf is carried separately by the primitive (see ``test_nonarray_outputs.py``),
     so it should be unaffected by which dispatch path produced it.
     """
+    tess = _maybe_traced(nonarray_output_tess, traceable)
     x = jnp.arange(3, dtype=jnp.float64)
 
     def loss(x):
-        return apply_tesseract(nonarray_output_tess, dict(x=x), traceable=traceable)[
-            "y"
-        ].sum()
+        return apply_tesseract(tess, dict(x=x))["y"].sum()
 
-    out = apply_tesseract(nonarray_output_tess, dict(x=x), traceable=traceable)
+    out = apply_tesseract(tess, dict(x=x))
     assert out["backend"] == "reference"
     assert out["converged"] is True
     np.testing.assert_allclose(out["y"], 2.0 * x)
@@ -138,12 +140,11 @@ def test_symbolic_zero_cotangent_matches_on_traced_dispatch(
     the traced path just as on the callback path (see ``test_api.py``'s
     ``test_unused_output_cotangent_is_not_requested``).
     """
+    tess = _maybe_traced(zero_cotangent_tess, traceable)
     x = jnp.zeros(3, dtype=jnp.float64)
 
     def loss(x):
-        return apply_tesseract(zero_cotangent_tess, dict(x=x), traceable=traceable)[
-            "safe"
-        ].sum()
+        return apply_tesseract(tess, dict(x=x))["safe"].sum()
 
     grad = jax.grad(loss)(x)
     np.testing.assert_array_equal(grad, [2.0, 2.0, 2.0])
@@ -158,13 +159,12 @@ def test_gather_discarded_slots_match_on_traced_dispatch(gather_tess, traceable)
     ``apply`` is rewritten in ``jnp`` (``bincount``, scatter-add) instead of
     ``np``, since ``inputs.weights``/``inputs.indices`` may be tracers.
     """
+    tess = _maybe_traced(gather_tess, traceable)
     weights = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
     indices = jnp.array([0, 2, 2], dtype=jnp.int32)
 
     def apply_fn(w):
-        return apply_tesseract(
-            gather_tess, dict(weights=w, indices=indices), traceable=traceable
-        )
+        return apply_tesseract(tess, dict(weights=w, indices=indices))
 
     _, tangents = jax.jvp(apply_fn, (weights,), (jnp.ones_like(weights),))
     magnitude = np.asarray(tangents["magnitude"])
@@ -191,7 +191,7 @@ def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
     """
     x = jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)
     with pytest.raises(Exception, match=r"TracerArrayConversionError|Tracer"):
-        apply_tesseract(mixed_dtype_tess, dict(x=x), traceable=True)
+        apply_tesseract(to_traceable(mixed_dtype_tess), dict(x=x))
 
 
 def test_omitted_array_field_recovers_its_real_default(
@@ -266,9 +266,9 @@ def test_omitted_array_field_raises_without_a_resolvable_real_class(
 def test_apply_tesseract_recovers_an_omitted_array_default_end_to_end(
     vectoradd_jax_tess,
 ):
-    """The default recovery works through a real ``apply_tesseract(traceable=True)`` call."""
+    """The default recovery works through a real ``apply_tesseract`` call on a traced Tesseract."""
     out = apply_tesseract(
-        vectoradd_jax_tess,
+        to_traceable(vectoradd_jax_tess),
         {
             "a": {"v": jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32)},  # "s" omitted
             "b": {
@@ -277,7 +277,6 @@ def test_apply_tesseract_recovers_an_omitted_array_default_end_to_end(
             },
             "norm_ord": 2,
         },
-        traceable=True,
     )
     # a.s defaults to 1.0: result = a.v * a.s + b.v * b.s = [1,2,3] + [2,2.5,3].
     np.testing.assert_allclose(out["vector_add"]["result"], [3.0, 4.5, 6.0], rtol=1e-6)

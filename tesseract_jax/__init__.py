@@ -22,6 +22,7 @@ __version__ = scm_version
 import jax
 from tesseract_core import Tesseract
 
+from tesseract_jax.direct_trace import to_traceable
 from tesseract_jax.primitive import apply_tesseract
 from tesseract_jax.sow import save_intermediates, sow
 
@@ -38,4 +39,5 @@ __all__ = [
     "apply_tesseract",
     "save_intermediates",
     "sow",
+    "to_traceable",
 ]
