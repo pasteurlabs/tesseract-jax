@@ -177,54 +177,49 @@ def test_traceable_requires_a_dict_returning_endpoint(mixed_dtype_tess):
         apply_tesseract(to_traceable(mixed_dtype_tess), dict(x=x))
 
 
-def test_omitted_array_field_recovers_its_real_default(
-    vectoradd_jax_tess, vectoradd_jax_ab
-):
-    """An omitted array field resolves to its real default, not a ``ShapeDType`` placeholder."""
-    from tesseract_jax.direct_trace import (
-        _abstract_input_schema,
-        _patch_with_real_values,
-    )
-    from tesseract_jax.tree_util import to_shape_dtype_pytree
+def test_omitted_array_field_recovers_its_real_default():
+    """An omitted array field resolves to its real default, not a ``ShapeDType`` placeholder.
 
-    api_module = vectoradd_jax_tess._client.api_module
-    AbstractInputSchema = _abstract_input_schema(
-        api_module.InputSchema, api_module.OutputSchema
-    )
+    Builds the real and abstract schemas directly (a plain ``default=``, which
+    tesseract-core's own abstract-schema validation collapses to a
+    ``ShapeDType``, unlike ``default_factory=``) rather than relying on an
+    example Tesseract field to happen to use ``default=`` at any given time.
+    """
+    from pydantic import BaseModel, Field
+    from tesseract_core.runtime import Array, Float32
+    from tesseract_core.runtime.schema_types import ShapeDType
 
-    a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"
-    real_inputs_omitted = {"a": a_no_s, "b": vectoradd_jax_ab["b"], "norm_ord": 2}
+    from tesseract_jax.direct_trace import _patch_with_real_values
 
-    abstract_inputs = to_shape_dtype_pytree(real_inputs_omitted)
-    abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
-    patched = _patch_with_real_values(
-        abstract_instance.inputs, real_inputs_omitted, api_module.InputSchema
-    )
-    assert float(patched.a.s) == pytest.approx(1.0)
+    class Real(BaseModel):
+        s: Array[..., Float32] = Field(default=np.float32(1.0))
+
+    class Abstract(BaseModel):
+        s: ShapeDType = ShapeDType(shape=(), dtype="float32")
+
+    patched = _patch_with_real_values(Abstract(), {}, Real)
+    assert float(patched.s) == pytest.approx(1.0)
 
 
-def test_omitted_array_field_raises_without_a_resolvable_real_class(
-    vectoradd_jax_tess, vectoradd_jax_ab
-):
-    """Without ``real_cls``, an omitted array field raises instead of using a placeholder."""
-    from tesseract_jax.direct_trace import (
-        _abstract_input_schema,
-        _patch_with_real_values,
-    )
-    from tesseract_jax.tree_util import to_shape_dtype_pytree
+def test_omitted_array_field_raises_without_a_resolvable_real_class():
+    """Without ``real_cls``, an omitted array field raises instead of using a placeholder.
 
-    api_module = vectoradd_jax_tess._client.api_module
-    AbstractInputSchema = _abstract_input_schema(
-        api_module.InputSchema, api_module.OutputSchema
-    )
+    Builds the abstract-schema shape directly (a ``ShapeDType`` leaf, as
+    tesseract-core produces for a field with a plain ``default=``) rather than
+    deriving it from an example, so the test does not depend on which of a
+    Tesseract's own fields happen to use ``default=`` versus
+    ``default_factory=`` at any given time.
+    """
+    from pydantic import BaseModel
+    from tesseract_core.runtime.schema_types import ShapeDType
 
-    a_no_s = {"v": vectoradd_jax_ab["a"]["v"]}  # omit "s"
-    real_inputs_omitted = {"a": a_no_s, "b": vectoradd_jax_ab["b"], "norm_ord": 2}
+    from tesseract_jax.direct_trace import _patch_with_real_values
 
-    abstract_inputs = to_shape_dtype_pytree(real_inputs_omitted)
-    abstract_instance = AbstractInputSchema.model_validate({"inputs": abstract_inputs})
-    with pytest.raises(ValueError, match=r"inputs\.a\.s.*omitted"):
-        _patch_with_real_values(abstract_instance.inputs, real_inputs_omitted)
+    class Abstract(BaseModel):
+        s: ShapeDType = ShapeDType(shape=(), dtype="float32")
+
+    with pytest.raises(ValueError, match=r"inputs\.s.*omitted"):
+        _patch_with_real_values(Abstract(), {})
 
 
 def test_apply_tesseract_recovers_an_omitted_array_default_end_to_end(

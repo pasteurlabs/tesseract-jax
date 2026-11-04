@@ -108,10 +108,9 @@ filterwarnings = [
     "ignore:numpy.ufunc size changed",
     # sometimes, dependencies leak resources
     "ignore:.*socket\\.socket.*:pytest.PytestUnraisableExceptionWarning",
-    # vectoradd_jax's default for Vector_and_Scalar.s is a numpy scalar, which is
-    # neither JSON-serializable (schema generation) nor a ShapeDType
-    # (abstract_eval's model_dump when the field is omitted). Both are harmless.
-    "ignore:Default value 1.0 is not JSON serializable",
+    # A traced Tesseract's inputs are an AbstractInputSchema instance holding
+    # real arrays, which isn't a ShapeDType as the schema expects; pydantic
+    # warns if the endpoint calls model_dump. Expected, see TracedClient.
     "ignore:Pydantic serializer warnings",
 ]
 
