@@ -21,7 +21,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as np
 from jax import dtypes
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticUndefined
 from tesseract_core import Tesseract
 
@@ -124,12 +124,14 @@ def _omitted_field_value(
     tesseract-core (>=1.15) validates defaults against the abstract schema,
     which turns an array-valued default into a ``ShapeDType`` placeholder.
     Since a default is never a tracer, we validate it against the real field
-    annotation instead, using the same ``TypeAdapter`` call tesseract-core
-    makes in ``replace_array_default_with_shapedtype``. If ``real_cls`` is
-    unknown (inside a plain ``dict``/``list``, or behind an annotation
-    :func:`_real_nested_cls` does not resolve) or the default fails to
-    validate, :func:`_checked_default` handles the field instead.
+    annotation instead, using the same cached ``TypeAdapter`` call
+    tesseract-core makes (and caches for the same reason: building one is
+    far more expensive than using it) in ``replace_array_default_with_shapedtype``.
+    If ``real_cls`` is unknown (inside a plain ``dict``/``list``, or behind an
+    annotation :func:`_real_nested_cls` does not resolve) or the default
+    fails to validate, :func:`_checked_default` handles the field instead.
     """
+    from tesseract_core.runtime.schema_generation import _type_adapter
     from tesseract_core.runtime.schema_types import ShapeDType
 
     if not isinstance(abstract_value, ShapeDType) or real_cls is None:
@@ -144,7 +146,7 @@ def _omitted_field_value(
         return _checked_default(abstract_value, path)
 
     try:
-        real_default = TypeAdapter(field_info.annotation).validate_python(default)
+        real_default = _type_adapter(field_info.annotation).validate_python(default)
     except ValidationError:
         return _checked_default(abstract_value, path)
 
