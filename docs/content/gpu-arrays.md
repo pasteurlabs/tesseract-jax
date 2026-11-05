@@ -40,7 +40,7 @@ A Tesseract never casts an input that `cuda_ipc` keeps on the device. It raises 
 
 Pass these in the field's dtype, for example with `x.astype(jnp.int32)`, or enable `jax_enable_x64`.
 
-A Tesseract whose differentiable inputs and outputs have different dtypes, such as float32 in and float64 out, pays a host round trip under `cuda_ipc` when its `jacobian` endpoint is used. `jax.jacfwd` expects the Jacobian in the output dtype and `jax.jacrev` in the input dtype, and the endpoint returns one dtype whichever mode asks. The other mode casts the whole Jacobian through host memory. Pass `materialize_jacobian=False` to `apply_tesseract` to batch the JVP or VJP endpoint instead, which avoids the cast.
+Additionally, a Tesseract whose differentiable inputs and outputs have different dtypes (such as float32 in and float64 out) can pay a host round trip cast under `cuda_ipc` when its `jacobian` endpoint is used. This is because, `jax.jacfwd/rev` expects the Jacobian in the out/input dtype while the endpoint itself is unaware of autodiff direction and only ever returns one dtype. Consider using, `materialize_jacobian=False` to `apply_tesseract` to batch the JVP or VJP endpoint instead, which avoids the cast but may lead to sequential endpoint calls depending on (vmap method)[#vmap-methods].
 
 ## In-process Tesseracts
 
