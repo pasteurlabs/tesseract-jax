@@ -35,7 +35,7 @@ apply_tesseract(tess.with_encoding(gpu_transport="none"), inputs)
 
 A Tesseract never casts an input that `cuda_ipc` keeps on the device. It raises if the array's dtype differs from its schema field. tesseract-jax casts most mismatched inputs itself before the call (see [Input dtypes](#input-dtypes)), but not these, which therefore raise under `cuda_ipc`:
 
-- Narrowing an integer or changing its sign, such as int64 to `Int32`.
+Narrowing an integer or changing its sign, such as `int64` to `Int32`. You can force an explicit cast via `x.astype(jnp.int32)`.
 - Any input to a 64-bit field, such as `Float64`, while `jax_enable_x64` is off.
 
 Pass these in the field's dtype, for example with `x.astype(jnp.int32)`, or enable `jax_enable_x64`.
