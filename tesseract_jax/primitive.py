@@ -969,11 +969,14 @@ def _coerce_array_input(value: Any, field_name: str) -> Any:
 def _schema_dtype(prop_schema: dict) -> np.dtype | None:
     """The dtype an array field's schema declares, or ``None`` if it leaves it open.
 
-    tesseract-core puts the field's dtype in the ``dtype`` property's
-    ``examples``, and ``float64`` there when the field accepts any dtype. The
-    ``enum`` of accepted dtypes tells those two apart: an open field accepts
+    Read from ``array_dtype`` where the schema has it (tesseract-core#898).
+    Older schemas only carry the dtype in the ``dtype`` property's ``examples``,
+    with ``float64`` there for an open field too; an open field also accepts
     complex input, which a ``Float64`` field does not.
     """
+    if "array_dtype" in prop_schema:
+        name = prop_schema["array_dtype"]
+        return None if name is None else np.dtype(name)
     dtype_schema = prop_schema.get("properties", {}).get("dtype", {})
     name = (dtype_schema.get("examples") or [None])[0]
     is_open = name is None or (

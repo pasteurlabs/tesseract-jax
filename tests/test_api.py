@@ -1236,3 +1236,16 @@ def test_schema_without_dtype_examples_is_open():
     from tesseract_jax.primitive import _schema_dtype
 
     assert _schema_dtype({"properties": {"dtype": {"type": "string"}}}) is None
+
+
+@pytest.mark.parametrize("array_dtype", ["float32", None])
+def test_schema_array_dtype_takes_precedence(array_dtype):
+    """``array_dtype`` (tesseract-core#898) wins over the ``examples`` fallback."""
+    from tesseract_jax.primitive import _schema_dtype
+
+    prop_schema = {
+        "array_dtype": array_dtype,
+        "properties": {"dtype": {"examples": ["int8"], "enum": ["int8"]}},
+    }
+    expected = None if array_dtype is None else np.dtype(array_dtype)
+    assert _schema_dtype(prop_schema) == expected
