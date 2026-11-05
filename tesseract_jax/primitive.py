@@ -987,8 +987,8 @@ def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
 
     For inexact numerics (float/complex) behaviour is consistent with
     tesseract-core (cast if ``same_kind``) except for overflows (which
-    are cast to `inf` instead of raising like tesseract-core) or if a cast to 
-    float64 is required when ``jax_enable_64`` is off.
+    are cast to `inf` instead of raising like tesseract-core) or if a cast to
+    float64 is required when ``jax_enable_x64`` is off.
 
     Integer or bool fields only get widening casts (``safe``; narrowing an
     integer or changing its sign can silently wrap around).
