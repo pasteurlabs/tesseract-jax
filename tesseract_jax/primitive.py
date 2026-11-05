@@ -983,21 +983,15 @@ def _schema_dtype(prop_schema: dict) -> np.dtype | None:
 
 
 def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
-    """Cast an array input to its field's schema dtype, as JAX ops before the bind.
+    """Differentiable cast of an array to its schema dtype with `jax.numpy`.
 
-    tesseract-core casts a mismatched input to the schema dtype when it decodes
-    a host array, but a device array sent over cuda_ipc is rejected instead.
-    Casting here gives both transports the same operands, and lets JAX
-    differentiate through the cast: tangents are cast to the schema dtype on the
-    way in and gradients back to the caller's dtype on the way out.
+    For inexact numerics (float/complex) behaviour is consistent with
+    tesseract-core (cast if ``same_kind``) except for overflows (which
+    are cast to `inf` instead of raising like tesseract-core) or if a cast to 
+    float64 is required when ``jax_enable_64`` is off.
 
-    A float or complex field gets every cast tesseract-core accepts for it. A
-    float that overflows the field's dtype becomes inf here, where
-    tesseract-core would raise. An integer or bool field only gets widening
-    casts: narrowing an integer or changing its sign can wrap, which a JAX cast
-    does not check, so those are left to tesseract-core, which range-checks
-    them on the host path and rejects them under cuda_ipc. A 64-bit field with
-    ``jax_enable_x64`` off is left alone too, since JAX cannot represent it.
+    Integer or bool fields only get widening casts (``safe``; narrowing an
+    integer or changing its sign can silently wrap around).
     """
     target = _schema_dtype(prop_schema)
     if target is None or value.dtype == target:
