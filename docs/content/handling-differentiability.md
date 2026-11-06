@@ -194,7 +194,7 @@ Before calling the Tesseract, `apply_tesseract` casts each array input whose dty
 - **Integer fields** only take widening casts, such as int16 to `Int32`. Narrowing an integer or changing its sign, such as int64 to `Int32`, can wrap silently in JAX, so the input is passed on as is. tesseract-core then checks that the values fit before casting.
 - **Bool fields** only accept bool arrays. Any other dtype raises when the call is traced.
 
-The inputs passed on as is are cast by tesseract-core when they travel through host memory, but not when a GPU transport keeps them on the device (see [GPU arrays](gpu-arrays.md)).
+The inputs passed on as is are cast by tesseract-core when they travel through host memory, but not when a GPU transport is configured (see [GPU arrays](gpu-arrays.md)).
 
 ## Higher-order derivatives
 
