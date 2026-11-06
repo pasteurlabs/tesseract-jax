@@ -38,8 +38,6 @@ A Tesseract never casts an input that `cuda_ipc` keeps on the device. It raises 
 Narrowing an integer or changing its sign, such as `int64` to `Int32`. You can force an explicit cast via `x.astype(jnp.int32)`.
 - Any input to a 64-bit field, such as `Float64`, while `jax_enable_x64` is off.
 
-Pass these in the field's dtype, for example with `x.astype(jnp.int32)`, or enable `jax_enable_x64`.
-
 Additionally, a Tesseract whose differentiable inputs and outputs have different dtypes (such as float32 in and float64 out) can pay a host round trip cast under `cuda_ipc` when its `jacobian` endpoint is used. This is because, `jax.jacfwd/rev` expects the Jacobian in the out/input dtype while the endpoint itself is unaware of autodiff direction and only ever returns one dtype. Consider using, `materialize_jacobian=False` to `apply_tesseract` to batch the JVP or VJP endpoint instead, which avoids the cast but may lead to sequential endpoint calls depending on (vmap method)[#vmap-methods].
 
 ## In-process Tesseracts
