@@ -31,7 +31,7 @@ To always copy GPU arrays through the host, pass a view of the Tesseract:
 apply_tesseract(tess.with_encoding(gpu_transport="none"), inputs)
 ```
 
-## Dtypes
+## Type casts
 
 A Tesseract never casts an input that `cuda_ipc` keeps on the device. It raises if the array's dtype differs from its schema field. tesseract-jax casts most mismatched inputs itself before the call (see [Input dtypes](#input-dtypes)), but not these, which therefore raise under `cuda_ipc`:
 
