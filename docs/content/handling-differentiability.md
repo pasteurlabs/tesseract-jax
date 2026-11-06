@@ -190,7 +190,7 @@ caller receives are the same either way.
 Before calling the Tesseract, `apply_tesseract` casts each array input whose dtype differs from its schema field to the schema dtype. JAX differentiates through the cast. Under `jax_enable_x64`, a float64 input to a `Float32` field therefore reaches the Tesseract as float32, and its gradient is returned as float64.
 
 - **Float and complex fields** in the schema can be cast to from integers, from any float width, and from real to complex—the same as tesseract-core itself. However, a value too large for the field's dtype becomes `inf`, as in any JAX cast, while tesseract-core would raise instead.
-- **No casting to 64-bit when `jax_enable_x64`* is off*, in such cases widening casts are deferred to tesseract-core.
+- **No casting to 64-bit when `jax_enable_x64` is off**, in such cases widening casts are deferred to tesseract-core.
 - **Integer fields** only take widening casts, such as int16 to `Int32`. Narrowing an integer or changing its sign, such as int64 to `Int32`, can wrap silently in JAX, so the input is passed on as is. tesseract-core then checks that the values fit before casting.
 - **Bool fields** only accept bool arrays. Any other dtype raises when the call is traced.
 
