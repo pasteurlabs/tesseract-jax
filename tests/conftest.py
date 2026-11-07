@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from tesseract_core import Tesseract
@@ -365,6 +366,45 @@ def drifting_static_tess() -> Tesseract:
 def zero_cotangent_tess() -> Tesseract:
     """Two differentiable outputs, one with a NaN gradient at x = 0."""
     return _load_tesseract("zero_cotangent_tesseract")
+
+
+@pytest.fixture
+def vectoradd_jax_tess() -> Tesseract:
+    """The ``vectoradd_jax`` example, loaded in-process from ``examples/`` so tests track it."""
+    return Tesseract.from_tesseract_api(
+        str(here.parent / "examples" / "simple" / "vectoradd_jax" / "tesseract_api.py")
+    )
+
+
+@pytest.fixture
+def vectoradd_jax_ab() -> dict:
+    """``{"a": ..., "b": ...}`` inputs for ``vectoradd_jax_tess`` (no ``norm_ord``)."""
+    return {
+        "a": {
+            "v": jnp.array([1.0, 2.0, 3.0], dtype=jnp.float32),
+            "s": jnp.float32(2.0),
+        },
+        "b": {
+            "v": jnp.array([4.0, 5.0, 6.0], dtype=jnp.float32),
+            "s": jnp.float32(0.5),
+        },
+    }
+
+
+@pytest.fixture
+def vectoradd_apply(vectoradd_jax_tess):
+    """``apply_tesseract`` against ``vectoradd_jax_tess`` with ``norm_ord`` filled in."""
+    # Imported lazily because typeguard's pytest plugin raises (as of pytest 9.2)
+    # if tesseract_jax is already imported when it instruments the package.
+    from tesseract_jax import apply_tesseract, to_traceable
+
+    traced_tess = to_traceable(vectoradd_jax_tess)
+
+    def call(ab: dict, traceable: bool, norm_ord: int = 2) -> dict:
+        tess = traced_tess if traceable else vectoradd_jax_tess
+        return apply_tesseract(tess, {**ab, "norm_ord": norm_ord})
+
+    return call
 
 
 # ---------------------------------------------------------------------------

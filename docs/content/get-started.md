@@ -102,6 +102,29 @@ When creating a new Tesseract based on a JAX function, use `tesseract init --rec
   This only affects `from_tesseract_api` (in-process execution). Tesseracts served in a separate process (`from_source`, `from_image`, or `from_url`) are not subject to this restriction.
   ```
 
+  To use `jax.numpy` in an in-process Tesseract, for example so XLA can fuse the endpoint with the surrounding computation, pass `to_traceable(tess)` to `apply_tesseract` instead of `tess`. This traces the endpoint into the jaxpr rather than dispatching it through an FFI callback, so there is no lock to deadlock on:
+
+  ```python
+  from tesseract_jax import apply_tesseract, to_traceable
+
+  tess = to_traceable(Tesseract.from_tesseract_api("tesseract_api.py"))
+  out = jax.jit(lambda x: apply_tesseract(tess, {"x": x}))(x)
+  ```
+
+  ```{warning}
+  Every endpoint a traced Tesseract calls must return a plain `dict` or build its result via `model_construct`. Constructing `OutputSchema(...)` validates every array field with `np.asarray`, which raises on a JAX tracer. This applies to `apply`, `jacobian_vector_product`, `vector_jacobian_product`, and `jacobian` alike. A `TracerArrayConversionError` raised from your Tesseract's own code usually points to this.
+  ```
+
+  ```python
+  # ❌ raises TracerArrayConversionError under to_traceable
+  def apply(inputs):
+      return OutputSchema(c=jnp.sin(inputs.a))
+
+  # ✅ works under to_traceable
+  def apply(inputs):
+      return {"c": jnp.sin(inputs.a)}
+  ```
+
 - **Tesseracts are assumed pure functions of their inputs.** Tesseract-JAX lowers each
   endpoint call as a pure operation, which is what allows repeated identical calls to be
   collapsed into a single request. Where purity does not hold, the compiler is free to

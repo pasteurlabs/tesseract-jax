@@ -108,6 +108,10 @@ filterwarnings = [
     "ignore:numpy.ufunc size changed",
     # sometimes, dependencies leak resources
     "ignore:.*socket\\.socket.*:pytest.PytestUnraisableExceptionWarning",
+    # A traced Tesseract's inputs are an AbstractInputSchema instance holding
+    # real arrays, which isn't a ShapeDType as the schema expects; pydantic
+    # warns if the endpoint calls model_dump. Expected, see TracedClient.
+    "ignore:Pydantic serializer warnings",
 ]
 
 [tool.coverage.run]

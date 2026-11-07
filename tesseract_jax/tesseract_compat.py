@@ -4,6 +4,7 @@
 import copy
 from typing import TYPE_CHECKING
 
+import jax.numpy as jnp
 import jax.tree
 import numpy as np
 from tesseract_core import Tesseract
@@ -16,6 +17,7 @@ from tesseract_jax.tree_util import (
     dummy_output_tree,
     pytree_to_path_dict,
     split_args,
+    to_shape_dtype_pytree,
     unflatten_args,
     warn_on_static_output_drift,
 )
@@ -23,8 +25,10 @@ from tesseract_jax.tree_util import (
 if TYPE_CHECKING:
     from tesseract_jax.dispatch_params import DispatchParams
 
-# WARNING: Do NOT use jax.numpy within Jaxeract methods, as they are executed from within FFI callbacks
-# and cannot safely allocate JAX arrays. Use vanilla numpy instead.
+# WARNING: Jaxeract methods run inside an FFI callback, where allocating jax.numpy
+# arrays is unsafe -- use vanilla numpy. (Exception: jacobian()'s cast_traced below,
+# needed under params.traceable, where methods run during tracing instead and numpy
+# raises on a Tracer.)
 
 
 def _on_device(values: "list | tuple") -> bool:
@@ -287,14 +291,7 @@ class Jaxeract:
 
         This used in order to get output shapes given input shapes.
         """
-        abstract_inputs = jax.tree.map(
-            lambda x: (
-                {"shape": x.shape, "dtype": x.dtype.name} if hasattr(x, "shape") else x
-            ),
-            inputs,
-        )
-
-        out_data = self.client.abstract_eval(abstract_inputs)
+        out_data = self.client.abstract_eval(to_shape_dtype_pytree(inputs))
         return out_data
 
     def apply(
@@ -493,15 +490,23 @@ class Jaxeract:
             if v is not None
         }
         ffi_path = _on_device(array_args)
+
+        # Exception to the module warning above: _cast_return calls np.asarray,
+        # which raises on a Tracer, so this uses jax.numpy instead.
+        def cast_traced(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+            return jnp.asarray(value, dtype=dtype)
+
+        def cast_ffi(value: TransportArray, *, dtype: np.dtype) -> TransportArray:
+            return _cast_return(value, dtype=dtype, ffi_path=ffi_path)
+
+        cast = cast_traced if params.traceable else cast_ffi
         out = []
         for op in jac_outputs:
             for ip in jac_inputs:
                 target = (
                     ip_to_dtype[ip] if params.jac_mode == "bwd" else op_to_dtype[op]
                 )
-                out.append(
-                    _cast_return(out_data[op][ip], dtype=target, ffi_path=ffi_path)
-                )
+                out.append(cast(out_data[op][ip], dtype=target))
         return tuple(out)
 
     def vector_jacobian_product(

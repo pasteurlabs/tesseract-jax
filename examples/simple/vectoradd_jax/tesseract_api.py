@@ -20,8 +20,10 @@ class Vector_and_Scalar(BaseModel):
         # Default is a 0-d ``Float32`` array (not a Python ``float``) so that
         # downstream array ops like ``s[..., None]`` work even when the field
         # is not explicitly supplied. Pydantic v2 skips default validation, so
-        # a bare ``1.0`` here would NOT be coerced to an array.
-        default=np.float32(1.0),
+        # a bare ``1.0`` here would NOT be coerced to an array. A factory, not
+        # a plain ``default=``, so pydantic doesn't try (and fail) to embed
+        # this non-JSON-serializable value in the OpenAPI schema.
+        default_factory=lambda: np.float32(1.0),
     )
 
     @model_validator(mode="after")
