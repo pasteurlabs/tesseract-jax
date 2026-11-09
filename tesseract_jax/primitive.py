@@ -23,6 +23,7 @@ from tesseract_core import Tesseract
 
 from tesseract_jax.batching import VMAP_METHOD_DISPATCH, VmapMethod
 from tesseract_jax.dce import live_jvp_output_positions, tesseract_dispatch_dce_rule
+from tesseract_jax.direct_trace import TracedClient
 from tesseract_jax.dispatch_params import DispatchParams
 from tesseract_jax.tesseract_compat import HOST_COPY_HINT, Jaxeract, to_host
 from tesseract_jax.tree_util import (
@@ -533,10 +534,14 @@ def tesseract_dispatch_lowering(
     *array_args: ArrayLike | ShapedArray | Any,
     params: DispatchParams,
 ) -> Any:
-    """CPU lowering: run the dispatch closure via a host callback, with no transport."""
+    """CPU lowering: inline the endpoint if traceable, else run it via a host callback."""
     _raise_if_unimplemented(params.eval_func, params.client)
 
     dispatch = _build_dispatch_closure(params, "none")
+
+    if params.traceable:
+        # TracedClient makes the dispatch closure traceable, so lower it like any JAX function.
+        return mlir.lower_fun(dispatch, multiple_results=True)(ctx, *array_args)
 
     # A Tesseract endpoint is a pure function of its inputs, so declare it as one.
     # This is what lets XLA's CSE fold repeated identical calls into a single
@@ -575,10 +580,15 @@ def tesseract_dispatch_gpu_lowering(
     native shim (e.g. a CPU-only install where it wasn't compiled), a Tesseract
     that requests no transport takes the host-callback lowering with a warning,
     and one that requests a transport raises.
+
+    A traceable dispatch needs no transport and goes straight to
+    :func:`tesseract_dispatch_lowering`, before any transport is resolved.
     """
     from tesseract_jax import gpu_ffi
 
     client = params.client
+    if params.traceable:
+        return tesseract_dispatch_lowering(ctx, *array_args, params=params)
     if (
         not gpu_ffi.is_available()
         and client.client.current_encoding.gpu_transport is None
@@ -1111,6 +1121,10 @@ def apply_tesseract(
     them. See :doc:`/content/gpu-arrays` for how the transport is picked and
     what an in-process Tesseract receives.
 
+    Pass ``to_traceable(tesseract_client)`` to trace an in-process Tesseract's
+    endpoints into the jaxpr instead of dispatching them. See
+    :func:`tesseract_jax.to_traceable` for its requirements.
+
     Example:
         >>> from tesseract_core import Tesseract
         >>> from tesseract_jax import apply_tesseract
@@ -1250,6 +1264,8 @@ def apply_tesseract(
             "directly through the Tesseract client instead of apply_tesseract."
         )
 
+    # to_traceable() marks a Tesseract by swapping in a TracedClient.
+    traceable = isinstance(tesseract_client._client, TracedClient)
     client = Jaxeract(tesseract_client)
 
     flat_args, input_pytreedef = jax.tree.flatten(inputs)
@@ -1313,6 +1329,7 @@ def apply_tesseract(
             eval_func="apply",
             vmap_method=vmap_method,
             materialize_jacobian=materialize_jacobian,
+            traceable=traceable,
         ),
     )
 
