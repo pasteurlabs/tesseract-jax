@@ -1234,6 +1234,20 @@ def test_dict_field_values_cast_to_schema_dtype(dtype_fields_schemas):
     assert out["d"]["b"].dtype == np.float32
 
 
+def test_dict_field_values_schema():
+    from tesseract_jax.primitive import _resolve_values_schema
+
+    schemas = {"Vec": {"type": "array", "items": {"type": "number"}}}
+    ref = {"$ref": "#/components/schemas/Vec"}
+    inline = {"type": "array", "items": {"type": "integer"}}
+    assert (
+        _resolve_values_schema({"additionalProperties": ref}, schemas) is schemas["Vec"]
+    )
+    assert _resolve_values_schema({"additionalProperties": inline}, schemas) is inline
+    assert _resolve_values_schema({"additionalProperties": True}, schemas) == {}
+    assert _resolve_values_schema({"type": "object"}, schemas) == {}
+
+
 def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
     """JAX cannot represent a Float64 field's dtype with x64 off, so leave the input.
 
