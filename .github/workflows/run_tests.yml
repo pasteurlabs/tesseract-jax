@@ -87,7 +87,8 @@ jobs:
             jax-version: "0.7.0"
           - major: "13"
             base_image: "nvidia/cuda:13.3.1-base-ubuntu24.04"
-            python-version: "3.15"
+            # CuPy has no Python 3.15 wheels yet
+            python-version: "3.14"
             jax-version: "latest"
 
     defaults:
