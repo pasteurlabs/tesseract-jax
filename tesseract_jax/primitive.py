@@ -1019,6 +1019,16 @@ def _optional_array_schema(prop_schema: dict, all_schemas: dict) -> dict | None:
     return arrays[0] if len(arrays) == 1 else None
 
 
+def _resolve_values_schema(prop_schema: dict, all_schemas: dict) -> dict:
+    """The schema of a dict field's values, or an empty schema for anything else."""
+    values_schema = prop_schema.get("additionalProperties")
+    if not isinstance(values_schema, dict):
+        return {}
+    if "$ref" in values_schema:
+        return _resolve_ref(values_schema["$ref"], all_schemas)
+    return values_schema
+
+
 def _validate_and_coerce_inputs(
     inputs: Any, input_schema: dict, all_schemas: dict
 ) -> Any:
@@ -1057,6 +1067,15 @@ def _validate_and_coerce_inputs(
             result[key] = _cast_to_schema_dtype(
                 _coerce_array_input(value, key), prop_schema
             )
+        elif isinstance(value, dict) and _is_array_schema(
+            values_schema := _resolve_values_schema(prop_schema, all_schemas)
+        ):
+            result[key] = {
+                k: _cast_to_schema_dtype(
+                    _coerce_array_input(v, f"{key}[{k!r}]"), values_schema
+                )
+                for k, v in value.items()
+            }
         elif prop_schema.get("type") == "object" or "properties" in prop_schema:
             # Nested object - recurse
             result[key] = _validate_and_coerce_inputs(value, prop_schema, all_schemas)

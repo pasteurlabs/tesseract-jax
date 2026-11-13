@@ -1125,6 +1125,15 @@ def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
     np.testing.assert_allclose(np.asarray(grads["params"][key]), np.full(3, 2.0))
 
 
+def test_grad_wrt_float64_dict_value(dict_key_tess):
+    inputs = {"params": {"w": jnp.ones(3, dtype=jnp.float64)}}
+    grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
+        inputs
+    )
+    assert grads["params"]["w"].dtype == np.float64
+    np.testing.assert_allclose(np.asarray(grads["params"]["w"]), np.full(3, 2.0))
+
+
 def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     """The fill table must cover every dtype a Tesseract schema can declare.
 
@@ -1165,6 +1174,7 @@ class InputSchema(BaseModel):
     c64: Array[(None,), "complex64"]
     open: Array[(None,), None]
     opt: Array[(None,), "float32"] | None = None
+    d: dict[str, Array[(None,), "float32"]]
 
 
 class OutputSchema(BaseModel):
@@ -1209,6 +1219,33 @@ def test_inputs_cast_to_schema_dtype(dtype_fields_schemas, field, src, expected)
         {field: jnp.ones(3, dtype=src)}, schemas["Apply_InputSchema"], schemas
     )
     assert out[field].dtype == np.dtype(expected)
+
+
+def test_dict_field_values_cast_to_schema_dtype(dtype_fields_schemas):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {"d": {"a": jnp.ones(3, dtype=jnp.float64), "b": np.ones(2, dtype=np.int32)}},
+        schemas["Apply_InputSchema"],
+        schemas,
+    )
+    assert out["d"]["a"].dtype == np.float32
+    assert out["d"]["b"].dtype == np.float32
+
+
+def test_dict_field_values_schema():
+    from tesseract_jax.primitive import _resolve_values_schema
+
+    schemas = {"Vec": {"type": "array", "items": {"type": "number"}}}
+    ref = {"$ref": "#/components/schemas/Vec"}
+    inline = {"type": "array", "items": {"type": "integer"}}
+    assert (
+        _resolve_values_schema({"additionalProperties": ref}, schemas) is schemas["Vec"]
+    )
+    assert _resolve_values_schema({"additionalProperties": inline}, schemas) is inline
+    assert _resolve_values_schema({"additionalProperties": True}, schemas) == {}
+    assert _resolve_values_schema({"type": "object"}, schemas) == {}
 
 
 def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
