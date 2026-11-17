@@ -5,6 +5,7 @@ import operator
 import os
 import warnings
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -1012,23 +1013,160 @@ def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
     return value
 
 
-def _optional_array_schema(prop_schema: dict, all_schemas: dict) -> dict | None:
-    """The array member of an ``anyOf`` schema, if it is the only one."""
-    members = [
-        _resolve_ref(m["$ref"], all_schemas) if "$ref" in m else m
-        for m in prop_schema.get("anyOf", ())
+@dataclass(frozen=True)
+class _ArrayNode:
+    """An array field: coerce the value to an array and cast it to ``schema``'s dtype."""
+
+    schema: dict
+
+
+@dataclass(frozen=True)
+class _ObjectNode:
+    """A model (``properties``) and/or a dict (``additionalProperties``)."""
+
+    properties: dict[str, "_SchemaNode"]
+    values: "_SchemaNode"
+
+
+@dataclass(frozen=True)
+class _SequenceNode:
+    """A list (``items``), or a tuple or NamedTuple (``prefixItems``)."""
+
+    prefix: tuple["_SchemaNode", ...]
+    items: "_SchemaNode"
+
+
+@dataclass(frozen=True)
+class _UnionNode:
+    """``anyOf``/``oneOf``. A ``None`` member is an alternative without arrays."""
+
+    members: tuple["_SchemaNode", ...]
+
+
+# ``None`` stands for any schema with no array fields below it.
+_SchemaNode = _ArrayNode | _ObjectNode | _SequenceNode | _UnionNode | None
+
+
+def _compile_schema(
+    schema: Any, all_schemas: dict, _visiting: frozenset[str] = frozenset()
+) -> _SchemaNode:
+    """Reduce a JSON Schema to the parts that lead to array fields.
+
+    Covers the keywords pydantic emits for the types a Tesseract schema can
+    use: ``$ref``, ``properties``, ``additionalProperties``, ``items``,
+    ``prefixItems``, ``anyOf``, ``oneOf`` and a single-member ``allOf``.
+    Subtrees without arrays compile to ``None`` and are skipped at call time.
+    A recursive model is followed one level deep; anything below its first
+    recursion is passed through uncast.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if "$ref" in schema:
+        name = schema["$ref"].rsplit("/", 1)[-1]
+        if name in _visiting:
+            return None
+        return _compile_schema(
+            _resolve_ref(schema["$ref"], all_schemas), all_schemas, _visiting | {name}
+        )
+    if _is_array_schema(schema):
+        return _ArrayNode(schema)
+
+    def compile_(sub: Any) -> _SchemaNode:
+        return _compile_schema(sub, all_schemas, _visiting)
+
+    all_of = schema.get("allOf", ())
+    if len(all_of) == 1:
+        return compile_(all_of[0])
+    alternatives = [*schema.get("anyOf", ()), *schema.get("oneOf", ())]
+    if alternatives:
+        members = tuple(compile_(m) for m in alternatives)
+        return _UnionNode(members) if any(members) else None
+    if "properties" in schema or "additionalProperties" in schema:
+        properties = {k: compile_(v) for k, v in schema.get("properties", {}).items()}
+        properties = {k: v for k, v in properties.items() if v is not None}
+        values = compile_(schema.get("additionalProperties"))
+        return _ObjectNode(properties, values) if properties or values else None
+    if "prefixItems" in schema or "items" in schema:
+        prefix = tuple(compile_(m) for m in schema.get("prefixItems", ()))
+        items = compile_(schema.get("items"))
+        return _SequenceNode(prefix, items) if any(prefix) or items else None
+    return None
+
+
+def _is_array_value(value: Any) -> bool:
+    return isinstance(value, (jax.Array, np.ndarray, jc.Tracer))
+
+
+def _pick_union_member(value: Any, node: _UnionNode) -> _SchemaNode:
+    """The member of a union that ``value`` can only be meant for, if any.
+
+    Arrays go to the union's array member, dicts to its object member and
+    lists or tuples to its sequence member, if there is exactly one such
+    member. Anything else, a scalar included, is left as it is: in
+    ``float | Array`` a scalar is a valid float, so it isn't coerced.
+    """
+    if _is_array_value(value):
+        kind = _ArrayNode
+    elif isinstance(value, dict):
+        kind = _ObjectNode
+    elif isinstance(value, (list, tuple)):
+        kind = _SequenceNode
+    else:
+        return None
+    candidates = [m for m in node.members if isinstance(m, kind)]
+    if kind is _ObjectNode and len(candidates) > 1:
+        # Several models: keep the ones that declare every key the value has.
+        candidates = [
+            m
+            for m in candidates
+            if m.values is not None or value.keys() <= m.properties.keys()
+        ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _coerce_to_schema(value: Any, node: _SchemaNode, path: str) -> Any:
+    """Coerce and cast the array fields of ``value`` that ``node`` describes."""
+    if node is None:
+        return value
+    if isinstance(node, _ArrayNode):
+        return _cast_to_schema_dtype(_coerce_array_input(value, path), node.schema)
+    if isinstance(node, _UnionNode):
+        return _coerce_to_schema(value, _pick_union_member(value, node), path)
+    if isinstance(node, _ObjectNode):
+        if not isinstance(value, dict):
+            return value
+        return {
+            k: _coerce_to_schema(
+                v,
+                node.properties.get(k, node.values),
+                f"{path}.{k}" if k in node.properties else f"{path}[{k!r}]",
+            )
+            for k, v in value.items()
+        }
+    # _SequenceNode
+    if not isinstance(value, (list, tuple)):
+        return value
+    out = [
+        _coerce_to_schema(
+            v,
+            node.prefix[i] if i < len(node.prefix) else node.items,
+            f"{path}[{i}]",
+        )
+        for i, v in enumerate(value)
     ]
-    arrays = [m for m in members if _is_array_schema(m)]
-    return arrays[0] if len(arrays) == 1 else None
+    if hasattr(value, "_fields"):  # NamedTuple
+        return type(value)(*out)
+    return type(value)(out)
 
 
 def _validate_and_coerce_inputs(
     inputs: Any, input_schema: dict, all_schemas: dict
 ) -> Any:
-    """Recursively validate and coerce inputs to JAX arrays where the schema expects arrays.
+    """Coerce inputs to JAX arrays where the schema expects arrays.
 
-    Walks the input data alongside the OpenAPI schema. When a leaf field is expected
-    to be an array (detected via array_flags or object_type):
+    The input schema is first reduced to the paths that lead to array fields
+    (see :func:`_compile_schema`), which is then walked alongside the inputs.
+    At each array field:
     - Values implementing the ``__array__`` protocol (numpy/jax arrays) are converted
       via ``jnp.asarray()``.
     - Python scalars (int, float, bool, complex) are converted via ``jnp.asarray()``.
@@ -1037,55 +1175,13 @@ def _validate_and_coerce_inputs(
       float or complex field and widening casts into an integer or bool field
       (see :func:`_cast_to_schema_dtype`).
     """
-    if not isinstance(inputs, dict):
+    node = _compile_schema(input_schema, all_schemas)
+    if not isinstance(node, _ObjectNode) or not isinstance(inputs, dict):
         return inputs
-
-    properties = input_schema.get("properties", {})
-    if not properties:
-        return inputs
-
-    result = {}
-    for key, value in inputs.items():
-        if key not in properties:
-            result[key] = value
-            continue
-
-        prop_schema = properties[key]
-
-        # Resolve $ref if present
-        if "$ref" in prop_schema:
-            prop_schema = _resolve_ref(prop_schema["$ref"], all_schemas)
-
-        if _is_array_schema(prop_schema):
-            result[key] = _cast_to_schema_dtype(
-                _coerce_array_input(value, key), prop_schema
-            )
-        elif prop_schema.get("type") == "object" or "properties" in prop_schema:
-            # Nested object - recurse
-            result[key] = _validate_and_coerce_inputs(value, prop_schema, all_schemas)
-        elif prop_schema.get("type") == "array" and "items" in prop_schema:
-            # Schema-level array (list of items) - validate items
-            items_schema = prop_schema["items"]
-            if "$ref" in items_schema:
-                items_schema = _resolve_ref(items_schema["$ref"], all_schemas)
-            if _is_array_schema(items_schema) and isinstance(value, (list, tuple)):
-                result[key] = type(value)(
-                    _cast_to_schema_dtype(
-                        _coerce_array_input(v, f"{key}[{i}]"), items_schema
-                    )
-                    for i, v in enumerate(value)
-                )
-            else:
-                result[key] = value
-        elif isinstance(value, (jax.Array, np.ndarray, jc.Tracer)) and (
-            array_schema := _optional_array_schema(prop_schema, all_schemas)
-        ):
-            # An optional array field (`Array[...] | None`) that was given an array.
-            result[key] = _cast_to_schema_dtype(value, array_schema)
-        else:
-            result[key] = value
-
-    return result
+    return {
+        k: _coerce_to_schema(v, node.properties.get(k, node.values), k)
+        for k, v in inputs.items()
+    }
 
 
 def apply_tesseract(
