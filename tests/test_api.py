@@ -1231,6 +1231,151 @@ def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
     assert out["f64"].dtype == np.float32
 
 
+_NESTED_FIELDS_API = """
+from typing import NamedTuple
+
+from pydantic import BaseModel
+from tesseract_core.runtime import Array, Differentiable
+
+A = Differentiable[Array[(None,), "float32"]]
+
+
+class NT(NamedTuple):
+    a: A
+    b: A
+
+
+class Sub(BaseModel):
+    x: A
+
+
+class InputSchema(BaseModel):
+    lst: list[A] = []
+    tup: tuple[A, A]
+    nt: NT
+    d: dict[str, A] = {}
+    dl: dict[str, list[A]] = {}
+    dm: dict[str, Sub] = {}
+    sub: Sub
+    opt_sub: Sub | None = None
+    u: Sub | A
+    lo: list[A | None] = []
+    plain: Array[(None,), "float32"]
+
+
+class OutputSchema(BaseModel):
+    y: A
+
+
+def apply(inputs):
+    return OutputSchema(y=inputs.plain)
+"""
+
+
+@pytest.fixture(scope="module")
+def nested_fields_schemas(tmp_path_factory):
+    from tesseract_core import Tesseract
+
+    api = tmp_path_factory.mktemp("nested_fields") / "tesseract_api.py"
+    api.write_text(_NESTED_FIELDS_API)
+    return Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+
+
+_X64 = np.ones(2, dtype=np.float64)
+
+
+@pytest.mark.parametrize(
+    "inputs, get",
+    [
+        ({"lst": [_X64]}, lambda o: o["lst"][0]),
+        ({"tup": (_X64, _X64)}, lambda o: o["tup"][1]),
+        ({"d": {"k": _X64}}, lambda o: o["d"]["k"]),
+        ({"d": {"k": 1.5}}, lambda o: o["d"]["k"]),  # scalar coerced, then cast
+        ({"dl": {"k": [_X64]}}, lambda o: o["dl"]["k"][0]),
+        ({"dm": {"k": {"x": _X64}}}, lambda o: o["dm"]["k"]["x"]),
+        ({"sub": {"x": _X64}}, lambda o: o["sub"]["x"]),
+        ({"opt_sub": {"x": _X64}}, lambda o: o["opt_sub"]["x"]),
+        ({"u": _X64}, lambda o: o["u"]),
+        ({"u": {"x": _X64}}, lambda o: o["u"]["x"]),
+        ({"lo": [None, _X64]}, lambda o: o["lo"][1]),
+    ],
+    ids=lambda v: next(iter(v)) if isinstance(v, dict) else "",
+)
+def test_nested_inputs_cast_to_schema_dtype(nested_fields_schemas, inputs, get):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = nested_fields_schemas
+    out = _validate_and_coerce_inputs(inputs, schemas["Apply_InputSchema"], schemas)
+    assert get(out).dtype == np.float32
+
+
+def test_namedtuple_input_cast_and_type_kept(nested_fields_schemas):
+    from collections import namedtuple
+
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    NT = namedtuple("NT", "a b")
+    schemas = nested_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {"nt": NT(_X64, _X64)}, schemas["Apply_InputSchema"], schemas
+    )
+    assert type(out["nt"]) is NT
+    assert out["nt"].b.dtype == np.float32
+
+
+def test_nested_list_for_array_rejected(nested_fields_schemas):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = nested_fields_schemas
+    with pytest.raises(TypeError, match=r"Input 'd\['k'\]' expects an array"):
+        _validate_and_coerce_inputs(
+            {"d": {"k": [1.0, 2.0]}}, schemas["Apply_InputSchema"], schemas
+        )
+
+
+def _differentiable_patterns(node, prefix=()):
+    """The tesseract-core path patterns of the differentiable arrays under ``node``."""
+    from tesseract_jax.primitive import (
+        _ArrayNode,
+        _ObjectNode,
+        _UnionNode,
+    )
+
+    if node is None:
+        return set()
+    if isinstance(node, _ArrayNode):
+        flags = node.schema.get("array_flags", ())
+        return {".".join(prefix)} if "DIFFERENTIABLE" in flags else set()
+    if isinstance(node, _UnionNode):
+        return set().union(*(_differentiable_patterns(m, prefix) for m in node.members))
+    if isinstance(node, _ObjectNode):
+        out = _differentiable_patterns(node.values, (*prefix, "{}"))
+        for k, v in node.properties.items():
+            out |= _differentiable_patterns(v, (*prefix, k))
+        return out
+    children = [*node.prefix, node.items]
+    return set().union(
+        *(_differentiable_patterns(m, (*prefix, "[]")) for m in children)
+    )
+
+
+def test_compiled_schema_agrees_with_differentiable_arrays(nested_fields_schemas):
+    """The walker finds the differentiable arrays tesseract-core lists.
+
+    tesseract-core leaves NamedTuple members out of ``differentiable_arrays``,
+    so ``nt`` is only found by the walker.
+    """
+    from tesseract_jax.primitive import _compile_schema
+
+    schemas = nested_fields_schemas
+    found = _differentiable_patterns(
+        _compile_schema(schemas["Apply_InputSchema"], schemas)
+    )
+    listed = set(schemas["ApplyInputSchema"]["differentiable_arrays"])
+    assert found - listed == {"nt.[]"}
+    assert listed <= found
+
+
 def test_schema_without_dtype_examples_is_open():
     """An array schema that names no dtype is treated as accepting any dtype."""
     from tesseract_jax.primitive import _schema_dtype
