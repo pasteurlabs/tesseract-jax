@@ -285,6 +285,38 @@ def test_transpose_of_vjp_fn_with_undifferentiated_array_primals(
     np.testing.assert_allclose(grad_out, expected, rtol=1e-5)
 
 
+@pytest.mark.parametrize("use_jit", [True, False])
+def test_transpose_of_vjp_fn_with_several_inputs_and_outputs(
+    pytree_tess, pytree_tess_inputs, use_jit
+):
+    """Transposing vjp_fn gives the JVP for a Tesseract with several inputs and outputs.
+
+    Two differentiated inputs (``alpha.x``, ``alpha.y``) and a subset of the
+    outputs, next to a non-differentiable one (``metadata``) and an unused one
+    (``result_list``). The univariate tests above have one of each, so they
+    cannot tell input-aligned from output-aligned slots.
+    """
+    inp = pytree_tess_inputs
+
+    def f(alpha):
+        out = apply_tesseract(pytree_tess, inputs={**inp, "alpha": alpha})
+        return out["result"], out["result_dict"]
+
+    if use_jit:
+        f = jax.jit(f)
+
+    alpha = inp["alpha"]
+    v = {"x": np.array([1.0, -2.0, 0.5], "float32"), "y": np.ones(4, "float32")}
+
+    primal_out, vjp_fn = jax.vjp(f, alpha)
+    (transposed,) = jax.linear_transpose(vjp_fn, primal_out)((v,))
+
+    _, expected = jax.jvp(f, (alpha,), (v,))
+    jax.tree.map(
+        lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-5), transposed, expected
+    )
+
+
 @pytest.mark.parametrize("argnums", [0, 1])
 def test_jacfwd_of_tangent_fn_partial_argnums(pytree_tess, pytree_tess_inputs, argnums):
     """Differentiating only some arguments leaves the rest symbolically zero.

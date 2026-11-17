@@ -422,8 +422,7 @@ def tesseract_dispatch_transpose_rule(
         # The JVP bind returns one output per Tesseract output. The forward VJP's
         # linear operands were only the real cotangents, so return those slots.
         has_cotangent = params.has_cotangent or (True,) * len(jvp)
-        jvp_iter = iter(jvp)
-        cotan_out = [next(jvp_iter) for h in has_cotangent if h]
+        cotan_out = [t for t, h in zip(jvp, has_cotangent, strict=True) if h]
         return tuple([None] * len(primal_args) + cotan_out)
 
     # Raise if a gradient is requested for a non-differentiable input.
@@ -469,8 +468,12 @@ def tesseract_dispatch_transpose_rule(
     vjp = tesseract_dispatch_p.bind(
         *primal_args,
         *cotan_args_,
+        # The VJP's linear operands align with the differentiated inputs, so this
+        # JVP's output-side ``live_output_paths`` do not apply to it.
         params=params.replace(
-            eval_func="vector_jacobian_product", has_cotangent=has_cotangent
+            eval_func="vector_jacobian_product",
+            has_cotangent=has_cotangent,
+            live_output_paths=None,
         ),
     )
 
