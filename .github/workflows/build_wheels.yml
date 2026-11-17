@@ -56,7 +56,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.3.3
 
       # Derive the version on the host (git works reliably here) and pass it into
       # cibuildwheel's isolated build container, where git is brittle (ownership /
@@ -137,7 +137,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Build sdist
         run: uv build --sdist --out-dir dist
