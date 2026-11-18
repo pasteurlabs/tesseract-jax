@@ -713,6 +713,121 @@ def test_vmap_of_grad_agrees_across_vmap_methods(batched_tess, vmap_method):
         np.testing.assert_allclose(g, e, rtol=1e-6)
 
 
+# (in_axes, argnums) of ``vmap(grad(loss))`` over ``loss(x, y)``.
+VMAP_GRAD_CASES = {
+    "all-batched": ((0, 0), (0, 1)),
+    "shared-y": ((0, None), (0, 1)),
+    "shared-y-only": ((0, None), 1),
+}
+
+
+def _vmap_of_grad(tess, vmap_method, case, nonlinear=True):
+    """``vmap(grad(loss))`` and the per-example gradients it must return."""
+    in_axes, argnums = VMAP_GRAD_CASES[case]
+
+    def loss(x, y):
+        out = apply_tesseract(tess, {"x": x, "y": y}, vmap_method=vmap_method)
+        result = out["result"]
+        return (jnp.sin(result) ** 2).sum() if nonlinear else result.sum()
+
+    grad = jax.grad(loss, argnums=argnums)
+    xs = jnp.stack([jnp.linspace(-1.0, 1.0, 3) * s for s in (0.5, 1.0, 1.5, 2.0)])
+    ys = jnp.stack([jnp.linspace(0.5, 1.5, 3) + s for s in (0.0, 0.1, 0.2, 0.3)])
+    if in_axes[1] is None:
+        ys = jnp.broadcast_to(ys[0], ys.shape)
+    y = ys if in_axes[1] == 0 else ys[0]
+    per_example = [grad(x_i, y_i) for x_i, y_i in zip(xs, ys, strict=True)]
+    expected = jax.tree.map(lambda *g: jnp.stack(g), *per_example)
+    return jax.jit(jax.vmap(grad, in_axes=in_axes)), (xs, y), expected
+
+
+@pytest.mark.parametrize("nonlinear", [True, False], ids=["nonlinear", "linear"])
+@pytest.mark.parametrize("case", list(VMAP_GRAD_CASES))
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_gives_per_example_gradients(
+    batched_tess, vmap_method, case, nonlinear
+):
+    """``vmap(grad(f))`` must match one ``grad(f)`` per example.
+
+    A loss nonlinear in the output gives each example its own cotangent, so
+    the vjp bind sees batched cotangents, not just batched primals. A shared
+    (unbatched) ``y`` that is differentiated must still get one gradient per
+    example, not their sum over the batch.
+    """
+    fn, args, expected = _vmap_of_grad(batched_tess, vmap_method, case, nonlinear)
+    got = fn(*args)
+
+    for g, e in zip(jax.tree.leaves(got), jax.tree.leaves(expected), strict=True):
+        assert g.shape == e.shape
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
+@pytest.mark.parametrize("case", list(VMAP_GRAD_CASES))
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_vmap_of_grad_vjp_request_count(batched_tess, monkeypatch, vmap_method, case):
+    """Count the ``vector_jacobian_product`` requests of one ``vmap(grad(f))``.
+
+    The vectorized methods send one batched request. A shared ``y`` that is
+    differentiated is broadcast to the batch first, so that it gets one
+    gradient per example.
+    """
+    calls = []
+    orig = batched_tess.vector_jacobian_product
+
+    def spy(**kwargs):
+        calls.append((kwargs["inputs"]["x"].shape, kwargs["inputs"]["y"].shape))
+        return orig(**kwargs)
+
+    monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
+
+    fn, args, _ = _vmap_of_grad(batched_tess, vmap_method, case)
+    calls.clear()
+    fn(*args)
+
+    expected = [((3,), (3,))] * 4 if vmap_method == "sequential" else [((4, 3), (4, 3))]
+    assert calls == expected
+
+
+@pytest.mark.parametrize(
+    "vmap_method", ["sequential", "auto_experimental", "expand_dims", "broadcast_all"]
+)
+def test_jacrev_vjp_requests(batched_tess, monkeypatch, vmap_method):
+    """``jacrev`` pulls back one cotangent per output element through the VJP."""
+    x = jnp.linspace(-1.0, 1.0, 3)
+    y = jnp.linspace(0.5, 1.5, 3)
+
+    def f(x):
+        return apply_tesseract(
+            batched_tess,
+            {"x": x, "y": y},
+            vmap_method=vmap_method,
+            materialize_jacobian=False,
+        )["result"]
+
+    expected = jax.jacfwd(f)(x)
+    calls = []
+    orig = batched_tess.vector_jacobian_product
+
+    def spy(**kwargs):
+        calls.append((kwargs["inputs"]["x"].shape, kwargs["inputs"]["y"].shape))
+        return orig(**kwargs)
+
+    monkeypatch.setattr(batched_tess, "vector_jacobian_product", spy)
+    np.testing.assert_allclose(jax.jacrev(f)(x), expected, rtol=1e-6)
+    # y is not differentiated, so only broadcast_all broadcasts it to the batch.
+    expected_calls = {
+        "sequential": [((3,), (3,))] * 3,
+        "auto_experimental": [((3, 3), (1, 3))],
+        "expand_dims": [((3, 3), (1, 3))],
+        "broadcast_all": [((3, 3), (3, 3))],
+    }
+    assert calls == expected_calls[vmap_method]
+
+
 def test_list_index_survives_static_pruning():
     """Regression test: a list path keeps its index when siblings are static.
 
@@ -1010,6 +1125,15 @@ def test_grad_reaches_a_dotted_dict_key(dict_key_tess, key):
     np.testing.assert_allclose(np.asarray(grads["params"][key]), np.full(3, 2.0))
 
 
+def test_grad_wrt_float64_dict_value(dict_key_tess):
+    inputs = {"params": {"w": jnp.ones(3, dtype=jnp.float64)}}
+    grads = jax.grad(lambda x: apply_tesseract(dict_key_tess, x)["result"].sum())(
+        inputs
+    )
+    assert grads["params"]["w"].dtype == np.float64
+    np.testing.assert_allclose(np.asarray(grads["params"]["w"]), np.full(3, 2.0))
+
+
 def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     """The fill table must cover every dtype a Tesseract schema can declare.
 
@@ -1036,3 +1160,129 @@ def test_discarded_fill_table_covers_every_schema_dtype(vectoradd_tess):
     assert declared <= set(_DISCARDED_FILL), (
         f"dtypes missing from _DISCARDED_FILL: {sorted(map(str, declared - set(_DISCARDED_FILL)))}"
     )
+
+
+_DTYPE_FIELDS_API = """
+from pydantic import BaseModel
+from tesseract_core.runtime import Array
+
+
+class InputSchema(BaseModel):
+    f32: Array[(None,), "float32"]
+    f64: Array[(None,), "float64"]
+    i32: Array[(None,), "int32"]
+    c64: Array[(None,), "complex64"]
+    open: Array[(None,), None]
+    opt: Array[(None,), "float32"] | None = None
+    d: dict[str, Array[(None,), "float32"]]
+
+
+class OutputSchema(BaseModel):
+    y: Array[(None,), "float32"]
+
+
+def apply(inputs):
+    return OutputSchema(y=inputs.f32)
+"""
+
+
+@pytest.fixture(scope="module")
+def dtype_fields_schemas(tmp_path_factory):
+    from tesseract_core import Tesseract
+
+    api = tmp_path_factory.mktemp("dtype_fields") / "tesseract_api.py"
+    api.write_text(_DTYPE_FIELDS_API)
+    return Tesseract.from_tesseract_api(api).openapi_schema["components"]["schemas"]
+
+
+@pytest.mark.parametrize(
+    "field, src, expected",
+    [
+        ("f32", "float64", "float32"),  # float narrowing: cast
+        ("f32", "int32", "float32"),  # int to float: cast
+        ("f32", "float16", "float32"),  # widening: cast
+        ("f64", "float32", "float64"),  # widening (x64 is on in the tests): cast
+        ("i32", "int16", "int32"),  # safe int widening: cast
+        ("i32", "int64", "int64"),  # int narrowing: left to tesseract-core
+        ("i32", "uint32", "uint32"),  # sign change: left to tesseract-core
+        ("i32", "float32", "float32"),  # float to int: left to tesseract-core
+        ("c64", "float64", "complex64"),  # real to complex: cast
+        ("open", "int8", "int8"),  # no declared dtype: untouched
+        ("opt", "float64", "float32"),  # optional array field: cast
+    ],
+)
+def test_inputs_cast_to_schema_dtype(dtype_fields_schemas, field, src, expected):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {field: jnp.ones(3, dtype=src)}, schemas["Apply_InputSchema"], schemas
+    )
+    assert out[field].dtype == np.dtype(expected)
+
+
+def test_dict_field_values_cast_to_schema_dtype(dtype_fields_schemas):
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {"d": {"a": jnp.ones(3, dtype=jnp.float64), "b": np.ones(2, dtype=np.int32)}},
+        schemas["Apply_InputSchema"],
+        schemas,
+    )
+    assert out["d"]["a"].dtype == np.float32
+    assert out["d"]["b"].dtype == np.float32
+
+
+def test_dict_field_values_schema():
+    from tesseract_jax.primitive import _resolve_values_schema
+
+    schemas = {"Vec": {"type": "array", "items": {"type": "number"}}}
+    ref = {"$ref": "#/components/schemas/Vec"}
+    inline = {"type": "array", "items": {"type": "integer"}}
+    assert (
+        _resolve_values_schema({"additionalProperties": ref}, schemas) is schemas["Vec"]
+    )
+    assert _resolve_values_schema({"additionalProperties": inline}, schemas) is inline
+    assert _resolve_values_schema({"additionalProperties": True}, schemas) == {}
+    assert _resolve_values_schema({"type": "object"}, schemas) == {}
+
+
+def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
+    """JAX cannot represent a Float64 field's dtype with x64 off, so leave the input.
+
+    tesseract-core widens it on the host path instead.
+    """
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = dtype_fields_schemas
+    jax.config.update("jax_enable_x64", False)
+    try:
+        out = _validate_and_coerce_inputs(
+            {"f64": jnp.ones(3, dtype=jnp.float32)},
+            schemas["Apply_InputSchema"],
+            schemas,
+        )
+    finally:
+        jax.config.update("jax_enable_x64", True)
+    assert out["f64"].dtype == np.float32
+
+
+def test_schema_without_dtype_examples_is_open():
+    """An array schema that names no dtype is treated as accepting any dtype."""
+    from tesseract_jax.primitive import _schema_dtype
+
+    assert _schema_dtype({"properties": {"dtype": {"type": "string"}}}) is None
+
+
+@pytest.mark.parametrize("array_dtype", ["float32", None])
+def test_schema_array_dtype_takes_precedence(array_dtype):
+    """``array_dtype`` (tesseract-core#898) wins over the ``examples`` fallback."""
+    from tesseract_jax.primitive import _schema_dtype
+
+    prop_schema = {
+        "array_dtype": array_dtype,
+        "properties": {"dtype": {"examples": ["int8"], "enum": ["int8"]}},
+    }
+    expected = None if array_dtype is None else np.dtype(array_dtype)
+    assert _schema_dtype(prop_schema) == expected

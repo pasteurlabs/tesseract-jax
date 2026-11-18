@@ -60,9 +60,10 @@ def _dispatch_vectorized(
                     new_args[i], new_args[i + n_primals]
                 )
 
-    # VJP (only reached with unbatched cotangents): the outputs are batched, so
-    # each cotangent must be too, and a differentiated primal needs one row per
-    # batch element to receive per-example gradients rather than their sum.
+    # VJP: the outputs are batched, so each cotangent must be too, and a
+    # differentiated primal needs one row per batch element to receive
+    # per-example gradients rather than their sum over the batch. This holds
+    # whether or not the cotangents were batched already.
     if params.eval_func == "vector_jacobian_product":
         needs_batch = [*params.has_tangent, *(True,) * (len(new_args) - n_primals)]
         new_args = [
@@ -124,12 +125,6 @@ def expand_dims(
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
-        return sequential(new_args, is_batched_mask, **kwargs)
-
     new_args = [
         arg if batched else jnp.expand_dims(arg, 0)
         for arg, batched in zip(new_args, is_batched_mask, strict=True)
@@ -156,12 +151,6 @@ def broadcast_all(
     kwargs = dict(params=params, tesseract_dispatch_p=tesseract_dispatch_p)
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
-
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
-        return sequential(new_args, is_batched_mask, **kwargs)
 
     new_args = [
         arg if batched else jnp.broadcast_to(arg, (batch_size, *arg.shape))
@@ -191,18 +180,20 @@ def auto_experimental(
     n_primals = params.n_primals
     batch_size = _get_batch_size(new_args, is_batched_mask)
 
-    # Tesseracts don't support batched cotangents
-    if params.eval_func == "vector_jacobian_product" and any(
-        is_batched_mask[n_primals:]
-    ):
-        return sequential(new_args, is_batched_mask, **kwargs)
-
     # Determine which primal args need to support a batch dimension
     if params.eval_func == "jacobian_vector_product":
         needs_ellipsis = [
             b_p or b_t
             for b_p, b_t in zip(
                 is_batched_mask[:n_primals], is_batched_mask[n_primals:], strict=True
+            )
+        ]
+    elif params.eval_func == "vector_jacobian_product":
+        # Differentiated primals are broadcast to the batch (``_dispatch_vectorized``)
+        needs_ellipsis = [
+            b or h
+            for b, h in zip(
+                is_batched_mask[:n_primals], params.has_tangent, strict=True
             )
         ]
     else:

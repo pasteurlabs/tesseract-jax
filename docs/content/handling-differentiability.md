@@ -183,6 +183,19 @@ out = apply_tesseract(tess, {"x": x}, check_static_outputs=False)
 Skipping the check avoids building the keypaths the warning needs. The values the
 caller receives are the same either way.
 
+(input-dtypes)=
+
+## Input dtypes
+
+Before calling the Tesseract, `apply_tesseract` casts each array input whose dtype differs from its schema field to the schema dtype. JAX differentiates through the cast. Under `jax_enable_x64`, a float64 input to a `Float32` field therefore reaches the Tesseract as float32, and its gradient is returned as float64.
+
+- **Float and complex fields** in the schema can be cast to from integers, from any float width, and from real to complex—the same as tesseract-core itself. However, a value too large for the field's dtype becomes `inf`, as in any JAX cast, while tesseract-core would raise instead.
+- **No casting to 64-bit when `jax_enable_x64` is off**, in such cases widening casts are deferred to tesseract-core.
+- **Integer fields** only take widening casts, such as int16 to `Int32`. Narrowing an integer or changing its sign, such as int64 to `Int32`, can wrap silently in JAX, so the input is passed on as is. tesseract-core then checks that the values fit before casting.
+- **Bool fields** only accept bool arrays. Any other dtype raises when the call is traced.
+
+The inputs passed on as is are cast by tesseract-core when they travel through host memory, but not when a GPU transport is configured (see [GPU arrays](gpu-arrays.md)).
+
 ## Higher-order derivatives
 
 Tesseracts only expose first derivatives (the `jacobian`, `jacobian_vector_product` and `vector_jacobian_product` endpoints), so a function that calls `apply_tesseract` can be differentiated once, but not twice:
@@ -239,3 +252,5 @@ g(x, y)           # ⚠️ requests both, then discards "y" (no DCE eagerly)
 ```
 
 Wrapping the outer call in `jax.jit` recovers the pruning in the last case of each block. This only affects how much the Tesseract computes, never the returned value.
+
+Output rows discarded from a `jax.jacrev` result are not pruned, even under `jax.jit`. `jax.jacrev` requests the rows of all outputs as one batch, and DCE can't remove part of a batch. If `f2` returns both outputs, `jax.jit(lambda x, y: jax.jacrev(f2)(x, y)["a"])` still requests the "b" rows. To avoid this, return only the outputs you need from the function you differentiate, as `f` does above.

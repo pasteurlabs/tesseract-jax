@@ -15,9 +15,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
-        with:
-          enable-cache: true
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install pre-commit
         # uv provides the interpreter and puts pre-commit on PATH for the steps

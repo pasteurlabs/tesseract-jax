@@ -135,3 +135,90 @@ def test_vmap_batching(transport):
     np.testing.assert_allclose(
         to_numpy(out), np.asarray(a) * 2.0 + np.asarray(b), rtol=1e-6, atol=0
     )
+
+
+def test_input_cast_to_schema_dtype(transport):
+    """Inputs whose dtype differs from their ``Float32`` fields are cast, on both paths.
+
+    tesseract-core casts these when it decodes a host array but rejects a device
+    array sent over cuda_ipc, so tesseract-jax casts them before the dispatch.
+    ``mask`` is an optional field, whose schema wraps the array in ``anyOf``.
+    """
+    n = 8
+    a = jnp.arange(n, dtype=jnp.int32)
+    b = jnp.ones(n, dtype=jnp.float16)
+    mask = jnp.full((n,), 3.0, dtype=jnp.float64)
+
+    def f(a, b, mask):
+        return apply_tesseract(transport, {"a": a, "b": b, "mask": mask})["c"]
+
+    out = jax.jit(f)(a, b, mask)
+    assert out.dtype == jnp.float32
+    np.testing.assert_allclose(
+        to_numpy(out), (np.arange(n) * 2.0 + 1.0) * 3.0, rtol=1e-6
+    )
+
+
+@pytest.mark.parametrize("use_jit", [True, False], ids=["jit", "eager"])
+def test_grad_wrt_float64_inputs(transport, use_jit):
+    """Gradients wrt float64 inputs to ``Float32`` fields come back in float64.
+
+    JAX differentiates through the cast to the schema dtype, so the Tesseract
+    sees float32 cotangents and the caller gets its own dtype back.
+    """
+    n = 8
+    a = jnp.linspace(0.0, 1.0, n, dtype=jnp.float64)
+    b = jnp.ones(n, dtype=jnp.float64)
+
+    def loss(a, b):
+        return apply_tesseract(transport, {"a": a, "b": b})["c"].sum()
+
+    grad = jax.grad(loss, argnums=(0, 1))
+    if use_jit:
+        grad = jax.jit(grad)
+    ga, gb = grad(a, b)
+    assert ga.dtype == gb.dtype == jnp.float64
+    # c = a*scale + b, scale=2.
+    np.testing.assert_allclose(to_numpy(ga), np.full((n,), 2.0))
+    np.testing.assert_allclose(to_numpy(gb), np.ones(n))
+
+
+def test_jvp_wrt_float64_inputs(transport):
+    """float64 primals and tangents for ``Float32`` fields are cast on the way in."""
+    n = 8
+    a = jnp.linspace(0.0, 1.0, n, dtype=jnp.float64)
+    b = jnp.ones(n, dtype=jnp.float64)
+
+    def f(a, b):
+        return apply_tesseract(transport, {"a": a, "b": b})["c"]
+
+    primal, tangent = jax.jit(lambda a, b: jax.jvp(f, (a, b), (a, b)))(a, b)
+    assert primal.dtype == tangent.dtype == jnp.float32
+    # dc = scale*da + db.
+    np.testing.assert_allclose(to_numpy(tangent), np.asarray(a) * 2.0 + 1.0, rtol=1e-6)
+
+
+@pytest.mark.parametrize("materialize_jacobian", [True, False])
+@pytest.mark.parametrize("jac", [jax.jacfwd, jax.jacrev], ids=["fwd", "bwd"])
+def test_jacobian_wrt_float64_input(transport, jac, materialize_jacobian):
+    """Jacobians wrt a float64 input to a ``Float32`` field take JAX's dtypes.
+
+    ``jacfwd`` gives the output's float32 and ``jacrev`` the caller's float64.
+    The Tesseract itself only sees float32, so the materialized ``jacobian``
+    endpoint's result needs no cast on either transport.
+    """
+    n = 6
+    a = jnp.arange(n, dtype=jnp.float64)
+    b = jnp.ones(n, dtype=jnp.float32)
+
+    def f(a):
+        return apply_tesseract(
+            transport,
+            {"a": a, "b": b},
+            vmap_method="sequential",
+            materialize_jacobian=materialize_jacobian,
+        )["c"]
+
+    out = jax.jit(jac(f))(a)
+    assert out.dtype == (jnp.float32 if jac is jax.jacfwd else jnp.float64)
+    np.testing.assert_allclose(to_numpy(out), np.eye(n) * 2.0, rtol=1e-6)
