@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 
 def pytree_apply_impl(inputs: dict) -> dict:
@@ -178,12 +178,17 @@ def merge_dicts(d1, d2):
     return result
 
 
+@pytest.mark.parametrize("traceable", [False, True])
 @pytest.mark.parametrize("use_jit", [True, False])
-def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit):
-    """Test the primal (apply) endpoint of pytree_tesseract."""
+def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit, traceable):
+    """Test the primal (apply) endpoint of pytree_tesseract, in both dispatch modes.
+
+    The traced case covers dict, list, and nested-model inputs.
+    """
+    tess = to_traceable(pytree_tess) if traceable else pytree_tess
 
     def f(inputs):
-        return apply_tesseract(pytree_tess, inputs=inputs)
+        return apply_tesseract(tess, inputs=inputs)
 
     if use_jit:
         f = jax.jit(f)
@@ -191,17 +196,21 @@ def test_pytree_tesseract_primal(pytree_tess, pytree_tess_inputs, use_jit):
     _ = f(pytree_tess_inputs)
 
 
+@pytest.mark.parametrize("traceable", [False, True])
 @pytest.mark.parametrize("use_jit", [True, False])
 @DIFFABLE_PATHS_PARAMS
-def test_pytree_tesseract_jvp(pytree_tess, pytree_tess_inputs, use_jit, diffable_paths):
-    """Test the JVP endpoint of pytree_tesseract."""
+def test_pytree_tesseract_jvp(
+    pytree_tess, pytree_tess_inputs, use_jit, diffable_paths, traceable
+):
+    """Test the JVP endpoint of pytree_tesseract, in both dispatch modes."""
+    tess = to_traceable(pytree_tess) if traceable else pytree_tess
     diffable_inputs, non_diffable_inputs = split_by_paths(
         pytree_tess_inputs, diffable_paths
     )
 
     def f(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)
-        return apply_tesseract(pytree_tess, inputs=inputs)
+        return apply_tesseract(tess, inputs=inputs)
 
     def f_raw(diffable_inputs):
         inputs = merge_dicts(diffable_inputs, non_diffable_inputs)

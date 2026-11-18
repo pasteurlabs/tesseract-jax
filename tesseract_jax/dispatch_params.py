@@ -59,6 +59,7 @@ class DispatchParams:
             paths — the ``jacobian`` rows or the ``jacobian_vector_product`` output
             tangents that survive trace-time restriction and dead-code elimination.
             ``None`` requests every differentiable output (the un-pruned default).
+        traceable: Whether to inline the endpoint instead of using a host callback.
     """
 
     static_args: tuple[Any, ...]
@@ -78,6 +79,7 @@ class DispatchParams:
     live_input_paths: tuple[str, ...] | None = None
     jac_mode: Literal["fwd", "bwd"] = "bwd"
     live_output_paths: tuple[str, ...] | None = None
+    traceable: bool = False
 
     @property
     def n_primals(self) -> int:

@@ -140,7 +140,7 @@ def test_gpu_lowering_raises_when_transport_but_shim_unavailable(monkeypatch):
     # The guard only resolves params.client's transport before raising, so a
     # stub suffices; suppress typeguard's runtime check of the DispatchParams
     # annotation (armed for the whole package via --typeguard-packages).
-    params = SimpleNamespace(client=_StubClient())
+    params = SimpleNamespace(client=_StubClient(), traceable=False)
 
     with (
         typeguard.suppress_type_checks(),
@@ -168,7 +168,7 @@ def test_gpu_lowering_raises_when_transport_but_no_cuda_device(monkeypatch):
         raise RuntimeError("Unknown backend: 'cuda'")
 
     monkeypatch.setattr(jax, "devices", no_cuda)
-    params = SimpleNamespace(client=_StubClient())
+    params = SimpleNamespace(client=_StubClient(), traceable=False)
 
     with (
         typeguard.suppress_type_checks(),
@@ -200,7 +200,7 @@ def test_gpu_lowering_falls_back_to_host_without_transport(monkeypatch):
         return sentinel
 
     monkeypatch.setattr(primitive, "tesseract_dispatch_lowering", fake_host_lowering)
-    params = SimpleNamespace(client=_HostClient())
+    params = SimpleNamespace(client=_HostClient(), traceable=False)
 
     with typeguard.suppress_type_checks():
         result = primitive.tesseract_dispatch_gpu_lowering(
@@ -404,7 +404,7 @@ def test_gpu_lowering_falls_back_to_host_without_shim_or_requested_transport(
     monkeypatch.setattr(
         primitive, "tesseract_dispatch_lowering", lambda ctx, *a, params: sentinel
     )
-    params = SimpleNamespace(client=_UnrequestedClient())
+    params = SimpleNamespace(client=_UnrequestedClient(), traceable=False)
 
     with (
         typeguard.suppress_type_checks(),
