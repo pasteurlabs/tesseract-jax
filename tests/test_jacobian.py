@@ -436,6 +436,33 @@ def test_vmap_of_jacfwd_restricts_paths_on_the_inner_bind(pytree_tess, vmap_meth
 
 
 @pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
+def test_vmap_of_vjp_without_jacobian_on_fixed_shapes(univariate_tess, vmap_method):
+    """``vmap`` over cotangents at one point, without the ``jacobian`` shortcut.
+
+    The cotangents are batched while the primals are not. A batched VJP request
+    would broadcast the differentiated primals to the batch, which a scalar
+    schema rejects, so ``auto_experimental`` has to fall back to sequential, as
+    it does for the JVP.
+    """
+
+    def f(x, y):
+        return apply_tesseract(
+            univariate_tess,
+            {"x": x, "y": y},
+            vmap_method=vmap_method,
+            materialize_jacobian=False,
+        )["result"]
+
+    _, vjp_fn = jax.vjp(f, jnp.float64(0.3), jnp.float64(0.7))
+    cotangents = jnp.array([1.0, 2.0, -1.0], dtype="float64")
+    got = jax.vmap(vjp_fn)(cotangents)
+    expected = [jnp.stack(g) for g in zip(*map(vjp_fn, cotangents), strict=True)]
+
+    for g, e in zip(got, expected, strict=True):
+        np.testing.assert_allclose(g, e, rtol=1e-6)
+
+
+@pytest.mark.parametrize("vmap_method", FIXED_SHAPE_METHODS)
 def test_materialize_jacobian_false_survives_a_batching_rebind(
     univariate_tess, monkeypatch, vmap_method
 ):

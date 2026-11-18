@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.1] - 2026-10-26
+
+### Bug Fixes
+
+- Let save_intermediates take and return pytrees (#299)
+
 ## [0.5.0] - 2026-10-16
 
 ### Features

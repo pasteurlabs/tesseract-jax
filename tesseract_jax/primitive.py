@@ -444,8 +444,7 @@ def tesseract_dispatch_transpose_rule(
         # The JVP bind returns one output per Tesseract output. The forward VJP's
         # linear operands were only the real cotangents, so return those slots.
         has_cotangent = params.has_cotangent or (True,) * len(jvp)
-        jvp_iter = iter(jvp)
-        cotan_out = [next(jvp_iter) for h in has_cotangent if h]
+        cotan_out = [t for t, h in zip(jvp, has_cotangent, strict=True) if h]
         return tuple([None] * len(primal_args) + cotan_out)
 
     # Raise if a gradient is requested for a non-differentiable input.
@@ -491,8 +490,12 @@ def tesseract_dispatch_transpose_rule(
     vjp = tesseract_dispatch_p.bind(
         *primal_args,
         *cotan_args_,
+        # The VJP's linear operands align with the differentiated inputs, so this
+        # JVP's output-side ``live_output_paths`` do not apply to it.
         params=params.replace(
-            eval_func="vector_jacobian_product", has_cotangent=has_cotangent
+            eval_func="vector_jacobian_product",
+            has_cotangent=has_cotangent,
+            live_output_paths=None,
         ),
     )
 
@@ -990,6 +993,69 @@ def _coerce_array_input(value: Any, field_name: str) -> Any:
     )
 
 
+def _schema_dtype(prop_schema: dict) -> np.dtype | None:
+    """The dtype an array field's schema declares, or ``None`` if it leaves it open.
+
+    Read from ``array_dtype`` where the schema has it (tesseract-core#898).
+    Older schemas only carry the dtype in the ``dtype`` property's ``examples``,
+    with ``float64`` there for an open field too; an open field also accepts
+    complex input, which a ``Float64`` field does not.
+    """
+    if "array_dtype" in prop_schema:
+        name = prop_schema["array_dtype"]
+        return None if name is None else np.dtype(name)
+    dtype_schema = prop_schema.get("properties", {}).get("dtype", {})
+    name = (dtype_schema.get("examples") or [None])[0]
+    is_open = name is None or (
+        name == "float64" and "complex128" in dtype_schema.get("enum", ())
+    )
+    return None if is_open else np.dtype(name)
+
+
+def _cast_to_schema_dtype(value: Any, prop_schema: dict) -> Any:
+    """Differentiable cast of an array to its schema dtype with `jax.numpy`.
+
+    For inexact numerics (float/complex) behaviour is consistent with
+    tesseract-core (cast if ``same_kind``) except for overflows (which
+    are cast to `inf` instead of raising like tesseract-core) or if a cast to
+    float64 is required when ``jax_enable_x64`` is off.
+
+    Integer or bool fields only get widening casts (``safe``; narrowing an
+    integer or changing its sign can silently wrap around).
+    """
+    target = _schema_dtype(prop_schema)
+    if target is None or value.dtype == target:
+        return value
+    if dtypes.canonicalize_dtype(target) != target:
+        return value
+    if np.can_cast(value.dtype, target, casting="safe") or (
+        jnp.issubdtype(target, jnp.inexact)
+        and np.can_cast(value.dtype, target, casting="same_kind")
+    ):
+        return value.astype(target)
+    return value
+
+
+def _optional_array_schema(prop_schema: dict, all_schemas: dict) -> dict | None:
+    """The array member of an ``anyOf`` schema, if it is the only one."""
+    members = [
+        _resolve_ref(m["$ref"], all_schemas) if "$ref" in m else m
+        for m in prop_schema.get("anyOf", ())
+    ]
+    arrays = [m for m in members if _is_array_schema(m)]
+    return arrays[0] if len(arrays) == 1 else None
+
+
+def _resolve_values_schema(prop_schema: dict, all_schemas: dict) -> dict:
+    """The schema of a dict field's values, or an empty schema for anything else."""
+    values_schema = prop_schema.get("additionalProperties")
+    if not isinstance(values_schema, dict):
+        return {}
+    if "$ref" in values_schema:
+        return _resolve_ref(values_schema["$ref"], all_schemas)
+    return values_schema
+
+
 def _validate_and_coerce_inputs(
     inputs: Any, input_schema: dict, all_schemas: dict
 ) -> Any:
@@ -1001,6 +1067,9 @@ def _validate_and_coerce_inputs(
       via ``jnp.asarray()``.
     - Python scalars (int, float, bool, complex) are converted via ``jnp.asarray()``.
     - Python sequences (list, tuple) and other types are rejected with a ``TypeError``.
+    - The array is then cast to the field's schema dtype, for every cast into a
+      float or complex field and widening casts into an integer or bool field
+      (see :func:`_cast_to_schema_dtype`).
     """
     if not isinstance(inputs, dict):
         return inputs
@@ -1022,7 +1091,18 @@ def _validate_and_coerce_inputs(
             prop_schema = _resolve_ref(prop_schema["$ref"], all_schemas)
 
         if _is_array_schema(prop_schema):
-            result[key] = _coerce_array_input(value, key)
+            result[key] = _cast_to_schema_dtype(
+                _coerce_array_input(value, key), prop_schema
+            )
+        elif isinstance(value, dict) and _is_array_schema(
+            values_schema := _resolve_values_schema(prop_schema, all_schemas)
+        ):
+            result[key] = {
+                k: _cast_to_schema_dtype(
+                    _coerce_array_input(v, f"{key}[{k!r}]"), values_schema
+                )
+                for k, v in value.items()
+            }
         elif prop_schema.get("type") == "object" or "properties" in prop_schema:
             # Nested object - recurse
             result[key] = _validate_and_coerce_inputs(value, prop_schema, all_schemas)
@@ -1033,10 +1113,18 @@ def _validate_and_coerce_inputs(
                 items_schema = _resolve_ref(items_schema["$ref"], all_schemas)
             if _is_array_schema(items_schema) and isinstance(value, (list, tuple)):
                 result[key] = type(value)(
-                    _coerce_array_input(v, f"{key}[{i}]") for i, v in enumerate(value)
+                    _cast_to_schema_dtype(
+                        _coerce_array_input(v, f"{key}[{i}]"), items_schema
+                    )
+                    for i, v in enumerate(value)
                 )
             else:
                 result[key] = value
+        elif isinstance(value, (jax.Array, np.ndarray, jc.Tracer)) and (
+            array_schema := _optional_array_schema(prop_schema, all_schemas)
+        ):
+            # An optional array field (`Array[...] | None`) that was given an array.
+            result[key] = _cast_to_schema_dtype(value, array_schema)
         else:
             result[key] = value
 
@@ -1149,8 +1237,8 @@ def apply_tesseract(
             ``False``
                 Batch ``jacobian_vector_product`` according to ``vmap_method`` (e.g.
                 ``vmap_method=auto_experimental`` would broadcast primals to match tangents).
-                If ``vmap_method`` is not ``None``, ``vector_jacobian_product`` will always
-                be called sequentially once per cotangent. ⚠️ If ``vmap_method=None``
+                ``vector_jacobian_product`` is batched the same way, with the
+                differentiated primals broadcast to match the cotangents. ⚠️ If ``vmap_method=None``
                 and ``materialize_jacobian=False`` then batched (co)tangents are not supported
                 (a ``NotImplementedError`` will be raised).
 

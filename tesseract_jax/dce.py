@@ -69,7 +69,7 @@ def live_jvp_output_positions(
 
 
 def tesseract_dispatch_dce_rule(
-    used_outputs: list[bool], eqn: JaxprEqn
+    used_outputs: list[bool], *args: Any
 ) -> tuple[list[bool], JaxprEqn | None]:
     """Drop dead derivative outputs from a ``tesseract_dispatch`` equation.
 
@@ -87,10 +87,15 @@ def tesseract_dispatch_dce_rule(
     regardless of which columns are differentiated, so pruning ``used_inputs``
     would be incorrect. A ``vector_jacobian_product`` prunes its outvars (one
     input-gradient per differentiated primal), never its invars.
+
+    JAX 0.12 calls DCE rules as ``(used_outputs, live_ins, eqn)``; earlier
+    releases as ``(used_outputs, eqn)``. Both are accepted, and whatever was
+    passed is forwarded unchanged to JAX's default rule.
     """
+    eqn = args[-1]
     # Effects-aware whole-equation drop (matches the un-pruned default exactly).
     if not any(used_outputs):
-        return pe._default_dce_rule(used_outputs, eqn)
+        return pe._default_dce_rule(used_outputs, *args)
 
     eval_func = eqn.params["params"].eval_func
     if eval_func == "jacobian":
@@ -99,7 +104,7 @@ def tesseract_dispatch_dce_rule(
         return _dce_jacobian_vector_product(used_outputs, eqn)
     if eval_func == "vector_jacobian_product":
         return _dce_vector_jacobian_product(used_outputs, eqn)
-    return pe._default_dce_rule(used_outputs, eqn)
+    return pe._default_dce_rule(used_outputs, *args)
 
 
 def _dce_jacobian(
