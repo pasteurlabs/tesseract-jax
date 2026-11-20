@@ -1019,10 +1019,18 @@ class _ArrayNode:
 
 @dataclass(frozen=True)
 class _ObjectNode:
-    """A model (``properties``) and/or a dict (``additionalProperties``)."""
+    """A model (``properties``) and/or a dict (``additionalProperties``).
+
+    ``properties`` only holds the fields with arrays below them. ``keys``,
+    ``closed`` and ``tags`` (the allowed values of each ``Literal`` field) are
+    kept to tell the models in a union apart.
+    """
 
     properties: dict[str, "_SchemaNode"]
     values: "_SchemaNode"
+    keys: frozenset[str] = frozenset()
+    closed: bool = False
+    tags: dict[str, tuple] | None = None
 
 
 @dataclass(frozen=True)
@@ -1076,18 +1084,41 @@ def _compile_schema(
         return compile_(all_of[0])
     alternatives = [*schema.get("anyOf", ()), *schema.get("oneOf", ())]
     if alternatives:
-        members = tuple(compile_(m) for m in alternatives)
-        return _UnionNode(members) if any(members) else None
+        members = []
+        for m in map(compile_, alternatives):
+            # Flatten nested unions, such as an optional discriminated union
+            members.extend(m.members if isinstance(m, _UnionNode) else [m])
+        return _UnionNode(tuple(members)) if any(members) else None
     if "properties" in schema or "additionalProperties" in schema:
-        properties = {k: compile_(v) for k, v in schema.get("properties", {}).items()}
+        declared = schema.get("properties", {})
+        properties = {k: compile_(v) for k, v in declared.items()}
         properties = {k: v for k, v in properties.items() if v is not None}
         values = compile_(schema.get("additionalProperties"))
-        return _ObjectNode(properties, values) if properties or values else None
+        if not (properties or values):
+            return None
+        return _ObjectNode(
+            properties,
+            values,
+            keys=frozenset(declared),
+            closed=schema.get("additionalProperties") is False,
+            tags={k: _literal_values(v, all_schemas) for k, v in declared.items()},
+        )
     if "prefixItems" in schema or "items" in schema:
         prefix = tuple(compile_(m) for m in schema.get("prefixItems", ()))
         items = compile_(schema.get("items"))
         return _SequenceNode(prefix, items) if any(prefix) or items else None
     return None
+
+
+def _literal_values(schema: Any, all_schemas: dict) -> tuple | None:
+    """The values a ``const``/``enum`` schema allows, or ``None`` for any other schema."""
+    if isinstance(schema, dict) and "$ref" in schema:
+        schema = _resolve_ref(schema["$ref"], all_schemas)
+    if not isinstance(schema, dict):
+        return None
+    if "const" in schema:
+        return (schema["const"],)
+    return tuple(schema["enum"]) if "enum" in schema else None
 
 
 def _is_array_value(value: Any) -> bool:
@@ -1099,8 +1130,10 @@ def _pick_union_member(value: Any, node: _UnionNode) -> _SchemaNode:
 
     Arrays go to the union's array member, dicts to its object member and
     lists or tuples to its sequence member, if there is exactly one such
-    member. Anything else, a scalar included, is left as it is: in
-    ``float | Array`` a scalar is a valid float, so it isn't coerced.
+    member. Among several models, a dict goes to those whose keys and
+    ``Literal`` fields it fits, so a tagged or discriminated union picks the
+    model its tag names. Anything else, a scalar included, is left as it is:
+    in ``float | Array`` a scalar is a valid float, so it isn't coerced.
     """
     if _is_array_value(value):
         kind = _ArrayNode
@@ -1112,11 +1145,16 @@ def _pick_union_member(value: Any, node: _UnionNode) -> _SchemaNode:
         return None
     candidates = [m for m in node.members if isinstance(m, kind)]
     if kind is _ObjectNode and len(candidates) > 1:
-        # Several models: keep the ones that declare every key the value has.
+        # Several models: keep the ones whose keys and Literal tags fit.
         candidates = [
             m
             for m in candidates
-            if m.values is not None or value.keys() <= m.properties.keys()
+            if (not m.closed or value.keys() <= m.keys)
+            and all(
+                value[k] in allowed
+                for k, allowed in (m.tags or {}).items()
+                if allowed is not None and k in value
+            )
         ]
     return candidates[0] if len(candidates) == 1 else None
 

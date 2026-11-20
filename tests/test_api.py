@@ -1232,9 +1232,9 @@ def test_64bit_field_not_cast_without_x64(dtype_fields_schemas):
 
 
 _NESTED_FIELDS_API = """
-from typing import NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from tesseract_core.runtime import Array, Differentiable
 
 A = Differentiable[Array[(None,), "float32"]]
@@ -1249,6 +1249,25 @@ class Sub(BaseModel):
     x: A
 
 
+class Labelled(BaseModel):
+    x: A
+    label: str
+
+
+class Other(BaseModel):
+    y: A
+
+
+class Cat(BaseModel):
+    kind: Literal["cat"]
+    x: A
+
+
+class Dog(BaseModel):
+    kind: Literal["dog"]
+    x: Array[(None,), "float64"]
+
+
 class InputSchema(BaseModel):
     lst: list[A] = []
     tup: tuple[A, A]
@@ -1261,6 +1280,9 @@ class InputSchema(BaseModel):
     u: Sub | A
     lo: list[A | None] = []
     plain: Array[(None,), "float32"]
+    labelled_or_other: Labelled | Other | None = None
+    pet: Cat | Dog | None = None
+    tagged_pet: Annotated[Cat | Dog, Field(discriminator="kind")] | None = None
 
 
 class OutputSchema(BaseModel):
@@ -1298,6 +1320,12 @@ _X64 = np.ones(2, dtype=np.float64)
         ({"u": _X64}, lambda o: o["u"]),
         ({"u": {"x": _X64}}, lambda o: o["u"]["x"]),
         ({"lo": [None, _X64]}, lambda o: o["lo"][1]),
+        (
+            {"labelled_or_other": {"x": _X64, "label": "a"}},
+            lambda o: o["labelled_or_other"]["x"],
+        ),
+        ({"pet": {"kind": "cat", "x": _X64}}, lambda o: o["pet"]["x"]),
+        ({"tagged_pet": {"kind": "cat", "x": _X64}}, lambda o: o["tagged_pet"]["x"]),
     ],
     ids=lambda v: next(iter(v)) if isinstance(v, dict) else "",
 )
@@ -1394,3 +1422,17 @@ def test_schema_array_dtype_takes_precedence(array_dtype):
     }
     expected = None if array_dtype is None else np.dtype(array_dtype)
     assert _schema_dtype(prop_schema) == expected
+
+
+@pytest.mark.parametrize("field", ["pet", "tagged_pet"])
+def test_union_member_picked_by_literal_tag(nested_fields_schemas, field):
+    """Models with the same keys are told apart by their ``Literal`` field."""
+    from tesseract_jax.primitive import _validate_and_coerce_inputs
+
+    schemas = nested_fields_schemas
+    out = _validate_and_coerce_inputs(
+        {field: {"kind": "dog", "x": np.ones(2, dtype=np.float32)}},
+        schemas["Apply_InputSchema"],
+        schemas,
+    )
+    assert out[field]["x"].dtype == np.float64
