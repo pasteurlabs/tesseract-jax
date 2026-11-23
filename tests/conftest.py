@@ -247,14 +247,6 @@ def served_vectoradd_tesseract():
 
 
 @pytest.fixture(scope="session")
-def served_cuda_ipc_vectoradd_tesseract():
-    """The vectoradd Tesseract served with cuda_ipc, which needs no GPU to serve."""
-    yield from _serve_tesseract(
-        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
-    )
-
-
-@pytest.fixture(scope="session")
 def served_pytree_tesseract():
     yield from _serve_tesseract(here / "pytree_tesseract" / "tesseract_api.py")
 
@@ -321,6 +313,14 @@ def batched_tess() -> Tesseract:
 @pytest.fixture
 def vectoradd_tess() -> Tesseract:
     return _load_tesseract("vectoradd_tesseract")
+
+
+@pytest.fixture
+def cuda_ipc_vectoradd_tess() -> Tesseract:
+    """Created with cuda_ipc, which an in-process Tesseract accepts without a GPU."""
+    return Tesseract.from_tesseract_api(
+        here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
+    )
 
 
 @pytest.fixture

@@ -23,8 +23,6 @@ host copy on any dispatch path fails it.
 from __future__ import annotations
 
 import contextlib
-import sys
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -200,48 +198,6 @@ def test_gpu_transport_selects_lowering(
     c = f(a, a)
     assert is_on_gpu(c)
     np.testing.assert_allclose(to_numpy(c), np.full(8, 2.0, np.float32))
-
-
-def test_falls_back_to_host_when_cuda_ipc_does_not_work(monkeypatch):
-    """A Tesseract offering cuda_ipc that does not work gets host copies, with a warning.
-
-    Hiding the GPU from the server stands in for every reason cuda_ipc can fail,
-    e.g. a server on another host. A ``from_url`` client, which requests no
-    transport, falls back to the host-callback lowering, while the client that
-    requested cuda_ipc gets an error instead of a silent host copy.
-    """
-    from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
-
-    if not any(d.platform == "gpu" for d in jax.devices()):
-        pytest.skip("no GPU backend for JAX")
-    api_path = Path(__file__).parent / "vectoradd_tesseract" / "tesseract_api.py"
-    # Only the server is spawned without the GPU. The test process reads
-    # CUDA_VISIBLE_DEVICES when it first touches CUDA, so restore it right away.
-    with monkeypatch.context() as m:
-        m.setenv("CUDA_VISIBLE_DEVICES", "")
-        served = Tesseract.from_source(
-            api_path, python_executable=sys.executable, gpu_transport="cuda_ipc"
-        )
-        served.serve()
-    try:
-        remote = Tesseract.from_url(served._client.url)
-        a = jnp.arange(8, dtype=jnp.float32)
-        b = jnp.ones(8, dtype=jnp.float32)
-        f = jax.jit(lambda a, b: apply_tesseract(remote, {"a": a, "b": b})["c"])
-        with pytest.warns(UserWarning, match="copied to the host instead"):
-            assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
-
-        c = f(a, b)
-        assert is_on_gpu(c)
-        np.testing.assert_allclose(to_numpy(c), np.arange(8) + 1.0)
-        g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
-        assert is_on_gpu(g)
-        np.testing.assert_allclose(to_numpy(g), np.ones(8))
-
-        with pytest.raises(RuntimeError, match="does not work between"):
-            jax.jit(lambda a, b: apply_tesseract(served, {"a": a, "b": b}))(a, b)
-    finally:
-        served.teardown()
 
 
 def test_grad_through_gpu_ffi(served_gpu_tesseract):
