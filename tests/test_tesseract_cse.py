@@ -130,26 +130,24 @@ def test_jaxeract_wrappers_compare_equal(vectoradd_tess):
     assert Jaxeract(vectoradd_tess) != object()
 
 
-def test_jaxeract_views_are_distinct(served_cuda_ipc_vectoradd_tesseract):
+def test_jaxeract_views_are_distinct(cuda_ipc_vectoradd_tess):
     """A view with its own encoding lowers separately from the Tesseract it views.
 
     Each lowering resolves the GPU transport of its own Tesseract, so a view
     requesting ``"none"`` must not be commoned up with one that uses cuda_ipc.
     """
-    tess = served_cuda_ipc_vectoradd_tesseract
+    tess = cuda_ipc_vectoradd_tess
     host = Jaxeract(tess.with_encoding(gpu_transport="none"))
     assert Jaxeract(tess) != host
 
 
-def test_jaxeract_views_with_one_encoding_compare_equal(
-    served_cuda_ipc_vectoradd_tesseract,
-):
+def test_jaxeract_views_with_one_encoding_compare_equal(cuda_ipc_vectoradd_tess):
     """Two views requesting the same encoding wrap interchangeable Tesseracts.
 
     ``with_encoding`` returns a new object every time, so a caller that builds a
     view per call would otherwise lower (and on GPU, register) every call anew.
     """
-    tess = served_cuda_ipc_vectoradd_tesseract
+    tess = cuda_ipc_vectoradd_tess
     view1 = Jaxeract(tess.with_encoding(gpu_transport="none"))
     view2 = Jaxeract(tess.with_encoding(gpu_transport="none"))
     assert view1 == view2

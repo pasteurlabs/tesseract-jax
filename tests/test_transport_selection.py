@@ -1,14 +1,15 @@
 # Copyright 2025 Pasteur Labs. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""GPU-free tests for GPU transport selection on the Jaxeract wrapper.
+"""Tests for GPU transport selection on the Jaxeract wrapper, without GPU arrays.
 
 Which transport a call uses gates the GPU (FFI) lowering, so these check that
 only the ``cuda`` lowering asks the Tesseract for one, that the CPU lowering
 always requests host outputs, and that a transport the FFI path cannot drive is
 rejected. Whether a transport works is tesseract-core's to find out (see
 ``Tesseract.resolve_gpu_transport``), and the GPU tests in ``test_gpu_direct.py``
-exercise the transport end to end.
+exercise the transport end to end. A Tesseract can only be served with cuda_ipc
+where it can use a GPU, so the tests that serve one are marked ``gpu``.
 """
 
 from __future__ import annotations
@@ -76,19 +77,20 @@ def test_equality_and_hash_key_on_the_tesseract():
     assert a != Jaxeract(_fake_client())
 
 
-@pytest.mark.parametrize("client", ["served", "in_process"])
-def test_cuda_ipc_tesseract_runs_on_cpu(request, client):
-    """A Tesseract created with cuda_ipc stays usable from CPU-only JAX.
+@pytest.mark.parametrize(
+    "tess_fixture",
+    [
+        pytest.param("served_gpu_vectoradd_tesseract", marks=pytest.mark.gpu),
+        "cuda_ipc_vectoradd_tess",
+    ],
+)
+def test_cuda_ipc_tesseract_runs_on_cpu(request, tess_fixture):
+    """A Tesseract created with cuda_ipc stays usable from JAX on the CPU.
 
     Only the ``cuda`` lowering acts on the transport, so CPU arrays take the host
     callback instead of failing for lack of a CUDA device.
     """
-    if client == "served":
-        tess = request.getfixturevalue("served_cuda_ipc_vectoradd_tesseract")
-    else:
-        tess = Tesseract.from_tesseract_api(
-            here / "vectoradd_tesseract" / "tesseract_api.py", gpu_transport="cuda_ipc"
-        )
+    tess = request.getfixturevalue(tess_fixture)
 
     def f(a, b):
         return apply_tesseract(tess, {"a": a, "b": b})["c"]
@@ -103,17 +105,19 @@ def test_cuda_ipc_tesseract_runs_on_cpu(request, client):
     np.testing.assert_array_equal(grad_a, np.ones(8))
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("client", ["served", "from_url"])
 def test_host_lowering_requests_host_outputs(
-    served_cuda_ipc_vectoradd_tesseract, monkeypatch, client
+    served_gpu_vectoradd_tesseract, monkeypatch, client
 ):
     """Compiled for CPU, no dispatch asks for GPU arrays by reference.
 
     Both the client that requests cuda_ipc and a ``from_url`` client ask for
     ``gpu_transport=none``. The host callback moves the arrays through the host
-    anyway. Neither checks whether cuda_ipc works, which would need a GPU.
+    anyway. Neither checks whether cuda_ipc works, which takes a GPU exchange
+    with the Tesseract that the host callback has no use for.
     """
-    tess = served_cuda_ipc_vectoradd_tesseract
+    tess = served_gpu_vectoradd_tesseract
     if client == "from_url":
         tess = Tesseract.from_url(tess._client.url)
     http = tess._client

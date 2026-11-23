@@ -75,38 +75,25 @@ def test_container_round_trip_stays_on_device(gpu_container_image, monkeypatch, 
         np.testing.assert_allclose(np.asarray(g), np.full(64, 2.0))
 
 
-def test_container_without_a_shared_gpu_gets_host_copies(gpu_container_image):
-    """A container offering cuda_ipc that it cannot use leads to host copies.
+def test_container_without_a_gpu_gets_host_copies(gpu_container_image):
+    """A container that cannot see the GPU leads to host copies.
 
-    A ``from_url`` client, which requests no transport, falls back to the
-    host-callback lowering with a warning and still gets correct results on the
-    GPU. The client that requested cuda_ipc gets an error instead of a silent
-    host copy.
+    Served without a GPU transport, it offers only ``none``, so a ``from_url``
+    client, which requests no transport, takes the host-callback lowering and
+    still gets correct results on the GPU.
     """
     from tesseract_jax.gpu_ffi import FFI_TARGET_NAME
 
-    with Tesseract.from_image(
-        gpu_container_image,
-        gpus=["all"],
-        gpu_transport="cuda_ipc",
-        # The container sees no GPU, so it computes with NumPy
-        environment={
-            "TESSERACT_JAX_TEST_ARRAY_MODULE": "numpy",
-            "CUDA_VISIBLE_DEVICES": "",
-        },
-    ) as served:
+    # Without ``gpus``, the container sees no GPU and computes with NumPy
+    with Tesseract.from_image(gpu_container_image) as served:
         remote = Tesseract.from_url(served._client.url)
         a = jnp.arange(8, dtype=jnp.float32)
         b = jnp.ones(8, dtype=jnp.float32)
         f = jax.jit(lambda a, b: apply_tesseract(remote, {"a": a, "b": b})["c"])
-        with pytest.warns(UserWarning, match="copied to the host instead"):
-            assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
+        assert FFI_TARGET_NAME not in f.lower(a, b).as_text()
 
         c = f(a, b)
         assert is_on_gpu(c)
         np.testing.assert_allclose(np.asarray(c), 2 * np.arange(8) + 1.0)
         g = jax.jit(jax.grad(lambda a: f(a, b).sum()))(a)
         np.testing.assert_allclose(np.asarray(g), np.full(8, 2.0))
-
-        with pytest.raises(RuntimeError, match="does not work between"):
-            jax.jit(lambda a, b: apply_tesseract(served, {"a": a, "b": b}))(a, b)
