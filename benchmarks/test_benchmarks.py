@@ -22,7 +22,7 @@ from conftest import (
     create_test_array,
 )
 
-from tesseract_jax import apply_tesseract
+from tesseract_jax import apply_tesseract, to_traceable
 
 jax.config.update("jax_enable_x64", True)
 
@@ -55,7 +55,7 @@ class TestNoopApi:
     @pytest.fixture(autouse=True)
     def setup_inputs(self, noop_tesseract_api, array_size):
         jax.clear_caches()
-        self.tess = noop_tesseract_api
+        self.tess = to_traceable(noop_tesseract_api)
         self.inputs = {"data": create_test_array(array_size)}
         self.inputs_f64 = {"data": create_test_array(array_size, dtype="float64")}
         self.batched_inputs = {
@@ -63,7 +63,7 @@ class TestNoopApi:
         }
 
     def test_noop_api_apply_jit(self, benchmark):
-        """Benchmark jitted apply (warm cache) via from_tesseract_api."""
+        """Benchmark jitted apply (warm cache) via from_tesseract_api, traced."""
 
         @jax.jit
         def fn(inputs):
@@ -73,7 +73,7 @@ class TestNoopApi:
         benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs)
 
     def test_noop_api_cast_float64(self, benchmark):
-        """Benchmark jitted apply with float64 input (expects float32)."""
+        """Benchmark jitted apply with float64 input (expects float32), traced."""
 
         @jax.jit
         def fn(inputs):
@@ -83,13 +83,15 @@ class TestNoopApi:
         benchmark(lambda inputs: jax.block_until_ready(fn(inputs)), self.inputs_f64)
 
     def test_noop_api_vmap(self, benchmark, array_size):
-        """Benchmark vmap (batch_size=10) via from_tesseract_api."""
+        """Benchmark vmap (batch_size=10) via from_tesseract_api, traced."""
         if array_size > MAX_VMAP_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds vmap limit")
         fn = jax.jit(
             jax.vmap(
                 lambda data: apply_tesseract(
-                    self.tess, {"data": data}, vmap_method="auto_experimental"
+                    self.tess,
+                    {"data": data},
+                    vmap_method="auto_experimental",
                 )
             )
         )
@@ -103,12 +105,12 @@ class TestVectoraddApi:
     @pytest.fixture(autouse=True)
     def setup_inputs(self, vectoradd_tesseract_api, array_size):
         jax.clear_caches()
-        self.tess = vectoradd_tesseract_api
+        self.tess = to_traceable(vectoradd_tesseract_api)
         self.a_v = create_test_array(array_size)
         self.b_v = create_test_array(array_size)
 
     def test_vectoradd_api_partial_vjp(self, benchmark):
-        """Benchmark reverse-mode AD (vjp) of vector_add.result w.r.t. a.v."""
+        """Benchmark reverse-mode AD (vjp) of vector_add.result w.r.t. a.v, traced."""
         b_v = self.b_v
         a_v = self.a_v
         cotangent = jnp.ones_like(a_v)
@@ -128,7 +130,7 @@ class TestVectoraddApi:
         benchmark(lambda args: jax.block_until_ready(do_vjp(args)), (a_v, cotangent))
 
     def test_vectoradd_api_jacfwd(self, benchmark, array_size):
-        """Forward-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
+        """Forward-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v, traced."""
         if array_size > MAX_JAC_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds jacobian limit")
         b_v = self.b_v
@@ -146,7 +148,7 @@ class TestVectoraddApi:
         benchmark(lambda a: jax.block_until_ready(jac_fn(a)), self.a_v)
 
     def test_vectoradd_api_jacrev(self, benchmark, array_size):
-        """Reverse-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v."""
+        """Reverse-mode Jacobian (NxN matrix) of vector_add.result w.r.t. a.v, traced."""
         if array_size > MAX_JAC_ARRAY_SIZE:
             pytest.skip(f"array_size {array_size} exceeds jacobian limit")
         b_v = self.b_v

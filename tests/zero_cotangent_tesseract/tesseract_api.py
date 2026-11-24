@@ -27,10 +27,10 @@ class OutputSchema(BaseModel):
     unsafe: Differentiable[Array[(None,), Float64]]
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
+def apply(inputs: InputSchema) -> dict:
     # d/dx sqrt(x) is 1 / (2 sqrt(x)), which is NaN/inf at x = 0.
     x = as_jax_array(inputs.x)
-    return OutputSchema(safe=x * 2.0, unsafe=jnp.sqrt(x))
+    return {"safe": x * 2.0, "unsafe": jnp.sqrt(x)}
 
 
 def abstract_eval(abstract_inputs):

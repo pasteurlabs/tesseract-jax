@@ -13,9 +13,9 @@ class OutputSchema(BaseModel):
     result: Differentiable[Array[..., Float32]]
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
+def apply(inputs: InputSchema) -> dict:
     """Identity function - returns input unchanged."""
-    return OutputSchema(result=inputs.data)
+    return {"result": inputs.data}
 
 
 def abstract_eval(abstract_inputs):

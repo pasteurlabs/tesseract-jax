@@ -51,16 +51,17 @@ class OutputSchema(BaseModel):
     )
 
 
-def apply(inputs: InputSchema) -> OutputSchema:
+def apply(inputs: InputSchema) -> dict:
     """Gather `weights` at `indices`, and count how often each index appears."""
+    # jnp.bincount needs a static `length` under jit.
     indices = as_jax_array(inputs.indices)
     gathered = as_jax_array(inputs.weights)[indices]
-    return OutputSchema(
-        gathered=gathered,
-        count=jnp.bincount(indices, length=indices.shape[0]).astype(jnp.int32),
-        magnitude=jnp.abs(gathered).astype(jnp.float32),
-        phase=jnp.exp(1j * gathered).astype(jnp.complex64),
-    )
+    return {
+        "gathered": gathered,
+        "count": jnp.bincount(indices, length=indices.shape[0]).astype(jnp.int32),
+        "magnitude": jnp.abs(gathered).astype(jnp.float32),
+        "phase": jnp.exp(1j * gathered).astype(jnp.complex64),
+    }
 
 
 def abstract_eval(abstract_inputs):
