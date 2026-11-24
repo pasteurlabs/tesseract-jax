@@ -186,11 +186,14 @@ def _nondiff_input_tangent_error(path: str) -> ValueError:
         f"If this input should be differentiable, mark it as `Differentiable[...]` in "
         f"the Tesseract input schema. Otherwise, exclude it from the differentiated "
         f"function's argument list (using a closure or the `argnums` parameter), or "
-        f"apply jax.lax.stop_gradient to it before passing to apply_tesseract. This "
-        f"also happens when the value is a non-differentiable output of another "
-        f"Tesseract, even if you never differentiate with respect to it: mark both "
-        f"that output and this input as `Differentiable[...]`, or, if it carries no "
-        f"gradient, wrap it in jax.lax.stop_gradient before passing it on."
+        f"apply jax.lax.stop_gradient to it before passing it to apply_tesseract."
+        f"\n\n"
+        f"Note this error can also be raised when '{path}' is (or is computed from) "
+        f"a non-differentiable output of another Tesseract, even if you never "
+        f"differentiate with respect to it. Either mark both that output and this "
+        f"input as `Differentiable[...]`, or, if the value does not depend on the "
+        f"inputs you differentiate wrap it in jax.lax.stop_gradient "
+        f"before passing it on."
     )
 
 
