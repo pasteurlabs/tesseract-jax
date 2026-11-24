@@ -179,6 +179,21 @@ def tesseract_dispatch_abstract_eval(
     return tuple(jax.core.ShapedArray(aval.shape, aval.dtype) for aval in selected)
 
 
+def _nondiff_input_tangent_error(path: str) -> ValueError:
+    """Error for a tangent that reaches an input the schema does not mark differentiable."""
+    return ValueError(
+        f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
+        f"If this input should be differentiable, mark it as `Differentiable[...]` in "
+        f"the Tesseract input schema. Otherwise, exclude it from the differentiated "
+        f"function's argument list (using a closure or the `argnums` parameter), or "
+        f"apply jax.lax.stop_gradient to it before passing to apply_tesseract. This "
+        f"also happens when the value is a non-differentiable output of another "
+        f"Tesseract, even if you never differentiate with respect to it: mark both "
+        f"that output and this input as `Differentiable[...]`, or, if it carries no "
+        f"gradient, wrap it in jax.lax.stop_gradient before passing it on."
+    )
+
+
 def tesseract_dispatch_jvp_rule(
     in_args: tuple[ArrayLike, ...],
     tan_args: tuple[ArrayLike | ad.Zero, ...],
@@ -228,14 +243,7 @@ def tesseract_dispatch_jvp_rule(
         )
         for path, val in _flat_tangents.items():
             if val is None:
-                raise ValueError(
-                    f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
-                    f"If this input should be differentiable, mark it as "
-                    f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
-                    f"exclude it from the differentiated function's argument list "
-                    f"(using a closure or the `argnums` parameter), or apply "
-                    f"jax.lax.stop_gradient to it before passing to apply_tesseract."
-                )
+                raise _nondiff_input_tangent_error(path)
         # Differentiating `apply` means differentiating wrt its primals.
         tan_args_ = _instantiate_zeros(tan_args)
     else:
@@ -443,14 +451,7 @@ def tesseract_dispatch_transpose_rule(
     ]
     for path in _vjp_inputs_with_tangent:
         if _flat_inputs[path] is None:
-            raise ValueError(
-                f"Non-symbolic-zero tangent provided for non-differentiable input '{path}'. "
-                f"If this input should be differentiable, mark it as "
-                f"`Differentiable[...]` in the Tesseract input schema. Otherwise, "
-                f"exclude it from the differentiated function's argument list "
-                f"(using a closure or the `argnums` parameter), or apply "
-                f"jax.lax.stop_gradient to it before passing to apply_tesseract."
-            )
+            raise _nondiff_input_tangent_error(path)
 
     # An output whose cotangent is a symbolic zero adds nothing to the input
     # gradients, so record which outputs carry a real cotangent and skip the rest

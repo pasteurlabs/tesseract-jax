@@ -934,6 +934,37 @@ def test_gather_tesseract_integer_io(gather_tess):
 
 
 @pytest.mark.parametrize("use_jit", [True, False])
+def test_nondiff_output_into_nondiff_input(gather_tess, vectoradd_tess, use_jit):
+    """Chaining a non-differentiable output into a non-differentiable input.
+
+    The error names stop_gradient as the fix, and the fix gives the gradient of
+    the differentiable path. See #295.
+    """
+    weights = np.array([1.0, 2.0, 3.0], dtype="float32")
+    indices = np.array([0, 2, 2], dtype="int32")
+
+    def loss(weights, stop):
+        out = apply_tesseract(
+            gather_tess, inputs=dict(weights=weights, indices=indices)
+        )
+        b = jax.lax.stop_gradient(out["magnitude"]) if stop else out["magnitude"]
+        return apply_tesseract(vectoradd_tess, inputs=dict(a=out["gathered"], b=b))[
+            "c"
+        ].sum()
+
+    grad_fn = jax.grad(loss)
+    if use_jit:
+        grad_fn = jax.jit(grad_fn, static_argnums=1)
+
+    with pytest.raises(
+        ValueError, match=r"another Tesseract.*Differentiable.*stop_gradient"
+    ):
+        grad_fn(weights, False)
+
+    np.testing.assert_allclose(grad_fn(weights, True), [1.0, 0.0, 2.0], rtol=1e-6)
+
+
+@pytest.mark.parametrize("use_jit", [True, False])
 def test_discarded_tangent_fill_value(gather_tess, use_jit):
     """A non-differentiable output's tangent is a slot the caller can read.
 
